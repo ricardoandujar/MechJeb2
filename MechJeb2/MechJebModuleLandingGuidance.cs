@@ -142,6 +142,8 @@ namespace MuMech
 
                 Core.Landing.DeployGears =
                     GUILayout.Toggle(Core.Landing.DeployGears, Localizer.Format("#MechJeb_LandingGuidance_checkbox2")); //Deploy Landing Gear
+                Core.Landing.FlySafe =
+                    GUILayout.Toggle(Core.Landing.FlySafe, Localizer.Format("#MechJeb_LandingGuidance_checkbox10")); // Safe Mode
                 GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_label4"), Core.Landing.LimitGearsStage, "", 35); //"Stage Limit:"
                 Core.Landing.DeployChutes =
                     GUILayout.Toggle(Core.Landing.DeployChutes, Localizer.Format("#MechJeb_LandingGuidance_checkbox3")); //Deploy Parachutes

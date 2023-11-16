@@ -1,4 +1,4 @@
-using KSP.Localization;
+﻿using KSP.Localization;
 
 namespace MuMech
 {
@@ -15,7 +15,7 @@ namespace MuMech
                 if (Orbit.PeA < -0.1 * MainBody.Radius)
                 {
                     Core.Thrust.TargetThrottle = 0;
-                    return new FinalDescent(Core);
+                    return new FinalDescent(Core, Core.Thrust.TargetThrottle);
                 }
 
                 Core.Attitude.attitudeTo(Vector3d.back, AttitudeReference.ORBIT_HORIZONTAL, Core.Landing);

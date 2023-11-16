@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using JetBrains.Annotations;
 using KSP.Localization;
 using ModuleWheels;
@@ -9,7 +9,7 @@ namespace MuMech
 {
     // Landing AP TODO / BUG list
     // - Add a parameter to define how steep the descent will be ( fraction of Orbit ? )
-    // - Fix the auto wrap stop start dance
+    // - Fix the auto warp stop start dance
     // - Replace the openGL code with a LineRenderer
     // -
     [UsedImplicitly]
@@ -35,6 +35,9 @@ namespace MuMech
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public bool RCSAdjustment = true;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public bool FlySafe = true;
 
         // This is used to adjust the height at which the parachutes semi deploy as a means of
         // targeting the landing in an atmosphere where it is not possible to control atitude
@@ -206,7 +209,7 @@ namespace MuMech
 
         // Estimate the delta-V of the correction burn that would be required to put us on
         // course for the target
-        public Vector3d ComputeCourseCorrection(bool allowPrograde)
+        public Vector3d ComputeCourseCorrection(bool allowPrograde, double perturbDeltaV)
         {
             // actualLandingPosition is the predicted actual landing position
             Vector3d actualLandingPosition = _rotatedLandingSite - MainBody.position;
@@ -238,10 +241,11 @@ namespace MuMech
             for (int i = 0; i < 3; i++)
             {
                 //warning: hard experience shows that setting this too low leads to bewildering bugs due to finite precision of Orbit functions
-                const double PERTURBATION_DELTA_V = 1;
+                // use perturbDeltaV instead
+                //const double PERTURBATION_DELTA_V = 1;
 
                 Orbit perturbedOrbit =
-                    Orbit.PerturbedOrbit(VesselState.time, PERTURBATION_DELTA_V * perturbationDirections[i]); //compute the perturbed orbit
+                    Orbit.PerturbedOrbit(VesselState.time, perturbDeltaV * perturbationDirections[i]); //compute the perturbed orbit
 
                 double perturbedLandingTime = perturbedOrbit.PeR < endRadius
                     ? perturbedOrbit.NextTimeOfRadius(VesselState.time, endRadius)
@@ -259,7 +263,7 @@ namespace MuMech
                 landingDelta = Vector3d.Exclude(actualLandingPosition, landingDelta);
 
                 //normalize by the delta-V considered, so that deltas now has units of meters per (meter/second) [i.e., seconds]
-                deltas[i] = landingDelta / PERTURBATION_DELTA_V;
+                deltas[i] = landingDelta / perturbDeltaV;
             }
 
             // Now deltas stores the predicted offsets in landing position produced by each of the three perturbations.
