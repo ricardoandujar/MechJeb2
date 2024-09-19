@@ -134,8 +134,7 @@ namespace MuMech
                     GUILayout.EndHorizontal();
                 }
 
-                GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_label3"), Core.Landing.TouchdownSpeed, "m/s",
-                    35); //Touchdown speed:
+                GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_label3"), Core.Landing.TouchdownSpeed, "m/s", 35); //Touchdown speed:
 
                 if (Core.Landing != null)
                     Core.Node.Autowarp = GUILayout.Toggle(Core.Node.Autowarp, Localizer.Format("#MechJeb_LandingGuidance_checkbox1")); //Auto-warp
@@ -153,6 +152,14 @@ namespace MuMech
                 Core.Landing.RCSAdjustment =
                     GUILayout.Toggle(Core.Landing.RCSAdjustment,
                         Localizer.Format("#MechJeb_LandingGuidance_checkbox4")); //Use RCS for small adjustment
+
+                GuiUtils.SimpleTextBox("selVec", Core.Landing.selectDebugVector, "", 35);
+                GuiUtils.SimpleTextBox("vcorr", Core.Landing.debug1, "", 35);
+                GuiUtils.SimpleTextBox("hcorr", Core.Landing.debug2, "", 35);
+                GuiUtils.SimpleTextBox("cancelHVel", Core.Landing.debug3, "", 35);
+                GuiUtils.SimpleTextBox("div", Core.Landing.debug4, "", 35);
+                GuiUtils.SimpleTextBox("ovrshtAngle", Core.Landing.debug5, "", 35);
+                GuiUtils.SimpleTextBox("limitThrust", Core.Landing.debug6, "", 35);
 
                 if (Core.Landing.Enabled)
                 {

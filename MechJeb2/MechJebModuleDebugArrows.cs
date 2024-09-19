@@ -242,16 +242,10 @@ namespace MuMech
             debugArrow2.State(debugArrow2Active && Core.ShowGui);
             if (debugArrow2Active)
             {
-                //debugArrow2.Set(vessel.ReferenceTransform.position, debugVector2);
-                //
-                //debugArrow2.SetLength((float)debugVector2.magnitude);
-                //debugArrow2.SeeThrough(seeThrough);
-
-                Vector3d vector3d = VesselState.CoL - instantCoM + frameVel;
-                debugArrow2.Set(instantCoM, vector3d);
-
-                debugArrow2.SetLength((float)vector3d.magnitude);
+                debugArrow2.Set(Vessel.ReferenceTransform.position, debugVector2);
+                debugArrow2.SetLength((float)debugVector2.magnitude);
                 debugArrow2.SeeThrough(seeThrough);
+
             }
         }
     }

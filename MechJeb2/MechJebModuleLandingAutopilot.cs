@@ -15,6 +15,8 @@ namespace MuMech
     [UsedImplicitly]
     public class MechJebModuleLandingAutopilot : AutopilotModule
     {
+        public readonly double LOW_GRAVITY = 1.0;    // m/sec^2
+        public readonly double EARTH_GRAVITY = 9.81; // m/sec^2
         private bool _deployedGears;
         public  bool LandAtTarget;
 
@@ -38,6 +40,27 @@ namespace MuMech
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public bool FlySafe = true;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public  EditableInt    selectDebugVector = 0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public  EditableDouble debug1 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public  EditableDouble debug2 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public  EditableDouble debug3 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public  EditableDouble debug4 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public  EditableDouble debug5 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public  EditableDouble debug6 = 1.0;
 
         // This is used to adjust the height at which the parachutes semi deploy as a means of
         // targeting the landing in an atmosphere where it is not possible to control atitude
@@ -130,7 +153,16 @@ namespace MuMech
             _parachutePlan.StartPlanning();
 
             if (Orbit.PeA < 0)
-                SetStep(new CourseCorrection(Core));
+            {
+                if (MainBody.GeeASL * EARTH_GRAVITY < LOW_GRAVITY) // m/sec^2
+                {
+                    SetStep(new DecelerationBurn(Core));
+                }
+                else
+                {
+                    SetStep(new CourseCorrection(Core));
+                }
+            }
             else if (UseLowDeorbitStrategy())
                 SetStep(new PlaneChange(Core));
             else
@@ -519,7 +551,19 @@ namespace MuMech
 
         private bool UseLowDeorbitStrategy()
         {
-            if (MainBody.atmosphere) return false;
+            double g = MainBody.GeeASL * 9.81;
+
+            // For planets with atmosphere and the current position is within the atmosphere dont use low deorbit strategy
+            if (MainBody.atmosphere && ( VesselState.drag >= 0.1) )
+            {
+                return false;
+            }
+
+            // For low gravity worlds just use low deorbit strategy
+            else if (g < 1.0) // m/sec^2
+            {
+                return true;
+            }
 
             double periapsisSpeed = Orbit.WorldOrbitalVelocityAtUT(Orbit.NextPeriapsisTime(VesselState.time)).magnitude;
             double stoppingDistance = Math.Pow(periapsisSpeed, 2) / (2 * VesselState.limitedMaxThrustAccel);

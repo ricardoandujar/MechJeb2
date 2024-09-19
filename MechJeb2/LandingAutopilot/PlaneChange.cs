@@ -1,4 +1,4 @@
-using KSP.Localization;
+﻿using KSP.Localization;
 using UnityEngine;
 
 // FIXME: use a maneuver node
@@ -9,11 +9,30 @@ namespace MuMech
     {
         public class PlaneChange : AutopilotStep
         {
-            private bool   _planeChangeTriggered;
+            private int   _planeChangeTriggered;
             private double _planeChangeDVLeft;
+            private double warpDiv;
+            private bool lowGravMode;
+            private float deltaVLeft;
 
             public PlaneChange(MechJebCore core) : base(core)
             {
+                double g = MainBody.GeeASL * Core.Landing.EARTH_GRAVITY;
+
+                if (g < Core.Landing.LOW_GRAVITY) // m/sec^2
+                {
+                    double baseGain = 0.196 / g;
+                    warpDiv = 1.5;
+                    lowGravMode = true;
+                    deltaVLeft = 2.5f*(float)baseGain;
+                }
+                else
+                {
+                    warpDiv = 5.0;
+                    lowGravMode = false;
+                    deltaVLeft = 0.1f;
+                }
+                _planeChangeTriggered = 0;
             }
 
             //Could make this an iterative procedure for improved accuracy
@@ -35,9 +54,15 @@ namespace MuMech
 
             public override AutopilotStep Drive(FlightCtrlState s)
             {
-                if (_planeChangeTriggered && Core.Attitude.attitudeAngleFromTarget() < 2)
+                double throttleDiv = 2.0;
+
+                if ((_planeChangeTriggered==1) && Core.Attitude.attitudeAngleFromTarget() < 2)
                 {
-                    Core.Thrust.TargetThrottle = Mathf.Clamp01((float)(_planeChangeDVLeft / (2 * Core.VesselState.maxThrustAccel)));
+                    if ( lowGravMode )
+                    {
+                        throttleDiv = 10;
+                    }
+                    Core.Thrust.TargetThrottle = Mathf.Clamp01((float)(_planeChangeDVLeft / (throttleDiv * Core.VesselState.maxThrustAccel)));
                 }
                 else
                 {
@@ -54,35 +79,61 @@ namespace MuMech
                 Vector3d currentRadialVector = VesselState.CoM - MainBody.position;
                 double angleToTarget = Vector3d.Angle(targetRadialVector, currentRadialVector);
                 bool approaching = Vector3d.Dot(targetRadialVector - currentRadialVector, VesselState.orbitalVelocity) > 0;
+                Vector3d horizontalToTarget = ComputePlaneChange();
+                Vector3d finalVelocity = Quaternion.FromToRotation(VesselState.horizontalOrbit, horizontalToTarget) * VesselState.orbitalVelocity;
+                double Angle = Vector3d.Angle(finalVelocity, VesselState.orbitalVelocity);
 
-                if (!_planeChangeTriggered && approaching && angleToTarget > 80 && angleToTarget < 90)
+
+                // For low gravity worlds to to burn if in the ballpark.
+                if (lowGravMode )
                 {
-                    if (!MuUtils.PhysicsRunning()) Core.Warp.MinimumWarp(true);
-                    _planeChangeTriggered = true;
+                    if ( (angleToTarget <= 30) && ((Angle < 30) || (Angle > (180 - 30))) )
+                    {
+                        if (!MuUtils.PhysicsRunning()) Core.Warp.MinimumWarp(true);
+                        return new DecelerationBurn(Core);
+                    }
                 }
 
-                if (_planeChangeTriggered)
+                if (_planeChangeTriggered==0 && approaching && angleToTarget > 80 && angleToTarget < 92)
                 {
-                    Vector3d horizontalToTarget = ComputePlaneChange();
-                    Vector3d finalVelocity = Quaternion.FromToRotation(VesselState.horizontalOrbit, horizontalToTarget) * VesselState.orbitalVelocity;
+                    if (!MuUtils.PhysicsRunning()) Core.Warp.MinimumWarp(true);
+                    _planeChangeTriggered = 1;
+                }
 
+                if (_planeChangeTriggered==1)
+                {
                     Vector3d deltaV = finalVelocity - VesselState.orbitalVelocity;
                     //burn normal+ or normal- to avoid dropping the Pe:
                     var burnDir = Vector3d.Exclude(VesselState.up, Vector3d.Exclude(VesselState.orbitalVelocity, deltaV));
-                    _planeChangeDVLeft = UtilMath.Deg2Rad * Vector3d.Angle(finalVelocity, VesselState.orbitalVelocity) *
-                                         VesselState.speedOrbitHorizontal;
-                    Core.Attitude.attitudeTo(burnDir, AttitudeReference.INERTIAL, Core.Landing);
+                    if ( Angle <= 90 )
+                    {
+                        _planeChangeDVLeft = UtilMath.Deg2Rad * Angle * VesselState.speedOrbitHorizontal;
+                        Core.Attitude.attitudeTo(burnDir, AttitudeReference.INERTIAL, Core.Landing);
+                    }
+                    else
+                    {
+                        _planeChangeDVLeft = UtilMath.Deg2Rad * (180-Angle) * VesselState.speedOrbitHorizontal;
+                        Core.Attitude.attitudeTo(-burnDir, AttitudeReference.INERTIAL, Core.Landing);
+                    }
                     Status = Localizer.Format("#MechJeb_LandingGuidance_Status14",
                         _planeChangeDVLeft.ToString("F0")); //"Executing low orbit plane change of about " +  + " m/s"
 
-                    if (_planeChangeDVLeft < 0.1F)
+                    if (_planeChangeDVLeft < deltaVLeft)
                     {
-                        return new LowDeorbitBurn(Core);
+                        if ( lowGravMode )
+                        {
+                            // Once in range it will exit
+                            _planeChangeTriggered = 2;
+                        }
+                        else
+                        {
+                            return new LowDeorbitBurn(Core);
+                        }
                     }
                 }
                 else
                 {
-                    if (Core.Node.Autowarp) Core.Warp.WarpRegularAtRate((float)(Orbit.period / 6));
+                    if (Core.Node.Autowarp) Core.Warp.WarpRegularAtRate((float)(Orbit.period / warpDiv));
                     Status = Localizer.Format("#MechJeb_LandingGuidance_Status15"); //"Moving to low orbit plane change burn point"
                 }
 
