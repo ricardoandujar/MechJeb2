@@ -15,7 +15,6 @@ namespace MuMech
             private const float LANDING_GEAR_ALT_CONSTANT = 200.0F;
             private const float MIN_HORIZONTAL_ALT_THRESHOLD_CONSTANT = FINAL_ALT_THRESHOLD_CONSTANT;
             private const float MAX_HORIZONTAL_ALT_THRESHOLD_CONSTANT = 7000.0F;
-            private const float ABOVE_FINAL_ALT_SPEED_CONSTANT = -40.0F;
             private const float MIN_WARP_ALT_THRESHOLD_CONSTANT = MAX_HORIZONTAL_ALT_THRESHOLD_CONSTANT;
             private const float WARP_EDGE_THRESHOLD_CONSTANT = 1.02F;
             private const float ANGLE_MIN_SPEED_RATIO_CONSTANT = 1.3F;
@@ -24,7 +23,6 @@ namespace MuMech
             private const float ANGLE_ADJUST_I_CONSTANT = 0.00001f;
             private const float ANGLE_ADJUST_P_CONSTANT = -0.01f;
             private const float FINAL_SPEED_FACTOR_CONSTANT = 0.8F;
-            private const float MAX_WARP_ANGLE_CONSTANT = 45.0F;
             private bool        _deployedGears;
             private float       magnitude = 0;
             private IDescentSpeedPolicy _aggressivePolicy;

@@ -56,12 +56,14 @@ namespace MuMech
                 if (GUILayout.Button("▲"))
                 {
                     MoveByMeter(ref Core.Target.targetLatitude, 10, asl);
+                    if ( Vessel.LandedOrSplashed ) Core.Landing.hop = true;
                 }
 
                 GUILayout.Label("10m");
                 if (GUILayout.Button("▼"))
                 {
                     MoveByMeter(ref Core.Target.targetLatitude, -10, asl);
+                    if (Vessel.LandedOrSplashed) Core.Landing.hop = true;
                 }
 
                 GUILayout.EndHorizontal();
@@ -70,30 +72,37 @@ namespace MuMech
                 if (GUILayout.Button("◄"))
                 {
                     MoveByMeter(ref Core.Target.targetLongitude, -10, asl);
+                    if (Vessel.LandedOrSplashed) Core.Landing.hop = true;
                 }
 
                 GUILayout.Label("10m");
                 if (GUILayout.Button("►"))
                 {
                     MoveByMeter(ref Core.Target.targetLongitude, 10, asl);
+                    if (Vessel.LandedOrSplashed) Core.Landing.hop = true;
                 }
 
                 GUILayout.EndHorizontal();
 
-                GUILayout.BeginHorizontal();
-                GUILayout.Label("ASL: " + asl.ToSI() + "m");
-                GUILayout.Label(Core.Target.targetBody.GetExperimentBiomeSafe(Core.Target.targetLatitude, Core.Target.targetLongitude));
-                GUILayout.EndHorizontal();
+                GUILayout.Label("ASL: " + asl.ToSI() + "m   "
+                    + Core.Target.targetBody.GetExperimentBiomeSafe(Core.Target.targetLatitude, Core.Target.targetLongitude));
+                double range = Core.Landing.getHDistanceToTarget();
+                GUILayout.Label("Range to target: " + range.ToSI() + "m");
             }
             else
             {
                 if (GUILayout.Button(Localizer.Format("#MechJeb_LandingGuidance_button1"))) //Enter target coordinates
                 {
                     Core.Target.SetPositionTarget(MainBody, Core.Target.targetLatitude, Core.Target.targetLongitude);
+                    if (Vessel.LandedOrSplashed) Core.Landing.hop = true;
                 }
             }
 
-            if (GUILayout.Button(Localizer.Format("#MechJeb_LandingGuidance_button2"))) Core.Target.PickPositionTargetOnMap(); //Pick target on map
+            if (GUILayout.Button(Localizer.Format("#MechJeb_LandingGuidance_button2")))
+            {
+                Core.Target.PickPositionTargetOnMap(); //Pick target on map
+                if (Vessel.LandedOrSplashed) Core.Landing.hop = true;
+            }
 
             var availableLandingSites = LandingSites.Where(p => p.Body == MainBody).ToList();
             if (availableLandingSites.Any())
@@ -104,6 +113,7 @@ namespace MuMech
                 {
                     Core.Target.SetPositionTarget(MainBody, availableLandingSites[_landingSiteIdx].Latitude,
                         availableLandingSites[_landingSiteIdx].Longitude);
+                    if (Vessel.LandedOrSplashed) Core.Landing.hop = true;
                 }
 
                 GUILayout.EndHorizontal();
@@ -126,6 +136,8 @@ namespace MuMech
                 {
                     GUILayout.BeginHorizontal();
                     if (!Core.Target.PositionTargetExists || Vessel.LandedOrSplashed) GUI.enabled = false;
+
+                    if (Core.Landing.hop == true) GUI.enabled = true;
                     if (GUILayout.Button(Localizer.Format("#MechJeb_LandingGuidance_button4")))
                         Core.Landing.LandAtPositionTarget(this); //Land at target
                     GUI.enabled = !Vessel.LandedOrSplashed;
@@ -141,9 +153,14 @@ namespace MuMech
 
                 Core.Landing.DeployGears =
                     GUILayout.Toggle(Core.Landing.DeployGears, Localizer.Format("#MechJeb_LandingGuidance_checkbox2")); //Deploy Landing Gear
+                GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_label4"), Core.Landing.LimitGearsStage, "", 35); //"Stage Limit:"
+
                 Core.Landing.FlySafe =
                     GUILayout.Toggle(Core.Landing.FlySafe, Localizer.Format("#MechJeb_LandingGuidance_checkbox10")); // Safe Mode
-                GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_label4"), Core.Landing.LimitGearsStage, "", 35); //"Stage Limit:"
+                Core.Landing.SelectMoveToTarget =
+                    GUILayout.Toggle(Core.Landing.SelectMoveToTarget, Localizer.Format("#MechJeb_LandingGuidance_checkbox11")); // Use Move To Target
+
+
                 Core.Landing.DeployChutes =
                     GUILayout.Toggle(Core.Landing.DeployChutes, Localizer.Format("#MechJeb_LandingGuidance_checkbox3")); //Deploy Parachutes
                 _predictor.deployChutes = Core.Landing.DeployChutes;
@@ -153,13 +170,19 @@ namespace MuMech
                     GUILayout.Toggle(Core.Landing.RCSAdjustment,
                         Localizer.Format("#MechJeb_LandingGuidance_checkbox4")); //Use RCS for small adjustment
 
-                GuiUtils.SimpleTextBox("selVec", Core.Landing.selectDebugVector, "", 35);
-                GuiUtils.SimpleTextBox("vcorr", Core.Landing.debug1, "", 35);
+                GuiUtils.SimpleTextBox("steepness", Core.Landing.steepness, "", 35);
+
+                GuiUtils.SimpleTextBox("H/V Ratio min:", Core.Landing.minRatio, "", 35);
+                GuiUtils.SimpleTextBox("                 max:", Core.Landing.maxRatio, "", 35);
+
+                //GuiUtils.SimpleTextBox("selVec", Core.Landing.selectDebugVector, "", 35);
+                GuiUtils.SimpleTextBox("baseGain", Core.Landing.debug1, "", 35);
                 GuiUtils.SimpleTextBox("hcorr", Core.Landing.debug2, "", 35);
-                GuiUtils.SimpleTextBox("cancelHVel", Core.Landing.debug3, "", 35);
-                GuiUtils.SimpleTextBox("div", Core.Landing.debug4, "", 35);
-                GuiUtils.SimpleTextBox("ovrshtAngle", Core.Landing.debug5, "", 35);
-                GuiUtils.SimpleTextBox("limitThrust", Core.Landing.debug6, "", 35);
+                GuiUtils.SimpleTextBox("gComp", Core.Landing.debug3, "", 35);
+                GuiUtils.SimpleTextBox("pidKI", Core.Landing.debug4, "", 35);
+                GuiUtils.SimpleTextBox("pidKP", Core.Landing.debug5, "", 35);
+                GuiUtils.SimpleTextBox("pidKILimit", Core.Landing.debug6, "", 35);
+                GuiUtils.SimpleTextBox("correct", Core.Landing.debug7, "", 35);
 
                 if (Core.Landing.Enabled)
                 {

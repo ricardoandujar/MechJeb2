@@ -55,8 +55,15 @@ namespace MuMech
                     }
                 }
 
+                // Move to DecelerationBurn if:
+                //    If SurfaceSpeed reaches 90% of Max allowable speed.
+                //    If we're already at low altitude, skip directly to the Deceleration burn
+                //    If within atmosphere going too fast without heat shields
                 double maxAllowedSpeed = Core.Landing.MaxAllowedSpeed();
-                if (VesselState.speedSurface > 0.9 * maxAllowedSpeed)
+                if  ( (VesselState.speedSurface > 0.9 * maxAllowedSpeed) ||
+                      (VesselState.altitudeASL < Core.Landing.DecelerationEndAltitude() + 5) ||
+                      ((VesselState.altitudeASL < MainBody.RealMaxAtmosphereAltitude()) && 
+                       (VesselState.speedSurface > Core.Landing.ATMOS_FAST_SPEED)) )
                 {
                     Core.Warp.MinimumWarp();
                     if (Core.Landing.RCSAdjustment)
@@ -88,15 +95,6 @@ namespace MuMech
                         Status += "\n" + Localizer.Format("#MechJeb_LandingGuidance_Status2",
                             deltaV.magnitude.ToString("F3")); //"Course correction DV: " +  + " m/s"
                     }
-                }
-
-                // If we're already low, skip directly to the Deceleration burn
-                if (VesselState.altitudeASL < Core.Landing.DecelerationEndAltitude() + 5)
-                {
-                    Core.Warp.MinimumWarp();
-                    if (Core.Landing.RCSAdjustment)
-                        Core.RCS.Enabled = false;
-                    return new DecelerationBurn(Core);
                 }
 
                 if ( (Vessel.angularVelocity.magnitude < 0.005f) &&

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using KSP.Localization;
 using UnityEngine;
 
@@ -16,7 +16,7 @@ namespace MuMech
             private bool _lowDeorbitEndConditionSet;
             private bool _lowDeorbitEndOnLandingSiteNearer;
 
-            private const double LOW_DEORBIT_BURN_TRIGGER_FACTOR = 2;
+            private const double LOW_DEORBIT_BURN_TRIGGER_FACTOR = 2.15; // 2.15<=2.05 <= 2
 
             public LowDeorbitBurn(MechJebCore core) : base(core)
             {
@@ -90,7 +90,7 @@ namespace MuMech
                     if (!_lowDeorbitEndConditionSet &&
                         Vector3d.Distance(Core.Landing.LandingSite, VesselState.CoM) < MainBody.Radius + VesselState.altitudeASL)
                     {
-                        _lowDeorbitEndOnLandingSiteNearer = rangeToLandingSite > rangeToTarget;
+                        _lowDeorbitEndOnLandingSiteNearer = rangeToLandingSite > (rangeToTarget+ Core.Landing.POST_TARGET_THRESHOLD); // Target ahead of landing site so deceleration will bring it closer.
                         _lowDeorbitEndConditionSet        = true;
                     }
 
@@ -98,7 +98,7 @@ namespace MuMech
 
                     if (Orbit.PeA < 0)
                     {
-                        if (rangeToLandingSite > rangeToTarget)
+                        if (rangeToLandingSite > (rangeToTarget + Core.Landing.POST_TARGET_THRESHOLD))
                         {
                             if (_lowDeorbitEndConditionSet && !_lowDeorbitEndOnLandingSiteNearer)
                             {
@@ -115,7 +115,7 @@ namespace MuMech
                                 throttleToMaintainLandingSite =
                                     (speedAfterDt - maxAllowedSpeedAfterDt) / (VesselState.deltaT * VesselState.maxThrustAccel);
 
-                            _lowDeorbitBurnMaxThrottle = throttleToMaintainLandingSite + 1 * (rangeToLandingSite / rangeToTarget - 1) + 0.2;
+                            _lowDeorbitBurnMaxThrottle = throttleToMaintainLandingSite + 1 * (rangeToLandingSite / (rangeToTarget + Core.Landing.POST_TARGET_THRESHOLD) - 1) + 0.2;
                         }
                         else
                         {

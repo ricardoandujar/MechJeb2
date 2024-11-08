@@ -12,24 +12,18 @@ namespace MuMech
             private int   _planeChangeTriggered;
             private double _planeChangeDVLeft;
             private double warpDiv;
-            private bool lowGravMode;
             private float deltaVLeft;
 
             public PlaneChange(MechJebCore core) : base(core)
             {
-                double g = MainBody.GeeASL * Core.Landing.EARTH_GRAVITY;
-
-                if (g < Core.Landing.LOW_GRAVITY) // m/sec^2
+                if (Core.Landing.UseOnlyMoveToTarget == true)
                 {
-                    double baseGain = 0.196 / g;
-                    warpDiv = 1.5;
-                    lowGravMode = true;
-                    deltaVLeft = 2.5f*(float)baseGain;
+                    warpDiv = 0.5;
+                    deltaVLeft = Mathf.Max(0.1f,2.5f*(float)(0.196 / Core.Landing.g));
                 }
                 else
                 {
                     warpDiv = 5.0;
-                    lowGravMode = false;
                     deltaVLeft = 0.1f;
                 }
                 _planeChangeTriggered = 0;
@@ -58,7 +52,7 @@ namespace MuMech
 
                 if ((_planeChangeTriggered==1) && Core.Attitude.attitudeAngleFromTarget() < 2)
                 {
-                    if ( lowGravMode )
+                    if (Core.Landing.UseOnlyMoveToTarget == true)
                     {
                         throttleDiv = 10;
                     }
@@ -84,10 +78,15 @@ namespace MuMech
                 double Angle = Vector3d.Angle(finalVelocity, VesselState.orbitalVelocity);
 
 
-                // For low gravity worlds to to burn if in the ballpark.
-                if (lowGravMode )
+                // When using MoveToTarget exit once
+                // within horizontal distance where vertical velocity will start dropping. 
+                if (Core.Landing.UseOnlyMoveToTarget == true)
                 {
-                    if ( (angleToTarget <= 30) && ((Angle < 30) || (Angle > (180 - 30))) )
+                    double angleDistance = Core.Landing.MainBody.Radius * (30.0 / 180.0) * Mathf.PI;
+                    double ratioDistance = VesselState.altitudeTrue * Core.Landing.maxRatio;
+                    double checkDistance = ( ratioDistance < angleDistance) ? ratioDistance: angleDistance;
+
+                    if (Core.Landing.getHDistanceToTarget() < checkDistance)
                     {
                         if (!MuUtils.PhysicsRunning()) Core.Warp.MinimumWarp(true);
                         return new DecelerationBurn(Core);
@@ -120,7 +119,7 @@ namespace MuMech
 
                     if (_planeChangeDVLeft < deltaVLeft)
                     {
-                        if ( lowGravMode )
+                        if (Core.Landing.UseOnlyMoveToTarget == true)
                         {
                             // Once in range it will exit
                             _planeChangeTriggered = 2;

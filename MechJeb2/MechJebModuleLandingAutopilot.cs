@@ -1,9 +1,11 @@
 ﻿using System;
 using JetBrains.Annotations;
 using KSP.Localization;
+using MechJebLib.Utils;
 using ModuleWheels;
 using MuMech.Landing;
 using UnityEngine;
+using static alglib;
 
 namespace MuMech
 {
@@ -15,10 +17,19 @@ namespace MuMech
     [UsedImplicitly]
     public class MechJebModuleLandingAutopilot : AutopilotModule
     {
-        public readonly double LOW_GRAVITY = 1.0;    // m/sec^2
-        public readonly double EARTH_GRAVITY = 9.81; // m/sec^2
+        public readonly double LOW_GRAVITY = 1.0;       // m/sec^2
+        public readonly double EARTH_GRAVITY = 9.81;    // m/sec^2
+        public readonly float BASE_STEEPNESS = 1400.0f;
+        public readonly double ATMOS_FAST_SPEED = 1500.0;
+        public static readonly float BASE_MINRATIO = 0.04001f;
+        public static readonly float BASE_MAXRATIO = 1.55001f;
+        public readonly float POST_TARGET_THRESHOLD = 25000.0f;
         private bool _deployedGears;
         public  bool LandAtTarget;
+        public bool UseOnlyMoveToTarget = false;
+        public double g;
+        public bool hop = false;
+        public bool increaseVertical = false;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public readonly EditableDouble TouchdownSpeed = 0.5;
@@ -42,7 +53,16 @@ namespace MuMech
         public bool FlySafe = true;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public  EditableInt    selectDebugVector = 0;
+        public bool SelectMoveToTarget = false;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble steepness = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble minRatio = BASE_MINRATIO;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble maxRatio = BASE_MAXRATIO;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public  EditableDouble debug1 = 1.0;
@@ -61,6 +81,9 @@ namespace MuMech
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public  EditableDouble debug6 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug7 = 1.0;
 
         // This is used to adjust the height at which the parachutes semi deploy as a means of
         // targeting the landing in an atmosphere where it is not possible to control atitude
@@ -141,6 +164,14 @@ namespace MuMech
         public void LandAtPositionTarget(object controller)
         {
             LandAtTarget = true;
+            increaseVertical = false;    // Default - do not increase vertical speed
+            UseOnlyMoveToTarget = false; // Default - Use retroburm before transitioning to move to target
+            if ( hop == true )
+            {
+                increaseVertical = true; // Increasing vertical due to hop
+                UseOnlyMoveToTarget = true;
+                hop = false;
+            }
             Users.Add(controller);
 
             _predictor.Users.Add(this);
@@ -148,13 +179,19 @@ namespace MuMech
 
             _deployedGears = false;
 
+            g = MainBody.GeeASL * EARTH_GRAVITY; // in m/sec^2
+            if ( (g <= LOW_GRAVITY) || (SelectMoveToTarget == true) )
+            {
+                UseOnlyMoveToTarget = true;
+            }
+
             // Create a new parachute plan
             _parachutePlan = new ParachutePlan(this);
             _parachutePlan.StartPlanning();
 
             if (Orbit.PeA < 0)
             {
-                if (MainBody.GeeASL * EARTH_GRAVITY < LOW_GRAVITY) // m/sec^2
+                if ( UseOnlyMoveToTarget == true )
                 {
                     SetStep(new DecelerationBurn(Core));
                 }
@@ -164,13 +201,18 @@ namespace MuMech
                 }
             }
             else if (UseLowDeorbitStrategy())
+            {
                 SetStep(new PlaneChange(Core));
+            }
             else
+            {
                 SetStep(new DeorbitBurn(Core));
+            }
         }
 
         public void LandUntargeted(object controller)
         {
+            hop = false;
             LandAtTarget = false;
             Users.Add(controller);
 
@@ -250,8 +292,8 @@ namespace MuMech
             double endRadius = MainBody.Radius + DecelerationEndAltitude() - 100;
 
             // Seems we are already landed ?
-            if (endRadius > Orbit.ApR || Vessel.LandedOrSplashed)
-                StopLanding();
+            //if (endRadius > Orbit.ApR || Vessel.LandedOrSplashed)
+            //    StopLanding();
 
             Vector3d orbitLandingPosition = Orbit.WorldBCIPositionAtUT(
                 Orbit.PeR < endRadius ? Orbit.NextTimeOfRadius(VesselState.time, endRadius) : Orbit.NextPeriapsisTime(VesselState.time)
@@ -551,16 +593,14 @@ namespace MuMech
 
         private bool UseLowDeorbitStrategy()
         {
-            double g = MainBody.GeeASL * 9.81;
-
             // For planets with atmosphere and the current position is within the atmosphere dont use low deorbit strategy
             if (MainBody.atmosphere && ( VesselState.drag >= 0.1) )
             {
                 return false;
             }
 
-            // For low gravity worlds just use low deorbit strategy
-            else if (g < 1.0) // m/sec^2
+            // If Move to Target activated just use low deorbit strategy
+            else if (Core.Landing.UseOnlyMoveToTarget)
             {
                 return true;
             }
@@ -595,6 +635,28 @@ namespace MuMech
             Users.Add(controller);
             Core.Target.SetPositionTarget(MainBody, MechJebModuleLandingGuidance.LandingSites[0].Latitude,
                 MechJebModuleLandingGuidance.LandingSites[0].Longitude);
+        }
+
+        public double getHDistanceToTarget()
+        {
+            // Use target altitude - We only want the horizontal component
+            double asl = Core.vessel.mainBody.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
+
+            // Get the relative surface positions
+            Vector3d vesselRelPos = Core.vessel.mainBody.GetRelSurfacePosition(Core.vessel.latitude, Core.vessel.longitude, asl);
+            Vector3d targetRelPos = Core.vessel.mainBody.GetRelSurfacePosition(Core.Target.targetLatitude, Core.Target.targetLongitude, asl);
+            double angle = Vector3d.Angle(vesselRelPos, targetRelPos) * Math.PI / 180.0;
+            return (angle * (Core.vessel.mainBody.Radius + asl));
+        }
+
+        public Vector3d getHDirectionToTarget()
+        {
+            // Use target altitude - We only want the horizontal component
+            double asl = Core.vessel.mainBody.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
+
+            // Get the horizontal direction vector to target
+            return Vector3d.Exclude(VesselState.up, Core.vessel.mainBody.GetWorldSurfacePosition(Core.Target.targetLatitude, Core.Target.targetLongitude, asl)
+                - Core.vessel.mainBody.GetWorldSurfacePosition(Core.vessel.latitude, Core.vessel.longitude, asl));
         }
     }
 
