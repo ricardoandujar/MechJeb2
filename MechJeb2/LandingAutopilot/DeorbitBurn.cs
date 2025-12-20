@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using KSP.Localization;
 using UnityEngine;
 
@@ -10,7 +10,7 @@ namespace MuMech
     {
         public class DeorbitBurn : AutopilotStep
         {
-            private bool _deorbitBurnTriggered;
+            private bool _deorbitBurnTriggered = false;
 
             public DeorbitBurn(MechJebCore core) : base(core)
             {

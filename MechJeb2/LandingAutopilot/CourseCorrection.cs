@@ -99,7 +99,10 @@ namespace MuMech
                     Status = Localizer.Format("#MechJeb_LandingGuidance_Status3",
                         deltaV.magnitude.ToString("F1")); //"Performing course correction of about " +  + " m/s"
 
-                    Core.Attitude.attitudeTo(deltaV.normalized, AttitudeReference.INERTIAL, Core.Landing);
+                    Vector3d courseCorrection = Core.Landing.getHDirectionToTarget();
+                    Vector3d desiredThrustVector = 0.3 * courseCorrection.normalized + 0.7 * deltaV.normalized;
+
+                    Core.Attitude.attitudeTo(desiredThrustVector.normalized, AttitudeReference.INERTIAL, Core.Landing);
 
                     // TODO - Does this matter? Try to remove the attitude angle check and simply rely on accum.
                     // This has been here since day 1 but my change in DecelerationBurn does the same thing and does not use it at all.

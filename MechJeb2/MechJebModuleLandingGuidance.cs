@@ -176,13 +176,21 @@ namespace MuMech
                 GuiUtils.SimpleTextBox("                 max:", Core.Landing.maxRatio, "", 35);
 
                 //GuiUtils.SimpleTextBox("selVec", Core.Landing.selectDebugVector, "", 35);
-                GuiUtils.SimpleTextBox("baseGain", Core.Landing.debug1, "", 35);
-                GuiUtils.SimpleTextBox("hcorr", Core.Landing.debug2, "", 35);
-                GuiUtils.SimpleTextBox("gComp", Core.Landing.debug3, "", 35);
-                GuiUtils.SimpleTextBox("pidKI", Core.Landing.debug4, "", 35);
-                GuiUtils.SimpleTextBox("pidKP", Core.Landing.debug5, "", 35);
-                GuiUtils.SimpleTextBox("pidKILimit", Core.Landing.debug6, "", 35);
+                //GuiUtils.SimpleTextBox("baseGain", Core.Landing.debug1, "", 35);
+                //GuiUtils.SimpleTextBox("hcorr", Core.Landing.debug2, "", 35);
+                //GuiUtils.SimpleTextBox("gComp", Core.Landing.debug3, "", 35);
+                //GuiUtils.SimpleTextBox("pidKI", Core.Landing.debug4, "", 35);
+                //GuiUtils.SimpleTextBox("pidKP", Core.Landing.debug5, "", 35);
+                //GuiUtils.SimpleTextBox("pidKILimit", Core.Landing.debug6, "", 35);
                 GuiUtils.SimpleTextBox("correct", Core.Landing.debug7, "", 35);
+                GuiUtils.SimpleTextBox("tratio1", Core.Landing.debug8, "", 35);
+                GuiUtils.SimpleTextBox("tratio2", Core.Landing.debug9, "", 35);
+                GuiUtils.SimpleTextBox("skipcnt", Core.Landing.debug10, "", 35);
+                GuiUtils.SimpleTextBox("cntspeed", Core.Landing.debug11, "", 35);
+                GuiUtils.SimpleTextBox("decrease", Core.Landing.debug12, "", 35);
+                GuiUtils.SimpleTextBox("ignore", Core.Landing.debug13, "", 35);
+                GuiUtils.SimpleTextBox("increase", Core.Landing.debug14, "", 35);
+                GuiUtils.SimpleTextBox("warpend", Core.Landing.debug15, "", 35);
 
                 if (Core.Landing.Enabled)
                 {

@@ -85,6 +85,30 @@ namespace MuMech
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble debug7 = 1.0;
 
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug8 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug9 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug10 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug11 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug12 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug13 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug14 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug15 = 1.0;
+
         // This is used to adjust the height at which the parachutes semi deploy as a means of
         // targeting the landing in an atmosphere where it is not possible to control atitude
         // to perform course correction burns.
@@ -291,9 +315,9 @@ namespace MuMech
             // orbitLandingPosition is the point where our current orbit intersects the planet
             double endRadius = MainBody.Radius + DecelerationEndAltitude() - 100;
 
-            // Seems we are already landed ?
-            //if (endRadius > Orbit.ApR || Vessel.LandedOrSplashed)
-            //    StopLanding();
+            // Seems we are already landed ? just return zero vector
+            if (endRadius > Orbit.ApR || Vessel.LandedOrSplashed)
+                return Vector3d.zero;
 
             Vector3d orbitLandingPosition = Orbit.WorldBCIPositionAtUT(
                 Orbit.PeR < endRadius ? Orbit.NextTimeOfRadius(VesselState.time, endRadius) : Orbit.NextPeriapsisTime(VesselState.time)
@@ -594,7 +618,8 @@ namespace MuMech
         private bool UseLowDeorbitStrategy()
         {
             // For planets with atmosphere and the current position is within the atmosphere dont use low deorbit strategy
-            if (MainBody.atmosphere && ( VesselState.drag >= 0.1) )
+            // or if starting altitude is closer to atmosphere
+            if (MainBody.atmosphere && (VesselState.altitudeASL < 4*MainBody.atmosphereDepth) )
             {
                 return false;
             }

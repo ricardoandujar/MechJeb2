@@ -12,14 +12,13 @@ namespace MuMech
         {
             private bool   _deorbitBurnTriggered;
             private double _lowDeorbitBurnMaxThrottle;
-
-            private bool _lowDeorbitEndConditionSet;
-            private bool _lowDeorbitEndOnLandingSiteNearer;
+            private bool   _lowDeorbitEndOnLandingSiteNearer;
 
             private const double LOW_DEORBIT_BURN_TRIGGER_FACTOR = 2.15; // 2.15<=2.05 <= 2
 
             public LowDeorbitBurn(MechJebCore core) : base(core)
             {
+                _deorbitBurnTriggered = false;
             }
 
             public override AutopilotStep Drive(FlightCtrlState s)
@@ -39,32 +38,34 @@ namespace MuMech
             public override AutopilotStep OnFixedUpdate()
             {
                 //Decide when we will start the deorbit burn:
-                double stoppingDistance = Math.Pow(VesselState.speedSurfaceHorizontal, 2) / (2 * VesselState.limitedMaxThrustAccel);
+                double pitchAngle = 30;//90.0 - Vector3d.Angle(VesselState.surfaceVelocity, VesselState.up);
+                double stoppingDistance = Math.Pow(VesselState.speedSurfaceHorizontal, 2) / (2 * VesselState.limitedMaxThrustAccel * Math.Abs(Math.Cos(pitchAngle * UtilMath.Deg2Rad)));
                 double triggerDistance = LOW_DEORBIT_BURN_TRIGGER_FACTOR * stoppingDistance;
                 double heightAboveTarget = VesselState.altitudeASL - Core.Landing.DecelerationEndAltitude();
-                if (triggerDistance < heightAboveTarget)
-                {
-                    triggerDistance = heightAboveTarget;
-                }
+                if (triggerDistance < heightAboveTarget) triggerDistance = heightAboveTarget;
 
                 //See if it's time to start the deorbit burn:
-                double rangeToTarget = Vector3d.Exclude(VesselState.up, Core.Target.GetPositionTargetPosition() - VesselState.CoM).magnitude;
+                double rangeToTarget = Core.Landing.getHDistanceToTarget();
 
-                if (!_deorbitBurnTriggered && rangeToTarget < triggerDistance)
-                {
-                    if (!MuUtils.PhysicsRunning()) Core.Warp.MinimumWarp(true);
-                    _deorbitBurnTriggered = true;
-                }
+                if (!_deorbitBurnTriggered && (rangeToTarget < triggerDistance) ) _deorbitBurnTriggered = true;
 
                 Status = Localizer.Format(_deorbitBurnTriggered
-                    ? "#MechJeb_LandingGuidance_Status11"
-                    :                                     //"Executing low deorbit burn"
+                    ? "#MechJeb_LandingGuidance_Status11" //"Executing low deorbit burn"
+                    :                                     
                     "#MechJeb_LandingGuidance_Status12"); //"Moving to low deorbit burn point"
 
                 //Warp toward deorbit burn if it hasn't been triggerd yet:
-                if (!_deorbitBurnTriggered && Core.Node.Autowarp && rangeToTarget > 2 * triggerDistance)
-                    Core.Warp.WarpRegularAtRate((float)(Orbit.period / 6));
-                if (rangeToTarget < triggerDistance && !MuUtils.PhysicsRunning()) Core.Warp.MinimumWarp();
+                if (!_deorbitBurnTriggered && Core.Node.Autowarp && (rangeToTarget > 1.2 * triggerDistance))
+                {
+                    if ((Vessel.angularVelocity.magnitude < 0.005f) && (Core.Attitude.attitudeAngleFromTarget() < 1)) 
+                    {
+                        Core.Warp.WarpRegularAtRate((float)(Orbit.period / 5));
+                    }
+                }
+                else if (!MuUtils.PhysicsRunning())
+                {
+                    Core.Warp.MinimumWarp(true);
+                }
 
                 //By default, thrust straight back at max throttle
                 Vector3d thrustDirection = -VesselState.surfaceVelocity.normalized;
@@ -73,7 +74,7 @@ namespace MuMech
                 //If we are burning, we watch the predicted landing site and switch to the braking
                 //burn when the predicted landing site crosses the target. We also use the predictions
                 //to steer the predicted landing site toward the target
-                if (_deorbitBurnTriggered && Core.Landing.PredictionReady)
+                if ( (_deorbitBurnTriggered==true)  && (Core.Landing.PredictionReady == true) )
                 {
                     //angle slightly left or right to fix any cross-range error in the predicted landing site:
                     Vector3d horizontalToLandingSite = Vector3d.Exclude(VesselState.up, Core.Landing.LandingSite - VesselState.CoM).normalized;
@@ -87,25 +88,14 @@ namespace MuMech
                     double rangeToLandingSite = Vector3d.Exclude(VesselState.up, Core.Landing.LandingSite - VesselState.CoM).magnitude;
                     double maxAllowedSpeed = Core.Landing.MaxAllowedSpeed();
 
-                    if (!_lowDeorbitEndConditionSet &&
-                        Vector3d.Distance(Core.Landing.LandingSite, VesselState.CoM) < MainBody.Radius + VesselState.altitudeASL)
-                    {
-                        _lowDeorbitEndOnLandingSiteNearer = rangeToLandingSite > (rangeToTarget+ Core.Landing.POST_TARGET_THRESHOLD); // Target ahead of landing site so deceleration will bring it closer.
-                        _lowDeorbitEndConditionSet        = true;
-                    }
+                    _lowDeorbitEndOnLandingSiteNearer = rangeToLandingSite > (rangeToTarget + Core.Landing.POST_TARGET_THRESHOLD); // Target ahead of landing site so deceleration will bring it closer.
 
                     _lowDeorbitBurnMaxThrottle = 1;
 
                     if (Orbit.PeA < 0)
                     {
-                        if (rangeToLandingSite > (rangeToTarget + Core.Landing.POST_TARGET_THRESHOLD))
+                        if (_lowDeorbitEndOnLandingSiteNearer == true)
                         {
-                            if (_lowDeorbitEndConditionSet && !_lowDeorbitEndOnLandingSiteNearer)
-                            {
-                                Core.Thrust.TargetThrottle = 0;
-                                return new DecelerationBurn(Core);
-                            }
-
                             double maxAllowedSpeedAfterDt = Core.Landing.MaxAllowedSpeedAfterDt(VesselState.deltaT);
                             double speedAfterDt = VesselState.speedSurface +
                                                   VesselState.deltaT * Vector3d.Dot(VesselState.gravityForce, VesselState.surfaceVelocity.normalized);
@@ -119,15 +109,9 @@ namespace MuMech
                         }
                         else
                         {
-                            if (_lowDeorbitEndConditionSet && _lowDeorbitEndOnLandingSiteNearer)
-                            {
-                                Core.Thrust.TargetThrottle = 0;
-                                return new DecelerationBurn(Core);
-                            }
-
-                            _lowDeorbitBurnMaxThrottle = 0;
-                            Status = Localizer.Format(
-                                "#MechJeb_LandingGuidance_Status13"); //"Deorbit burn complete: waiting for the right moment to start braking"
+                            // We are ready for deceleration burn
+                            Core.Thrust.TargetThrottle = 0;
+                            return new DecelerationBurn(Core);
                         }
                     }
                 }
