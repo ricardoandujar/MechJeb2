@@ -60,7 +60,7 @@ namespace MuMech
                 }
                 else
                 {
-                    Core.Thrust.TargetThrottle = 0;
+                    Core.Thrust.ThrustOff();
                 }
 
                 return this;

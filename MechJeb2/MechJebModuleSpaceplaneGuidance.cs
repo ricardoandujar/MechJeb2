@@ -1,13 +1,12 @@
-﻿using System;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using System.Linq;
-using JetBrains.Annotations;
 using KSP.Localization;
 using UnityEngine;
 using static MechJebLib.Utils.Statics;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleSpaceplaneGuidance : DisplayModule
     {
         private MechJebModuleSpaceplaneAutopilot autoland;

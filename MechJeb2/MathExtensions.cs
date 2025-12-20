@@ -1,7 +1,9 @@
-﻿using System;
-using MechJebLib.Primitives;
+﻿extern alias JetBrainsAnnotations;
+using System;
+using JetBrainsAnnotations::JetBrains.Annotations;
 using UnityEngine;
 using Random = System.Random;
+using static MechJebLib.Utils.Statics;
 
 namespace MuMech
 {
@@ -108,30 +110,197 @@ namespace MuMech
             return rand_normal;
         }
 
-        public static V3 WorldToV3Rotated(this Vector3d vector) => (QuaternionD.Inverse(Planetarium.fetch.rotation) * vector).xzy.ToV3();
-
-        public static V3 WorldToV3(this Vector3d vector) => vector.xzy.ToV3();
-
-        public static V3 ToV3(this Vector3d vector) => new V3(vector.x, vector.y, vector.z);
-
-        public static Vector3d ToVector3d(this V3 vector) => new Vector3d(vector.x, vector.y, vector.z);
-
-        public static Vector3d V3ToWorld(this V3 vector) => vector.ToVector3d().xzy;
-
-        public static Vector3d V3ToWorldRotated(this V3 vector) => Planetarium.fetch.rotation * vector.ToVector3d().xzy;
-
-        public static void LoadH1(this H1 h, FloatCurve f)
+        public static QuaternionD FromToRotation(Vector3d fromDirection, Vector3d toDirection)
         {
-            h.Clear();
+            if (fromDirection == Vector3d.zero || toDirection == Vector3d.zero)
+                return QuaternionD.identity;
 
-            if (f == null) return;
+            fromDirection.Normalize();
+            toDirection.Normalize();
 
-            foreach (Keyframe frame in f.Curve.keys)
-                h.Add(frame.time, frame.value, frame.inTangent, frame.outTangent);
+            double dot = Vector3d.Dot(fromDirection, toDirection);
+
+            if (dot < -0.9999999999) // Vectors are pointing in opposite directions (zero cross-product)
+            {
+                var orthogonal = Vector3d.Cross(fromDirection, Math.Abs(fromDirection.x) < 1.0/Math.Sqrt(2.0) ? Vector3.right : Vector3.up);
+
+                orthogonal.Normalize();
+
+                return new QuaternionD(orthogonal.x, orthogonal.y, orthogonal.z, 0);
+            }
+
+            if (dot > 0.9999999999) // Vectors are nearly identical (zero cross-product)
+                return QuaternionD.identity;
+
+            Vector3d cross = Vector3.Cross(fromDirection, toDirection);
+            double   s     = Math.Sqrt((1 + dot) * 2);
+            double   invs  = 1 / s;
+
+            return new QuaternionD(
+                cross.x * invs,
+                cross.y * invs,
+                cross.z * invs,
+                s * 0.5f
+            );
         }
 
-        public static Q3 ToQ3(this QuaternionD q) => new Q3(q.z, q.y, q.x, -q.w);
+        public static Vector3d EulerAngles(QuaternionD q)
+        {
+            double magnitude = Math.Sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
 
-        public static QuaternionD ToQuaternionD(this Q3 q) => new QuaternionD(q.z, q.y, q.x, -q.w);
+            if (magnitude < EPS)
+                return Vector3d.zero;
+
+            if (Math.Abs(magnitude - 1.0) > 1e-10)
+            {
+                q.x /= magnitude;
+                q.y /= magnitude;
+                q.z /= magnitude;
+                q.w /= magnitude;
+            }
+
+            double sqw = q.w * q.w;
+            double sqx = q.x * q.x;
+            double sqy = q.y * q.y;
+            double sqz = q.z * q.z;
+
+            double unit = sqx + sqy + sqz + sqw;
+            double test = q.x * q.w - q.y * q.z;
+
+            if (test > 0.499999999 * unit) // North pole gimbal lock
+            {
+                double yaw   = 2.0 * Math.Atan2(q.y, q.w);
+
+                return new Vector3d(
+                    90,
+                    Rad2Deg(Clamp2Pi(yaw)),
+                    0
+                );
+            }
+
+            if (test < -0.499999999 * unit) // South pole gimbal lock
+            {
+                double yaw   = -2.0 * Math.Atan2(q.y, q.w);
+
+                return new Vector3d(
+                    270,
+                    Rad2Deg(Clamp2Pi(yaw)),
+                    0
+                );
+            }
+            else
+            {
+                double pitch = Math.Asin(2.0 * test / unit);
+                double yaw   = Math.Atan2(2.0 * (q.x * q.z + q.w * q.y), sqw - sqx - sqy + sqz);
+                double roll  = Math.Atan2(2.0 * (q.x * q.y + q.w * q.z), sqw - sqx + sqy - sqz);
+
+                // Convert to degrees
+                return new Vector3d(
+                    Rad2Deg(Clamp2Pi(pitch)),
+                    Rad2Deg(Clamp2Pi(yaw)),
+                    Rad2Deg(Clamp2Pi(roll))
+                );
+            }
+        }
+
+        public static QuaternionD Euler(double x, double y, double z)
+        {
+            x = Deg2Rad(x);
+            y = Deg2Rad(y);
+            z = Deg2Rad(z);
+
+            double cx = Math.Cos(x * 0.5);
+            double sx = Math.Sin(x * 0.5);
+            double cy = Math.Cos(y * 0.5);
+            double sy = Math.Sin(y * 0.5);
+            double cz = Math.Cos(z * 0.5);
+            double sz = Math.Sin(z * 0.5);
+
+            var q = new QuaternionD {
+                w = cz * cx * cy + sz * sx * sy,
+                x = cz * sx * cy - sz * cx * sy,
+                y = cz * cx * sy + sz * sx * cy,
+                z = sz * cx * cy - cz * sx * sy
+            };
+
+            return q;
+        }
+
+        public static Vector3d RotateTowards(Vector3d current, Vector3d target, double maxRadiansDelta, double maxMagnitudeDelta)
+        {
+            if (current.sqrMagnitude < EPS)
+                return target.normalized * Math.Min(maxMagnitudeDelta, target.magnitude);
+
+            if (target.sqrMagnitude < EPS)
+                return current.normalized * Math.Max(0, current.magnitude - maxMagnitudeDelta);
+
+            double currentMagnitude = current.magnitude;
+            double targetMagnitude  = target.magnitude;
+
+            double angle      = Deg2Rad(Vector3d.Angle(current, target));
+            double deltaAngle = Math.Min(maxRadiansDelta, angle);
+
+            double t = 0;
+            if (angle > Mathf.Epsilon)
+                t = deltaAngle / angle;
+
+            Vector3d newDirection = Slerp(current.normalized, target.normalized, t);
+
+            double newMagnitude = currentMagnitude;
+
+            if (Math.Abs(targetMagnitude - currentMagnitude) <= EPS)
+                return newDirection * newMagnitude;
+
+            double magnitudeDelta = Math.Min(maxMagnitudeDelta, Math.Abs(targetMagnitude - currentMagnitude));
+
+            newMagnitude = targetMagnitude > currentMagnitude ? Math.Min(currentMagnitude + magnitudeDelta, targetMagnitude) : Math.Max(currentMagnitude - magnitudeDelta, targetMagnitude);
+
+            return newDirection * newMagnitude;
+        }
+
+        [UsedImplicitly]
+        public static Vector3d Slerp(Vector3d a, Vector3d b, double t)
+        {
+            t = Clamp01(t);
+
+            double dot = Vector3d.Dot(a.normalized, b.normalized);
+
+            // If the vectors are very close, just lerp and normalize
+            if (dot > 0.9999999999)
+                return Vector3d.Lerp(a, b, t).normalized * Lerp(a.magnitude, b.magnitude, t);
+
+            // If the vectors are nearly opposite and t is 0.5, the result is undefined
+            // We pick an arbitrary perpendicular vector in this case
+            if (dot < -0.9999999999)
+            {
+                Vector3d perpendicular;
+
+                // Find a perpendicular vector to a
+                if (Math.Abs(a.x) < Math.Abs(a.y) && Math.Abs(a.x) < Math.Abs(a.z))
+                    perpendicular = Vector3d.Cross(a, new Vector3d(1, 0, 0));
+                else if (Math.Abs(a.y) < Math.Abs(a.z))
+                    perpendicular = Vector3d.Cross(a, new Vector3d(0, 1, 0));
+                else
+                    perpendicular = Vector3d.Cross(a, new Vector3d(0, 0, 1));
+
+                perpendicular.Normalize();
+
+                // Rotate 180 degrees around perpendicular vector
+                double sinHalfTheta = Math.Sin(Mathf.PI * t);
+                double cosHalfTheta = Math.Cos(Mathf.PI * t);
+
+                Vector3d result = a * cosHalfTheta + perpendicular * sinHalfTheta;
+                return result.normalized * Lerp(a.magnitude, b.magnitude, t);
+            }
+
+            // Normal case: perform the spherical interpolation
+            dot = Clamp(dot, -1.0f, 1.0f);
+            double theta = Math.Acos(dot) * t;
+            Vector3d relativeVec = (b - a * dot).normalized;
+            Vector3d newDirection = a * Math.Cos(theta) + relativeVec * Math.Sin(theta);
+            double newMagnitude = Lerp(a.magnitude, b.magnitude, t);
+
+            return newDirection.normalized * newMagnitude;
+        }
     }
 }

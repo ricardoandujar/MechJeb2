@@ -1,11 +1,11 @@
-﻿using System;
-using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
+using System;
+using JetBrainsAnnotations::JetBrains.Annotations;
 using KSP.Localization;
 using UnityEngine;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleWarpController : ComputerModule
     {
         public MechJebModuleWarpController(MechJebCore core)

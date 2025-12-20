@@ -49,6 +49,8 @@ namespace MuMech
 
             try
             {
+                if (!VesselState.RFModuleEnginesRFType.IsInstanceOfType(eng))
+                    return false;
                 if (VesselState.RFignitedField.GetValue(eng) is bool ignited && ignited)
                     return false;
                 if (VesselState.RFignitionsField.GetValue(eng) is int ignitions && ignitions == 0)
@@ -59,33 +61,6 @@ namespace MuMech
                     if (VesselState.RFGetUllageStabilityMethod.Invoke(ullageSet, Array.Empty<object>()) is double propellantStability)
                         if (propellantStability < 0.996)
                             return true;
-            }
-            catch (ArgumentException)
-            {
-            }
-
-            return false;
-        }
-
-        public static bool UnrestartableDeadEngine(this Part p)
-        {
-            if (!VesselState.isLoadedRealFuels) // stock doesn't have this concept
-                return false;
-
-            ModuleEngines eng = p.FindModuleImplementing<ModuleEngines>();
-
-            if (eng is null) // this case probably doesn't make any sense
-                return false;
-
-            if (eng.finalThrust > 0)
-                return false;
-
-            try
-            {
-                if (VesselState.RFignitedField.GetValue(eng) is bool ignited && ignited)
-                    return false;
-                if (VesselState.RFignitionsField.GetValue(eng) is int ignitions)
-                    return ignitions == 0;
             }
             catch (ArgumentException)
             {

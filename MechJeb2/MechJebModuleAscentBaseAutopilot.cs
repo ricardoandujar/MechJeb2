@@ -102,7 +102,7 @@ namespace MuMech
 
         public override void OnFixedUpdate()
         {
-            if (AscentSettings.AscentType == AscentType.PVG)
+            if (AscentSettings.AscentType == AscentType.PSG)
                 Core.StageStats.RequestUpdate();
 
             FixupLaunchStart();
@@ -112,7 +112,6 @@ namespace MuMech
                 {
                     if (Enabled && VesselState.thrustAvailable < 10E-4) // only stage if we have no engines active
                         StageManager.ActivateNextStage();
-                    TimedLaunchHook(); // let ascentPath modules do stuff edge triggered on launch starting
                     TimedLaunch = false;
                 }
                 else
@@ -213,8 +212,6 @@ namespace MuMech
             {
                 Debug.Log("Awaiting Liftoff");
                 Status = Localizer.Format("#MechJeb_Ascent_status6"); //"Awaiting liftoff"
-                // kill the optimizer if it is running.
-                Core.Guidance.Enabled = false;
 
                 Core.Attitude.SetAxisControl(false, false, false);
                 return;
@@ -249,7 +246,7 @@ namespace MuMech
                 if (Vessel.patchedConicSolver.maneuverNodes.Count == 0)
                 {
                     MechJebModuleFlightRecorder recorder = Core.GetComputerModule<MechJebModuleFlightRecorder>();
-                    if (recorder != null) AscentSettings.LaunchPhaseAngle.Val    = recorder.PhaseAngleFromMark;
+                    if (recorder != null) AscentSettings.LaunchPhaseAngle.Val    = recorder.PhaseAngleFromMark();
                     if (recorder != null) AscentSettings.LaunchLANDifference.Val = VesselState.orbitLAN - recorder.MarkLAN;
 
                     //finished circularize
@@ -285,11 +282,6 @@ namespace MuMech
         }
 
         protected abstract bool DriveAscent2();
-
-        protected virtual void TimedLaunchHook()
-        {
-            // triggered when timed launches start the actual launch
-        }
 
         //data used by ThrottleToRaiseApoapsis
         private          float         _raiseApoapsisLastThrottle;
@@ -334,99 +326,74 @@ namespace MuMech
 
         protected double SrfvelHeading() => VesselState.HeadingFromDirection(VesselState.surfaceVelocity.ProjectOnPlane(VesselState.up));
 
-        // this provides ground track heading based on desired inclination and is what most consumers should call
-        protected void AttitudeTo(double desiredPitch)
-        {
-            double desiredHeading = OrbitalManeuverCalculator.HeadingForLaunchInclination(Vessel.orbit, AscentSettings.DesiredInclination);
-            AttitudeTo(desiredPitch, desiredHeading);
-        }
-
-        // provides AoA limiting and roll control
-        // provides no ground tracking and should only be called by autopilots like PVG that deeply know what they're doing with yaw control
-        // (possibly should be moved into the attitude controller, but right now it collaborates too heavily with the ascent autopilot)
-        //
         protected void AttitudeTo(double desiredPitch, double desiredHeading)
         {
-            /*
-            Vector6 rcs = vesselState.rcsThrustAvailable;
-
-            // FIXME?  should this be up/down and not forward/back?  seems wrong?  why was i using down before for the ullage direction?
-            bool has_rcs = vessel.hasEnabledRCSModules() && vessel.ActionGroups[KSPActionGroup.RCS] && ( rcs.left > 0.01 ) && ( rcs.right > 0.01 ) && ( rcs.forward > 0.01 ) && ( rcs.back > 0.01 );
-
-            if ( (vesselState.thrustCurrent / vesselState.thrustAvailable < 0.50) && !has_rcs )
-            {
-                // if engines are spooled up at less than 50% and we have no RCS in the stage, do not issue any guidance commands yet
-                return;
-            }
-            */
-
             Vector3d desiredHeadingVector = Math.Sin(desiredHeading * UtilMath.Deg2Rad) * VesselState.east +
                                             Math.Cos(desiredHeading * UtilMath.Deg2Rad) * VesselState.north;
 
             Vector3d desiredThrustVector = Math.Cos(desiredPitch * UtilMath.Deg2Rad) * desiredHeadingVector
                                            + Math.Sin(desiredPitch * UtilMath.Deg2Rad) * VesselState.up;
 
+            AttitudeTo(desiredThrustVector);
+        }
+
+        // provides AoA limiting and roll control
+        protected void AttitudeTo(Vector3d desiredThrustVector)
+        {
             desiredThrustVector = desiredThrustVector.normalized;
 
-            /* old style AoA limiter */
-            if (AscentSettings.LimitAoA && !AscentSettings.LimitQaEnabled)
-            {
-                float fade = VesselState.dynamicPressure < AscentSettings.AOALimitFadeoutPressure
-                    ? (float)(AscentSettings.AOALimitFadeoutPressure / VesselState.dynamicPressure)
-                    : 1;
-                CurrentMaxAoA = Math.Min(fade * AscentSettings.MaxAoA, 180d);
-                AscentSettings.LimitingAoA = Vessel.altitude < MainBody.atmosphereDepth &&
-                                             Vector3.Angle(VesselState.surfaceVelocity, desiredThrustVector) > CurrentMaxAoA;
+            if (AscentSettings.LimitQaEnabled) /* AoA limiter for PSG */
+                desiredThrustVector = ApplyQAlphaAoALimiter(desiredThrustVector);
+            else if (AscentSettings.LimitAoA) /* old style AoA limiter */
+                desiredThrustVector = ApplyStockAOALimiter(desiredThrustVector);
 
-                if (AscentSettings.LimitingAoA)
-                {
-                    desiredThrustVector = Vector3.RotateTowards(VesselState.surfaceVelocity, desiredThrustVector,
-                        (float)(CurrentMaxAoA * Mathf.Deg2Rad), 1).normalized;
-                }
-            }
-
-            /* AoA limiter for PVG */
-            if (AscentSettings.LimitQaEnabled)
-            {
-                double lim = MuUtils.Clamp(AscentSettings.LimitQa, 0, 10000);
-                AscentSettings.LimitingAoA =
-                    VesselState.dynamicPressure * Vector3.Angle(VesselState.surfaceVelocity, desiredThrustVector) * UtilMath.Deg2Rad > lim;
-                if (AscentSettings.LimitingAoA)
-                {
-                    CurrentMaxAoA = lim / VesselState.dynamicPressure * UtilMath.Rad2Deg;
-                    desiredThrustVector = Vector3.RotateTowards(VesselState.surfaceVelocity, desiredThrustVector,
-                        (float)(CurrentMaxAoA * UtilMath.Deg2Rad), 1).normalized;
-                }
-            }
-
-            bool liftedOff = Vessel.LiftedOff() && !Vessel.Landed && VesselState.altitudeBottom > 5;
-
+            // calculate pitch and heading after applying AoA limiter
             double pitch = 90 - Vector3d.Angle(desiredThrustVector, VesselState.up);
-
-            double hdg;
-
-            if (pitch > 89.9)
-            {
-                hdg = desiredHeading;
-            }
-            else
-            {
-                hdg = MuUtils.ClampDegrees360(UtilMath.Rad2Deg * Math.Atan2(Vector3d.Dot(desiredThrustVector, VesselState.east),
+            double hdg = MuUtils.ClampDegrees360(UtilMath.Rad2Deg * Math.Atan2(Vector3d.Dot(desiredThrustVector, VesselState.east),
                     Vector3d.Dot(desiredThrustVector, VesselState.north)));
-            }
 
             if (AscentSettings.ForceRoll)
-            {
-                // ReSharper disable once CompareOfFloatsByEqualityOperator
-                Core.Attitude.attitudeTo(hdg, pitch, desiredPitch == 90.0 ? AscentSettings.VerticalRoll : AscentSettings.TurnRoll, this,
-                    liftedOff, liftedOff, liftedOff && VesselState.altitudeBottom > AscentSettings.RollAltitude, true);
-            }
+                Core.Attitude.attitudeTo(hdg, pitch, AscentSettings.TurnRoll, this, fixCOT: true);
             else
-            {
                 Core.Attitude.attitudeTo(desiredThrustVector, AttitudeReference.INERTIAL_COT, this);
+
+            Core.Attitude.SetActuationControl(true, true, true);
+            Core.Attitude.SetAxisControl(true, true, AscentSettings.ForceRoll);
+        }
+
+        // this handles vertical rise and bypasses AoA limiters and other inapplicable settings
+        protected void VerticalHeadingTo(double desiredHeading)
+        {
+            Core.Attitude.attitudeTo(desiredHeading, 90, AscentSettings.VerticalRoll, this, fixCOT: true);
+            bool liftedOff = Vessel.LiftedOff() && !Vessel.Landed;
+
+            Core.Attitude.SetActuationControl(liftedOff, liftedOff, liftedOff);
+            Core.Attitude.SetAxisControl(liftedOff, liftedOff, liftedOff && AscentSettings.ForceRoll && VesselState.altitudeBottom > AscentSettings.RollAltitude);
+        }
+
+        private Vector3d ApplyQAlphaAoALimiter(Vector3d desiredThrustVector)
+        {
+            double lim = MuUtils.Clamp(AscentSettings.LimitQa, 0, 10000);
+            AscentSettings.LimitingAoA = VesselState.dynamicPressure * Vector3.Angle(VesselState.surfaceVelocity, desiredThrustVector) * UtilMath.Deg2Rad > lim;
+            if (AscentSettings.LimitingAoA)
+            {
+                CurrentMaxAoA = lim / VesselState.dynamicPressure * UtilMath.Rad2Deg;
+                desiredThrustVector = MathExtensions.RotateTowards(VesselState.surfaceVelocity, desiredThrustVector, (float)(CurrentMaxAoA * UtilMath.Deg2Rad), 1).normalized;
             }
 
-            Core.Attitude.SetAxisControl(liftedOff, liftedOff, liftedOff && VesselState.altitudeBottom > AscentSettings.RollAltitude);
+            return desiredThrustVector;
+        }
+
+        private Vector3d ApplyStockAOALimiter(Vector3d desiredThrustVector)
+        {
+            double fade = VesselState.dynamicPressure < AscentSettings.AOALimitFadeoutPressure ? (AscentSettings.AOALimitFadeoutPressure / VesselState.dynamicPressure) : 1;
+            CurrentMaxAoA = Math.Min(fade * AscentSettings.MaxAoA, 180d);
+            AscentSettings.LimitingAoA = Vessel.altitude < MainBody.atmosphereDepth && Vector3d.Angle(VesselState.surfaceVelocity, desiredThrustVector) > CurrentMaxAoA;
+
+            if (AscentSettings.LimitingAoA)
+                desiredThrustVector = MathExtensions.RotateTowards(VesselState.surfaceVelocity, desiredThrustVector, (float)(CurrentMaxAoA * Mathf.Deg2Rad), 1).normalized;
+
+            return desiredThrustVector;
         }
     }
 }

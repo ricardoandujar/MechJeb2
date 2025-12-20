@@ -1,5 +1,5 @@
-﻿using System;
-using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using KSP.Localization;
 using UnityEngine;
 using static MechJebLib.Utils.Statics;
@@ -7,7 +7,6 @@ using Object = UnityEngine.Object;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleFlightRecorderGraph : DisplayModule
     {
         private const int ScaleTicks = 11;

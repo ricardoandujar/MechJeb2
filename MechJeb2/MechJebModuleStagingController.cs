@@ -1,14 +1,14 @@
-﻿using System.Collections.Generic;
+﻿extern alias JetBrainsAnnotations;
+using System.Collections.Generic;
 using System.Linq;
-using JetBrains.Annotations;
 using KSP.UI.Screens;
 using MechJebLib.FuelFlowSimulation;
+using MechJebLibBindings;
 using Smooth.Slinq;
 using UnityEngine;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleStagingController : ComputerModule
     {
         public MechJebModuleStagingController(MechJebCore core)
@@ -273,8 +273,8 @@ namespace MuMech
                 return;
             }
 
-            // this is for PVG preventing staging doing coasts, possibly it should be more specific of an API
-            // (e.g. bool PVGIsCoasting) since it is getting tightly coupled.
+            // this is for PSG preventing staging doing coasts, possibly it should be more specific of an API
+            // (e.g. bool PSGIsCoasting) since it is getting tightly coupled.
             if (Vessel.currentStage <= ActiveAutoStageModuleLimit())
             {
                 // force staging once if fairing conditions are met in the next stage
@@ -334,7 +334,11 @@ namespace MuMech
             // only release launch clamps if we're at nearly full thrust and no failed engines
             if ((VesselState.thrustCurrent / VesselState.thrustAvailable < ClampAutoStageThrustPct || AnyFailedEngines(_allModuleEngines)) &&
                 InverseStageReleasesClamps(Vessel.currentStage - 1))
+            {
+                // continually reset the PIDs while we have launch clamps to avoid integral windup
+                Core.Attitude.Controller.Reset();
                 return;
+            }
 
             Stage();
         }
@@ -356,55 +360,61 @@ namespace MuMech
             return false;
         }
 
+        // bypasses staging delays and immediately stages bypassing autostagePreDelay
+        public void ImmediateStage()
+        {
+            if (InverseStageFiresDecoupler(Vessel.currentStage - 1))
+            {
+                //if we decouple things, delay the next stage a bit to avoid exploding the debris
+                _lastStageTime = VesselState.time;
+            }
+
+            if (!Vessel.isActiveVessel)
+            {
+                _currentActiveVessel = FlightGlobals.ActiveVessel;
+                Debug.Log($"Mechjeb Autostage: Switching from {FlightGlobals.ActiveVessel.name} to vessel {Vessel.name} to stage");
+
+                _remoteStagingStatus = RemoteStagingState.WAITING_FOCUS;
+                FlightGlobals.ForceSetActiveVessel(Vessel);
+            }
+            else
+            {
+                Debug.Log($"Mechjeb Autostage: Executing next stage on {FlightGlobals.ActiveVessel.name}");
+
+                switch (_remoteStagingStatus)
+                {
+                    case RemoteStagingState.DISABLED:
+                        StageManager.ActivateNextStage();
+                        break;
+                    case RemoteStagingState.FOCUS_FINISHED:
+                        StageManager.ActivateNextStage();
+                        FlightGlobals.ForceSetActiveVessel(_currentActiveVessel);
+                        Debug.Log($"Mechjeb Autostage: Has switching back to {FlightGlobals.ActiveVessel.name} ");
+                        _remoteStagingStatus = RemoteStagingState.DISABLED;
+                        break;
+                }
+            }
+
+            _countingDown = false;
+
+            if (AutostagingOnce)
+                Users.Clear();
+
+        }
+
         public void Stage()
         {
             //When we find that we're allowed to stage, start a countdown (with a
             //length given by autostagePreDelay) and only stage once that countdown finishes,
-            if (_countingDown)
-            {
-                if (VesselState.time - _stageCountdownStart > AutostagePreDelay)
-                {
-                    if (InverseStageFiresDecoupler(Vessel.currentStage - 1))
-                    {
-                        //if we decouple things, delay the next stage a bit to avoid exploding the debris
-                        _lastStageTime = VesselState.time;
-                    }
-
-                    if (!Vessel.isActiveVessel)
-                    {
-                        _currentActiveVessel = FlightGlobals.ActiveVessel;
-                        Debug.Log($"Mechjeb Autostage: Switching from {FlightGlobals.ActiveVessel.name} to vessel {Vessel.name} to stage");
-
-                        _remoteStagingStatus = RemoteStagingState.WAITING_FOCUS;
-                        FlightGlobals.ForceSetActiveVessel(Vessel);
-                    }
-                    else
-                    {
-                        Debug.Log($"Mechjeb Autostage: Executing next stage on {FlightGlobals.ActiveVessel.name}");
-
-                        if (_remoteStagingStatus == RemoteStagingState.DISABLED)
-                        {
-                            StageManager.ActivateNextStage();
-                        }
-                        else if (_remoteStagingStatus == RemoteStagingState.FOCUS_FINISHED)
-                        {
-                            StageManager.ActivateNextStage();
-                            FlightGlobals.ForceSetActiveVessel(_currentActiveVessel);
-                            Debug.Log($"Mechjeb Autostage: Has switching back to {FlightGlobals.ActiveVessel.name} ");
-                            _remoteStagingStatus = RemoteStagingState.DISABLED;
-                        }
-                    }
-
-                    _countingDown = false;
-
-                    if (AutostagingOnce)
-                        Users.Clear();
-                }
-            }
-            else
+            if (!_countingDown)
             {
                 _countingDown        = true;
                 _stageCountdownStart = VesselState.time;
+            }
+
+            if (VesselState.time - _stageCountdownStart >= AutostagePreDelay)
+            {
+                ImmediateStage();
             }
         }
 
@@ -421,10 +431,24 @@ namespace MuMech
 
         private double LastNonZeroDVStageBurnTime()
         {
-            for (int mjPhase = _vacStats.Count - 1; mjPhase >= 0; mjPhase--)
+            _stats.RequestUpdate();
+            int kspStage = -1;
+            int mjPhase;
+            double dt = 0f;
+
+            // Find the last MJ phase and corresponding KSP stage with non-zero burn time
+            for (mjPhase = _vacStats.Count - 1; mjPhase >= 0; mjPhase--)
                 if (_vacStats[mjPhase].DeltaTime > 0)
-                    return _vacStats[mjPhase].DeltaTime;
-            return 0;
+                {
+                    kspStage = _vacStats[mjPhase].KSPStage;
+                    break;
+                }
+
+            // Sum the burn time of all MJ phases with the same KSP stage number
+            for (; mjPhase >= 0 && _vacStats[mjPhase].KSPStage == kspStage; mjPhase--)
+                dt += _vacStats[mjPhase].DeltaTime;
+
+            return dt;
         }
 
         // allModuleEngines => IsEngine() && !IsSepratron()
@@ -499,7 +523,7 @@ namespace MuMech
 
             if (!p.IsSepratron() && !IsBurnedOutSrbDecoupledInNextStage(p))
             {
-                if ((p.State == PartStates.ACTIVE || p.State == PartStates.IDLE) && p.EngineHasFuel() && !p.UnrestartableDeadEngine())
+                if ((p.State == PartStates.ACTIVE || p.State == PartStates.IDLE) && p.EngineHasFuel() && !p.IsUnrestartableDeadEngine())
                 {
                     return true; // TODO: properly check if ModuleEngines is active
                 }
@@ -636,7 +660,7 @@ namespace MuMech
         private bool HasFairingUncached(int inverseStage)
         {
             _partsInStage.Clear();
-            Vessel.parts.Slinq().Where((p, s) => p.inverseStage == s, inverseStage).AddTo(_partsInStage);
+            Vessel.parts.Slinq().Where((p, s) => p.hasStagingIcon && p.inverseStage == s, inverseStage).AddTo(_partsInStage);
 
             // proc parts are reasonably easy, but all the parts in the stage must be payload fairings for them to
             // be treated as payload fairings here.  a payload fairing and a stack decoupler will bypass the fairing

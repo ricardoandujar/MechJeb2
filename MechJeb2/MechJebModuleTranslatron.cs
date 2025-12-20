@@ -1,6 +1,6 @@
-﻿using System;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using System.Collections.Generic;
-using JetBrains.Annotations;
 using KSP.Localization;
 using KSP.UI.Screens;
 using UnityEngine;
@@ -8,7 +8,6 @@ using static MechJebLib.Utils.Statics;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleTranslatron : DisplayModule
     {
         protected static readonly string[] trans_texts =

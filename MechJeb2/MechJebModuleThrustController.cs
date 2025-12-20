@@ -1,15 +1,23 @@
-﻿using System;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using JetBrains.Annotations;
+using JetBrainsAnnotations::JetBrains.Annotations;
 using KSP.Localization;
+using MechJebLibBindings;
 using UnityEngine;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleThrustController : ComputerModule
     {
+        private static readonly bool _isLoadedRealFuels;
+
+        static MechJebModuleThrustController()
+        {
+            _isLoadedRealFuels = ReflectionUtils.IsAssemblyLoaded("RealFuels");
+        }
+
         public enum DifferentialThrottleStatus
         {
             SUCCESS,
@@ -280,6 +288,17 @@ namespace MuMech
             SetFlightGlobals(0);
         }
 
+        public void RequestActiveThrottle(float target, bool enforceMinimum = true, bool allowZero = false)
+        {
+            if (enforceMinimum && LimiterMinThrottle)
+                if (allowZero && target == 0)
+                    TargetThrottle = 0;
+                else
+                    TargetThrottle = Mathf.Max(target, (float)MinThrottle);
+            else
+                TargetThrottle = target;
+        }
+
         private void SetFlightGlobals(double throttle)
         {
             if (FlightGlobals.ActiveVessel != null && Vessel == FlightGlobals.ActiveVessel)
@@ -297,7 +316,7 @@ namespace MuMech
             double spooldownDV = VesselState.currentThrustAccel * VesselState.maxEngineResponseTime;
             double desiredAcceleration = (dV - spooldownDV) / timeConstant;
 
-            TargetThrottle = Mathf.Clamp01((float)(desiredAcceleration / VesselState.maxThrustAccel));
+            TargetThrottle = Mathf.Clamp((float)(desiredAcceleration / VesselState.maxThrustAccel), 0.01f, 1.00f);
         }
 
         /* the current throttle limit, this may include transient condition such as limiting to zero due to unstable propellants in RF */
@@ -873,6 +892,11 @@ namespace MuMech
         /// <param name="s"></param>
         private void ProcessUllage(FlightCtrlState s)
         {
+            // because we don't always return when ullage is stable below, we have to
+            // explicitly check for RF being loaded.
+            if (!_isLoadedRealFuels)
+                return;
+
             if (!AutoRCSUllaging || s.mainThrottle <= 0F || ThrottleLimit <= 0F)
                 return;
 
@@ -884,7 +908,14 @@ namespace MuMech
             // ullage may dramatically drop below stable (by as much as to 0.76 in a single tick) so
             // we cannot "detect" low ullage and compensate, but must apply RCS until thrust has come
             // up sufficiently.
-            if (stableUllage && VesselState.thrustCurrent > VesselState.rcsThrustAvailable.Up )
+            if (stableUllage && VesselState.thrustCurrent > VesselState.rcsThrustAvailable.Up)
+                return;
+
+            // if desiredThrust is less than the RCS thrust then don't worry about ullage.  avoids RCS
+            // being applied when the user is doing dribble throttle (unlikely with RF loaded, but possible).
+            double desiredThrust = (VesselState.thrustAvailable - VesselState.thrustMinimum) * s.mainThrottle;
+
+            if (stableUllage && desiredThrust < VesselState.rcsThrustAvailable.Up)
                 return;
 
             // limit the throttle only if we aren't already burning (don't waste ignitions)
@@ -959,7 +990,7 @@ namespace MuMech
             alglib.minqpsetquadraticterm(state, a, false);
             alglib.minqpsetlinearterm(state, b);
             alglib.minqpsetbc(state, boundL, boundU);
-            alglib.minqpsetalgobleic(state, 0.0, 0.0, 0.0, 0);
+            alglib.minqpsetalgodensegenipm(state, 0.0);
             //var t1 = stopwatch.ElapsedMilliseconds;
             alglib.minqpoptimize(state);
             //var t2 = stopwatch.ElapsedMilliseconds;

@@ -1,18 +1,17 @@
-﻿using System.Collections.Generic;
+﻿extern alias JetBrainsAnnotations;
+using System.Collections.Generic;
 using System.Linq;
-using JetBrains.Annotations;
 using KSP.Localization;
 using UnityEngine;
 using static MechJebLib.Utils.Statics;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleRCSBalancer : ComputerModule
     {
         [Persistent(pass = (int)(Pass.TYPE | Pass.GLOBAL))]
         [ToggleInfoItem("#MechJeb_smartTranslation", InfoItem.Category.Thrust)] //Smart RCS translation
-        public bool smartTranslation = false;
+        public bool smartTranslation;
 
         // Overdrive
         [Persistent(pass = (int)(Pass.TYPE | Pass.GLOBAL))]

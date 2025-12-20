@@ -1,8 +1,9 @@
-﻿using System;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
-using JetBrains.Annotations;
+using JetBrainsAnnotations::JetBrains.Annotations;
 using KSP.IO;
 using KSP.Localization;
 using UnityEngine;
@@ -179,7 +180,7 @@ namespace MuMech
                 }
             }
 
-            _stats = $"{Count} waypoints over {distance.ToSI(-1)}m";
+            _stats = $"{Count} waypoints over {distance.ToSI()}m";
         }
 
         public MechJebWaypointRoute(string name = "", CelestialBody body = null, string mode = "Rover")
@@ -207,7 +208,6 @@ namespace MuMech
         }
     }
 
-    [UsedImplicitly]
     public class MechJebModuleWaypointWindow : DisplayModule
     {
         public enum WaypointMode

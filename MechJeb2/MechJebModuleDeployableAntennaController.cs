@@ -1,10 +1,9 @@
-﻿using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
 using KSP.Localization;
 using UnityEngine;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleDeployableAntennaController : MechJebModuleDeployableController
     {
         public MechJebModuleDeployableAntennaController(MechJebCore core) : base(core)

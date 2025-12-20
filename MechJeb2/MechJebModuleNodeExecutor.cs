@@ -1,14 +1,23 @@
-﻿using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
 using MechJebLib.FuelFlowSimulation;
+using MechJebLibBindings;
 using UnityEngine;
 using static System.Math;
 using static MechJebLib.Utils.Statics;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleNodeExecutor : ComputerModule
     {
+        private static readonly bool _isLoadedRealFuels;
+        private static readonly bool _isLoadedPrincipia;
+
+        static MechJebModuleNodeExecutor()
+        {
+            _isLoadedRealFuels = ReflectionUtils.IsAssemblyLoaded("RealFuels");
+            _isLoadedPrincipia = ReflectionUtils.IsAssemblyLoaded("principia.ksp_plugin_adapter");
+        }
+
         // whether to auto-warp to nodes
         [Persistent(pass = (int)Pass.GLOBAL)]
         public bool Autowarp = true;
@@ -28,7 +37,7 @@ namespace MuMech
                 return "-";
 
             double dV;
-            if (VesselState.isLoadedPrincipia && _dvLeft > 0)
+            if (_isLoadedPrincipia && _dvLeft > 0)
             {
                 dV = _dvLeft;
             }
@@ -81,21 +90,26 @@ namespace MuMech
             _direction = Vector3d.zero;
             _dvLeft    = Vessel.patchedConicSolver.maneuverNodes[0].GetBurnVector(Orbit).magnitude;
             Core.Thrust.ThrustOff();
+            Core.Attitude.Users.Add(this);
+            Core.Thrust.Users.Add(this);
         }
 
         public void Abort()
         {
             Core.Warp.MinimumWarp();
             Core.Thrust.ThrustOff();
+            Core.Attitude.attitudeDeactivate();
             Users.Clear();
-            _dvLeft   = 0;
-            State     = States.IDLE;
+            _direction = Vector3d.zero;
+            _dvLeft    = 0;
+            State      = States.IDLE;
         }
 
         protected override void OnModuleEnabled()
         {
-            Core.Attitude.Users.Add(this);
-            Core.Thrust.Users.Add(this);
+            State      = States.IDLE;
+            _direction = Vector3d.zero;
+            _dvLeft    = 0;
         }
 
         protected override void OnModuleDisabled()
@@ -103,6 +117,7 @@ namespace MuMech
             Core.Attitude.attitudeDeactivate();
             Core.Thrust.ThrustOff();
             Core.Thrust.Users.Remove(this);
+            State   = States.IDLE;
             _dvLeft = 0;
         }
 
@@ -113,18 +128,20 @@ namespace MuMech
         private Mode   _mode = Mode.ONE_NODE;
         public  States State = States.IDLE;
 
-        private        double   _dvLeft;    // for Principia
-        private        Vector3d _direction; // de-rotated world vector
-        private        Vector3d _worldDirection => Planetarium.fetch.rotation * _direction;
-        private        double   _ignitionUT;
-        private static bool     _isLoadedPrincipia => VesselState.isLoadedPrincipia;
-        private        bool     _hasNodes          => Vessel.patchedConicSolver.maneuverNodes.Count > 0;
-        private        double   _ullageUntil;
+        private double   _dvLeft;    // for Principia
+        private Vector3d _direction; // de-rotated world vector
+        private Vector3d _worldDirection => Planetarium.fetch.rotation * _direction;
+        private double   _ignitionUT;
+        private bool     _hasNodes => Vessel.patchedConicSolver.maneuverNodes.Count > 0;
+        private double   _ullageUntil;
 
         public override void Drive(FlightCtrlState s) => DoRCS(s);
 
         private void DoRCS(FlightCtrlState s)
         {
+            if (State == States.IDLE)
+                return;
+
             // seconds to continue to apply RCS after ullage has settled to VeryStable
             const double MIN_RCS_TIME = 0.25;
 
@@ -138,7 +155,7 @@ namespace MuMech
             if (State != States.LEAD || RCSOnly)
                 return;
 
-            if (!Core.Thrust.AutoRCSUllaging)
+            if (!Core.Thrust.AutoRCSUllaging || !_isLoadedRealFuels)
                 return;
 
             // always apply MIN_RCS_TIME of ullage right before the ignition time
@@ -219,11 +236,17 @@ namespace MuMech
 
             if (timeToBurn > 600)
             {
+                Core.Attitude.SetAxisControl(false, false, false);
                 Core.Warp.WarpToUT(_ignitionUT - 600);
                 return;
             }
 
-            Core.Warp.MinimumWarp();
+            if (!MuUtils.PhysicsRunning())
+            {
+                Core.Warp.MinimumWarp();
+                return;
+            }
+
             SetAttitude();
         }
 
@@ -309,7 +332,9 @@ namespace MuMech
 
         private bool Aligned() => AngleFromDirection() < Deg2Rad(1);
 
-        private bool AlignedAndSettled() => Aligned() && Core.vessel.angularVelocity.magnitude < 0.001;
+        private bool AlignedAndSettled() =>
+            Aligned()
+            && Vector3.Scale(Core.vessel.angularVelocity, new Vector3(1f, 0f, 1f)).magnitude < 0.001;
 
         // This returns the angle to the node (in radians), note that you probably don't want to use this outside of
         // stock checks for maneuver termination, and probably never in principia (see SafeCurrentPrincipiaNode()).
@@ -353,13 +378,15 @@ namespace MuMech
         {
             var invRot = QuaternionD.Inverse(Planetarium.fetch.rotation);
 
-            if (_direction != Vector3d.zero) // handle initialization
-            {
-                if (_isLoadedPrincipia && SafeCurrentPrincipiaNode() == null) return _direction;
+            if (_direction == Vector3d.zero)
+                return invRot * Vessel.patchedConicSolver.maneuverNodes[0].GetBurnVector(Orbit).normalized; // handle initialization
 
-                // FIXME: need to deal with RCS forward thrust accel here if we're RCSOnly
-                if (!_isLoadedPrincipia && _dvLeft < VesselState.minThrustAccel) return _direction;
-            }
+            if (_isLoadedPrincipia && SafeCurrentPrincipiaNode() == null)
+                return _direction;
+
+            // FIXME: need to deal with RCS forward thrust accel here if we're RCSOnly
+            if (!_isLoadedPrincipia && _dvLeft < VesselState.maxThrustAccel)
+                return _direction;
 
             return invRot * Vessel.patchedConicSolver.maneuverNodes[0].GetBurnVector(Orbit).normalized;
         }

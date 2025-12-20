@@ -1,14 +1,14 @@
-﻿using System;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using JetBrains.Annotations;
+using JetBrainsAnnotations::JetBrains.Annotations;
 using KSP.Localization;
 using UnityEngine;
 using static MechJebLib.Utils.Statics;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleLandingGuidance : DisplayModule
     {
         private       MechJebModuleLandingPredictions _predictor;
@@ -169,6 +169,7 @@ namespace MuMech
                 Core.Landing.RCSAdjustment =
                     GUILayout.Toggle(Core.Landing.RCSAdjustment,
                         Localizer.Format("#MechJeb_LandingGuidance_checkbox4")); //Use RCS for small adjustment
+                Core.Thrust.LimiterMinThrottleInfoItem(); //Toggle to prevent full engine shutdowns
 
                 GuiUtils.SimpleTextBox("steepness", Core.Landing.steepness, "", 35);
 

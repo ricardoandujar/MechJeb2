@@ -8,6 +8,7 @@ using System.Threading;
 using MechJebLib.Functions;
 using MechJebLib.Lambert;
 using MechJebLib.Primitives;
+using MechJebLibBindings;
 using UnityEngine;
 using UnityToolbag;
 
@@ -371,16 +372,13 @@ namespace MuMech
             //
             alglib.minnlccreatef(VARS, x, DIFFSTEP, out alglib.minnlcstate state);
             alglib.minnlcsetstpmax(state, 1e-3);
-            double rho = 250.0;
-            int outerits = 5;
-            alglib.minnlcsetalgoaul(state, rho, outerits);
+            //int outerits = 5;
+            //alglib.minnlcsetalgoaul2(state, outerits);
             //alglib.minnlcsetalgoslp(state);
-            //alglib.minnlcsetalgosqp(state);
+            alglib.minnlcsetalgosqp(state);
             alglib.minnlcsetcond(state, EPSX, MAXITS);
 
             alglib.minnlcsetnlc(state, EQUALITYCONSTRAINTS, INEQUALITYCONSTRAINTS);
-
-            alglib.minnlcsetprecexactrobust(state, 0);
 
             alglib.minnlcoptimize(state, PeriapsisObjective, null, null);
             alglib.minnlcresults(state, out x, out alglib.minnlcreport rep);

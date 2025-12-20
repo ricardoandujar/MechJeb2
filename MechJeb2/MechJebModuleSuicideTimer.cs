@@ -1,14 +1,13 @@
 ﻿#nullable enable
 
-using JetBrains.Annotations;
-using MechJebLib;
+extern alias JetBrainsAnnotations;
 using MechJebLib.FuelFlowSimulation;
 using MechJebLib.Primitives;
 using MechJebLib.SuicideBurnSimulation;
+using MechJebLibBindings;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleSuicideTimer : ComputerModule
     {
         private Suicide?              _suicide;

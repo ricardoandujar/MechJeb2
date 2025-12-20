@@ -1,10 +1,9 @@
-﻿using System;
-using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using UnityEngine;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleRCSController : ComputerModule
     {
         public Vector3d targetVelocity = Vector3d.zero;
@@ -26,7 +25,7 @@ namespace MuMech
 
         [Persistent(pass = (int)Pass.GLOBAL)]
         [ToggleInfoItem("#MechJeb_conserveFuel", InfoItem.Category.Thrust)] //Conserve RCS fuel
-        public readonly bool conserveFuel = false;
+        public readonly bool conserveFuel;
 
         [EditableInfoItem("#MechJeb_conserveThreshold", InfoItem.Category.Thrust, rightLabel = "m/s")] //Conserve RCS fuel threshold
         public readonly EditableDouble conserveThreshold = 0.05;

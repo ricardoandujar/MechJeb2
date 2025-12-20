@@ -1,11 +1,10 @@
-﻿using System;
-using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using KSP.Localization;
 using UnityEngine;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleRCSBalancerWindow : DisplayModule
     {
         public MechJebModuleRCSBalancer balancer;

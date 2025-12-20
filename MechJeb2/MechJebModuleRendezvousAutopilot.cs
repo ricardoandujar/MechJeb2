@@ -1,11 +1,10 @@
-﻿using System;
-using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using KSP.Localization;
 using static MechJebLib.Utils.Statics;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleRendezvousAutopilot : ComputerModule
     {
         public MechJebModuleRendezvousAutopilot(MechJebCore core) : base(core) { }

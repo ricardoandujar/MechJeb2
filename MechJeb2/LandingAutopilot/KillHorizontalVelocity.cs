@@ -29,7 +29,7 @@ namespace MuMech
                 // If Vertical speed is positive then time to move on to final descent - it will kill any residual horizontal speed.
                 if (Vector3d.Dot(horizontalPointingDirection, VesselState.surfaceVelocity) > 0)
                 {
-                    Core.Thrust.TargetThrottle = 0;
+                    Core.Thrust.RequestActiveThrottle(0.0f);
                     Core.Attitude.attitudeTo(Vector3.up, AttitudeReference.SURFACE_NORTH, Core.Landing);
                     return new FinalDescent(Core, Core.Thrust.TargetThrottle);
                 }
@@ -45,11 +45,11 @@ namespace MuMech
                 double maxAccel = -VesselState.localg + Vector3d.Dot(VesselState.forward, VesselState.up) * VesselState.limitedMaxThrustAccel;
                 if (maxAccel - minAccel > 0)
                 {
-                    Core.Thrust.TargetThrottle = Mathf.Clamp((float)((desiredAccel - minAccel) / (maxAccel - minAccel)), 0.0F, 1.0F);
+                    Core.Thrust.RequestActiveThrottle(Mathf.Clamp((float)((desiredAccel - minAccel) / (maxAccel - minAccel)), 0.0f, 1.0f));
                 }
                 else
                 {
-                    Core.Thrust.TargetThrottle = 0;
+                    Core.Thrust.RequestActiveThrottle(0.0f);
                 }
 
                 //angle up and slightly away from vertical:

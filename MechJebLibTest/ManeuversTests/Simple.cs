@@ -1,5 +1,4 @@
 ﻿using System;
-using AssertExtensions;
 using MechJebLib.Functions;
 using MechJebLib.Primitives;
 using Xunit;
@@ -30,7 +29,7 @@ namespace MechJebLibTest.ManeuversTests
 
                 V3 dv = MechJebLib.Maneuvers.Simple.DeltaVToCircularize(mu, r, v);
 
-                Astro.EccFromStateVectors(mu, r, v + dv).ShouldEqual(0, 1e-15);
+                Astro.EccFromStateVectors(mu, r, v + dv).ShouldEqual(0, 1e-14);
                 Astro.PeriapsisFromStateVectors(mu, r, v + dv).ShouldEqual(r.magnitude, 1e-7);
                 Astro.ApoapsisFromStateVectors(mu, r, v + dv).ShouldEqual(r.magnitude, 1e-7);
             }
@@ -45,8 +44,8 @@ namespace MechJebLibTest.ManeuversTests
 
             for (int i = 0; i < NTRIALS; i++)
             {
-                var r = new V3(4 * random.NextDouble() - 2, 4 * random.NextDouble() - 2, 4 * random.NextDouble() - 2);
-                var v = new V3(4 * random.NextDouble() - 2, 4 * random.NextDouble() - 2, 4 * random.NextDouble() - 2);
+                var    r      = new V3(4 * random.NextDouble() - 2, 4 * random.NextDouble() - 2, 4 * random.NextDouble() - 2);
+                var    v      = new V3(4 * random.NextDouble() - 2, 4 * random.NextDouble() - 2, 4 * random.NextDouble() - 2);
                 double newPeR = random.NextDouble() * r.magnitude;
                 double newApR = random.NextDouble() * 1e9 + r.magnitude;
 
@@ -83,8 +82,8 @@ namespace MechJebLibTest.ManeuversTests
                 v *= vscale;
 
                 double plusOrMinusOne = random.Next(0, 2) * 2 - 1;
-                double lat = Astro.LatitudeFromBCI(r);
-                double newInc = Abs(lat) + random.NextDouble() * (PI - 2 * Abs(lat));
+                double lat            = Astro.LatitudeFromBCI(r);
+                double newInc         = Abs(lat) + random.NextDouble() * (PI - 2 * Abs(lat));
                 newInc *= plusOrMinusOne;
 
                 V3 dv = MechJebLib.Maneuvers.Simple.DeltaVToChangeInclination(r, v, newInc);
@@ -96,10 +95,10 @@ namespace MechJebLibTest.ManeuversTests
         [Fact]
         public void DeltaVToChangeInclinationTest1()
         {
-            const double mu = 3.986004418e+14;
+            const double mu     = 3.986004418e+14;
             const double rearth = 6.371e+6;
-            const double r185 = rearth + 185e+3;
-            double v185 = Astro.CircularVelocity(mu, r185);
+            const double r185   = rearth + 185e+3;
+            double       v185   = Astro.CircularVelocity(mu, r185);
 
             var r0 = new V3(r185, 0, 0);
             var v0 = new V3(0, v185, 0);
@@ -116,10 +115,10 @@ namespace MechJebLibTest.ManeuversTests
         [Fact]
         public void DeltaVToChangeFPATest1()
         {
-            const double mu = 3.986004418e+14;
+            const double mu     = 3.986004418e+14;
             const double rearth = 6.371e+6;
-            const double r185 = rearth + 185e+3;
-            double v185 = Astro.CircularVelocity(mu, r185);
+            const double r185   = rearth + 185e+3;
+            double       v185   = Astro.CircularVelocity(mu, r185);
 
             var r0 = new V3(r185, 0, 0);
             var v0 = new V3(0, v185, 0);

@@ -1,12 +1,11 @@
-﻿using System.Linq;
-using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
+using System.Linq;
 using KSP.Localization;
 using UnityEngine;
 using static MechJebLib.Utils.Statics;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleRendezvousGuidance : DisplayModule
     {
         public MechJebModuleRendezvousGuidance(MechJebCore core) : base(core) { }

@@ -1,16 +1,15 @@
-﻿using System;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
-using JetBrains.Annotations;
 using KSP.Localization;
 using KSP.UI.Screens;
 using UnityEngine;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleMenu : DisplayModule
     {
         public MechJebModuleMenu(MechJebCore core)
@@ -128,7 +127,7 @@ namespace MuMech
 
         [ToggleInfoItem("#MechJeb_HideMenuButton", InfoItem.Category.Misc)]
         [Persistent(pass = (int)Pass.GLOBAL)]
-        public readonly bool hideButton = false; //Hide Menu Button
+        public readonly bool hideButton; //Hide Menu Button
 
         [ToggleInfoItem("#MechJeb_UseAppLauncher", InfoItem.Category.Misc)]
         [Persistent(pass = (int)Pass.GLOBAL)]
@@ -473,7 +472,7 @@ namespace MuMech
         }
 
         // OnDestroy is actually run a bit too often when we have multiple MJ unit that get staged
-        // But the edge case may get a bit too complex to handle properly so for now we 
+        // But the edge case may get a bit too complex to handle properly so for now we
         // recreate the buttons a bit often.
         public override void OnDestroy()
         {

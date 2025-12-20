@@ -1,17 +1,16 @@
-﻿using System;
-using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
+using System;
+using JetBrainsAnnotations::JetBrains.Annotations;
 using UnityEngine;
 
 namespace MuMech.AttitudeControllers
 {
     internal class KosAttitudeController : BaseAttitudeController
     {
-        [UsedImplicitly]
-        [Persistent(pass = (int)Pass.GLOBAL)]
+        [UsedImplicitly] [Persistent(pass = (int)Pass.GLOBAL)]
         public readonly EditableDouble MaxStoppingTime = new EditableDouble(2);
 
-        [UsedImplicitly]
-        [Persistent(pass = (int)Pass.GLOBAL)]
+        [UsedImplicitly] [Persistent(pass = (int)Pass.GLOBAL)]
         public readonly EditableDoubleMult RollControlRange = new EditableDoubleMult(5 * Mathf.Deg2Rad, Mathf.Deg2Rad);
         //public double RollControlRange {
         //    get { return this.rollControlRange; }
@@ -58,19 +57,19 @@ namespace MuMech.AttitudeControllers
         }
 
         /* temporary state vectors */
-        private Quaternion _vesselRotation;
-        private Vector3d   _vesselForward;
-        private Vector3d   _vesselTop;
-        private Vector3d   _vesselStarboard;
-        private Vector3d   _targetForward;
-        private Vector3d   _targetTop;
+        private QuaternionD _vesselRotation;
+        private Vector3d    _vesselForward;
+        private Vector3d    _vesselTop;
+        private Vector3d    _vesselStarboard;
+        private Vector3d    _targetForward;
+        private Vector3d    _targetTop;
 
         /* private Vector3d targetStarboard; */
 
         private void UpdateStateVectors()
         {
             /* FIXME: may get called more than once per tick */
-            _vesselRotation  = Ac.Vessel.ReferenceTransform.rotation * Quaternion.Euler(-90, 0, 0);
+            _vesselRotation  = (QuaternionD)Ac.Vessel.ReferenceTransform.rotation * MathExtensions.Euler(-90, 0, 0);
             _vesselForward   = _vesselRotation * Vector3d.forward;
             _vesselTop       = _vesselRotation * Vector3d.up;
             _vesselStarboard = _vesselRotation * Vector3d.right;

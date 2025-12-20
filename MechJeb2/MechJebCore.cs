@@ -1,10 +1,11 @@
-﻿using System;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using JetBrains.Annotations;
+using JetBrainsAnnotations::JetBrains.Annotations;
 using KSP.Localization;
 using UnityEngine;
 using UnityEngine.Profiling;
@@ -33,7 +34,7 @@ namespace MuMech
         private bool _ready;
 
         public MechJebModuleGuidanceController          Guidance;
-        public MechJebModulePVGGlueBall                 Glueball;
+        public MechJebModulePSGGlueBall                 Glueball;
         public MechJebModuleAttitudeController          Attitude;
         public MechJebModuleStagingController           Staging;
         public MechJebModuleThrustController            Thrust;
@@ -463,7 +464,7 @@ namespace MuMech
                 _controlledVessel  =  vessel;
             }
 
-            Logger.Register(SafePrint);
+            Logger.GlobalRegister(SafePrint);
         }
 
         public override void OnActive()
@@ -747,7 +748,7 @@ namespace MuMech
             Settings       = GetComputerModule<MechJebModuleSettings>();
             Airplane       = GetComputerModule<MechJebModuleAirplaneAutopilot>();
             Guidance       = GetComputerModule<MechJebModuleGuidanceController>();
-            Glueball       = GetComputerModule<MechJebModulePVGGlueBall>();
+            Glueball       = GetComputerModule<MechJebModulePSGGlueBall>();
             StageStats     = GetComputerModule<MechJebModuleStageStats>();
             AscentSettings = GetComputerModule<MechJebModuleAscentSettings>();
             Spinup         = GetComputerModule<MechJebModuleSpinupController>();
@@ -958,13 +959,15 @@ namespace MuMech
                 Profiler.BeginSample("MechJebCore.OnSave.sfsNode");
                 if (sfsNode != null) sfsNode.nodes.Add(local);
                 Profiler.EndSample();
+
+                // Vessel-specific settings don't get saved in the Editor.
+                // The reason for this is, that OnLoad has no way to determine the vessel name in the Editor; this means
+                // that the vessel settings get loaded at their default values, and then shortly afterward saved -
+                // overwriting the previously saved settings!
                 Profiler.BeginSample("MechJebCore.OnSave.type");
-                // The EDITOR => FLIGHT transition is annoying to handle. OnDestroy is called when HighLogic.LoadedSceneIsEditor is already false
-                // So we don't save in that case, which is not that bad since nearly nothing use vessel settings in the editor.
-                if (type != null && (vessel != null || (HighLogic.LoadedSceneIsEditor && EditorLogic.fetch != null)))
+                if (type != null && vessel != null)
                 {
-                    string vesselName = HighLogic.LoadedSceneIsEditor && EditorLogic.fetch ? EditorLogic.fetch.shipNameField.text : vessel.vesselName;
-                    vesselName = string.Join("_", vesselName.Split(Path.GetInvalidFileNameChars())); // Strip illegal char from the filename
+                    string vesselName = string.Join("_", vessel.vesselName.Split(Path.GetInvalidFileNameChars())); // Strip illegal char from the filename
                     type.Save(MuUtils.GetCfgPath("mechjeb_settings_type_" + vesselName + ".cfg"));
                 }
 

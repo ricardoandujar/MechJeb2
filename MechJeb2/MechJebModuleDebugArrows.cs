@@ -1,13 +1,12 @@
-﻿using System;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using System.Collections.Generic;
-using JetBrains.Annotations;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Object = UnityEngine.Object;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     internal class MechJebModuleDebugArrows : ComputerModule
     {
         [Persistent(pass = (int)Pass.GLOBAL)]

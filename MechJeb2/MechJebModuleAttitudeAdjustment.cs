@@ -1,14 +1,12 @@
-﻿using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
 using KSP.Localization;
 using UnityEngine;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleAttitudeAdjustment : DisplayModule
     {
-        [Persistent(pass = (int)Pass.GLOBAL)]
-        public bool showInfos;
+        [Persistent(pass = (int)Pass.GLOBAL)] public bool showInfos;
 
         public MechJebModuleAttitudeAdjustment(MechJebCore core) : base(core) { }
 
@@ -39,6 +37,11 @@ namespace MuMech
             if (GUILayout.Toggle(currentController == 3, "BetterController"))
             {
                 currentController = 3;
+            }
+
+            if (GUILayout.Toggle(currentController == 4, "LQRController"))
+            {
+                currentController = 4;
             }
 
             GUILayout.BeginHorizontal();

@@ -1,5 +1,6 @@
-﻿using System;
-using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
+using System;
+using JetBrainsAnnotations::JetBrains.Annotations;
 using KSP.Localization;
 using UnityEngine;
 
@@ -7,16 +8,13 @@ namespace MuMech.AttitudeControllers
 {
     internal class HybridController : BaseAttitudeController
     {
-        [UsedImplicitly]
-        [Persistent(pass = (int)Pass.GLOBAL)]
+        [UsedImplicitly] [Persistent(pass = (int)Pass.GLOBAL)]
         public readonly EditableDouble MaxStoppingTime = new EditableDouble(2);
 
-        [UsedImplicitly]
-        [Persistent(pass = (int)Pass.GLOBAL)]
+        [UsedImplicitly] [Persistent(pass = (int)Pass.GLOBAL)]
         public readonly EditableDoubleMult RollControlRange = new EditableDoubleMult(5 * Mathf.Deg2Rad, Mathf.Deg2Rad);
 
-        [UsedImplicitly]
-        [Persistent(pass = (int)Pass.GLOBAL)]
+        [UsedImplicitly] [Persistent(pass = (int)Pass.GLOBAL)]
         public bool UseControlRange = true;
 
         private readonly TorquePI _pitchPI = new TorquePI();
@@ -27,8 +25,7 @@ namespace MuMech.AttitudeControllers
         private readonly KosPIDLoop _yawRatePI   = new KosPIDLoop(1, 0.1, 0, extraUnwind: true);
         private readonly KosPIDLoop _rollRatePI  = new KosPIDLoop(1, 0.1, 0, extraUnwind: true);
 
-        [UsedImplicitly]
-        [Persistent(pass = (int)Pass.GLOBAL)]
+        [UsedImplicitly] [Persistent(pass = (int)Pass.GLOBAL)]
         public bool UseInertia = true;
 
         private Vector3d _actuation    = Vector3d.zero;
@@ -69,13 +66,13 @@ namespace MuMech.AttitudeControllers
             // 1. The Euler(-90) here is because the unity transform puts "up" as the pointy end, which is wrong.  The rotation means that
             // "forward" becomes the pointy end, and "up" and "right" correctly define e.g. AoA/pitch and AoS/yaw.  This is just KSP being KSP.
             // 2. We then use the inverse ship rotation to transform the requested attitude into the ship frame.
-            Quaternion deltaRotation = Quaternion.Inverse(vesselTransform.transform.rotation * Quaternion.Euler(-90, 0, 0)) * Ac.RequestedAttitude;
+            QuaternionD deltaRotation = QuaternionD.Inverse((QuaternionD)vesselTransform.transform.rotation * MathExtensions.Euler(-90, 0, 0)) * Ac.RequestedAttitude;
 
             // get us some euler angles for the target transform
-            Vector3d ea = deltaRotation.eulerAngles;
-            double pitch = ea[0] * UtilMath.Deg2Rad;
-            double yaw = ea[1] * UtilMath.Deg2Rad;
-            double roll = ea[2] * UtilMath.Deg2Rad;
+            Vector3d ea    = MathExtensions.EulerAngles(deltaRotation);
+            double   pitch = ea[0] * UtilMath.Deg2Rad;
+            double   yaw   = ea[1] * UtilMath.Deg2Rad;
+            double   roll  = ea[2] * UtilMath.Deg2Rad;
 
             // law of cosines for the "distance" of the miss in radians
             _phiTotal = Math.Acos(MuUtils.Clamp(Math.Cos(pitch) * Math.Cos(yaw), -1, 1));

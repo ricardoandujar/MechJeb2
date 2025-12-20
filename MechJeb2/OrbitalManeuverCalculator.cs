@@ -3,6 +3,7 @@ using MechJebLib.Lambert;
 using MechJebLib.Maneuvers;
 using MechJebLib.Primitives;
 using MechJebLib.Rootfinding;
+using MechJebLibBindings;
 using Smooth.Pools;
 using UnityEngine;
 using static MechJebLib.Utils.Statics;
@@ -100,12 +101,13 @@ namespace MuMech
         //Returned heading is in degrees and in the range 0 to 360.
         //If the given latitude is too large, so that an orbit with a given inclination never attains the
         //given latitude, then this function returns either 90 (if -90 < inclination < 90) or 270.
-        public static double HeadingForLaunchInclination(Orbit o, double inclinationDegrees)
+        public static double HeadingForLaunchInclination(Orbit o, double inclinationDegrees, double desiredApoapsis)
         {
             (V3 r, V3 v) = o.RightHandedStateVectorsAtUT(Planetarium.GetUniversalTime());
             double rotFreq = TAU / o.referenceBody.rotationPeriod;
 
-            return Rad2Deg(Simple.HeadingForLaunchInclination(o.referenceBody.gravParameter, r, v, Deg2Rad(inclinationDegrees), rotFreq));
+            return Rad2Deg(Simple.HeadingForLaunchInclination(o.referenceBody.gravParameter, r, v, Deg2Rad(inclinationDegrees), rotFreq, o.referenceBody.Radius
+            + desiredApoapsis));
         }
 
         //Computes the delta-V of the burn required to change an orbit's inclination to a given value
@@ -353,16 +355,16 @@ namespace MuMech
 
         public static (Vector3d dv, double dt) DeltaVAndTimeForMoonReturnEjection(Orbit o, double ut, double targetPrimaryRadius)
         {
+            var solver = new ReturnFromMoon();
+
             CelestialBody moon = o.referenceBody;
             CelestialBody primary = moon.referenceBody;
             (V3 moonR0, V3 moonV0) = moon.orbit.RightHandedStateVectorsAtUT(ut);
             double moonSOI = moon.sphereOfInfluence;
             (V3 r0, V3 v0) = o.RightHandedStateVectorsAtUT(ut);
 
-            double dtmin = o.eccentricity >= 1 ? 0 : double.NegativeInfinity;
-
-            (V3 dv, double dt, double newPeR) = ReturnFromMoon.NextManeuver(primary.gravParameter, moon.gravParameter, moonR0,
-                moonV0, moonSOI, r0, v0, targetPrimaryRadius, 0, dtmin);
+            (V3 dv, double dt, double newPeR) = solver.NextManeuver(primary.gravParameter, moon.gravParameter, moonR0,
+                moonV0, moonSOI, r0, v0, targetPrimaryRadius, 0);
 
             Debug.Log($"Solved PeR from calcluator: {newPeR}");
 

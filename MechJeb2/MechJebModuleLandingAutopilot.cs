@@ -1,5 +1,5 @@
-﻿using System;
-using JetBrains.Annotations;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using KSP.Localization;
 using MechJebLib.Utils;
 using ModuleWheels;
@@ -14,7 +14,6 @@ namespace MuMech
     // - Fix the auto warp stop start dance
     // - Replace the openGL code with a LineRenderer
     // -
-    [UsedImplicitly]
     public class MechJebModuleLandingAutopilot : AutopilotModule
     {
         public readonly double LOW_GRAVITY = 1.0;       // m/sec^2
@@ -529,8 +528,8 @@ namespace MuMech
         {
             //if the atmosphere is thin, the deceleration burn should end
             //500 meters above the landing site to allow for a controlled final descent
-            //MechJebCore.print("DecelerationEndAltitude Vacum " + (500 + LandingAltitude).ToString("F2"));
-            if (!UseAtmosphereToBrake()) return 500 + _landingAltitude;
+            //MechJebCore.print("DecelerationEndAltitude Vacum " + (200 + LandingAltitude).ToString("F2"));
+            if (!UseAtmosphereToBrake()) return 200 + _landingAltitude;
 
             // if the atmosphere is thick, deceleration (meaning freefall through the atmosphere)
             // should end a safe height above the landing site in order to allow braking from terminal velocity

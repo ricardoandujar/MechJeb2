@@ -1,13 +1,12 @@
-﻿using System;
+﻿extern alias JetBrainsAnnotations;
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using JetBrains.Annotations;
 using KSP.Localization;
 using UnityEngine;
 
 namespace MuMech
 {
-    [UsedImplicitly]
     public class MechJebModuleSpaceplaneAutopilot : ComputerModule
     {
         public MechJebModuleSpaceplaneAutopilot(MechJebCore core) : base(core) { }
