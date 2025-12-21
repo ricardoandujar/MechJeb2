@@ -28,7 +28,6 @@ namespace MuMech
             private IDescentSpeedPolicy _aggressivePolicy;
             private bool        warp = false;
             private bool        useRealAlt = false;
-            private bool _finalThrottleUpTriggered;
 
             public FinalDescent(MechJebCore core, float _TargetThrottle) : base(core)
             {
@@ -117,7 +116,7 @@ namespace MuMech
                     }
                 }
 
-                return this;*/
+                return this;
             }
 
             public override AutopilotStep Drive(FlightCtrlState s)
