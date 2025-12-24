@@ -176,7 +176,8 @@ namespace MuMech
             // targetLat: Target latitude (degrees).
             // targetLon: Target longitude (degrees).
             // Returns: Unit vector for combined burn direction.
-            public Vector3d CombinedAttitudeForAdj(Vessel vessel, double targetLat, double targetLon)
+            public Vector3d CombinedAttitudeForAdj(Vessel vessel, double targetLat, double targetLon,
+                ref double latErrorDeg, ref double lonErrorDeg)
             {
                 Orbit orbit = vessel.orbit; // Current orbit from Vessel.
                 Vector3d vel = orbit.vel; // Orbital velocity from Orbit.
@@ -193,8 +194,8 @@ namespace MuMech
                 double rotAngle = 360 * deltaT / body.rotationPeriod; // Body rotation during deltaT (degrees).
                 double predLon = (fixedLon - rotAngle + 360) % 360 - 180; // Predicted surface longitude at PE (-180 to 180).
 
-                double latErrorDeg = targetLat - predLat; // Latitude error (degrees).
-                double lonErrorDeg = targetLon - predLon; // Longitude error (degrees).
+                latErrorDeg = targetLat - predLat; // Latitude error (degrees).
+                lonErrorDeg = targetLon - predLon; // Longitude error (degrees).
                 lonErrorDeg = (lonErrorDeg + 180) % 360 - 180; // Normalize to -180 to 180.
 
                 double latErrorRad = latErrorDeg * Math.PI / 180; // Latitude error (radians).
@@ -215,16 +216,17 @@ namespace MuMech
 
             // Computes remaining time before adjustment burn if deorbit timing fails.
             // Assumes burn at apoapsis if lat error dominant, periapsis if lon dominant.
-            // vessel: Vessel with orbit
-            // state: VesselState with maxThrustAccel
+            // vessel: Vessel with orbit and body
             // targetLat: Target lat (degrees).
             // targetLon: Target lon (degrees).
+            // OUTPUT => latErrorDeg: Calculated Latitude error between target & vessel latitude at periapsis.
+            // OUTPUT => lonErrorDeg: Calculated Longitude error between target & vessel Longitude at periapsis.
             // Returns: Time from now to burn start (s).
-            public double TimeRemainingToAdjustmentBurn(Vessel vessel, VesselState state, double targetLat, double targetLon)
+            public double TimeRemainingToAdjustmentBurn(Vessel vessel, double targetLat, double targetLon,
+                ref double latErrorDeg, ref double lonErrorDeg)
             {
                 Orbit orbit = vessel.orbit;
                 CelestialBody body = vessel.mainBody;
-                double tom = state.maxThrustAccel;
 
                 // Compute errors as in CombinedAttitudeForAdj.
                 double currentUT = Planetarium.GetUniversalTime();
@@ -235,8 +237,8 @@ namespace MuMech
                 double deltaT = ut - currentUT;
                 double rotAngle = 360 * deltaT / body.rotationPeriod;
                 double predLon = (fixedLon - rotAngle + 360) % 360 - 180;
-                double latErrorDeg = Math.Abs(targetLat - predLat);
-                double lonErrorDeg = Math.Abs((targetLon - predLon + 180) % 360 - 180);
+                latErrorDeg = Math.Abs(targetLat - predLat);
+                lonErrorDeg = Math.Abs((targetLon - predLon + 180) % 360 - 180);
 
                 double vBurn = vessel.obt_velocity.magnitude;
                 double latErrorRad = latErrorDeg * Math.PI / 180;
@@ -254,19 +256,19 @@ namespace MuMech
 
             // Computes attitude vector for deorbit burn combined with lat/long adjustments if optimal (small errors <5°; saves Δv ~5-10%).
             // Otherwise, fallback to pure retrograde.
-            // state: VesselState with orbit, velocity, vessel.
+            // vessel: Vessel with orbit, velocity
             // targetLat: Target lat (degrees).
             // targetLon: Target lon (degrees).
             // peDesAlt: Desired PE alt (m, e.g., 70e3).
             // Returns: Unit vector for burn direction.
-            public Vector3d CombinedDeorbitAttitude(Vessel vessel, VesselState state, double targetLat, double targetLon, double peDesAlt)
+            public Vector3d CombinedDeorbitAttitude(Vessel vessel, double targetLat, double targetLon, double peDesAlt,
+                ref double latErrorDeg, ref double lonErrorDeg)
             {
                 Orbit orbit = vessel.orbit;
                 Vector3d vel = vessel.obt_velocity;
                 CelestialBody body = vessel.mainBody;
                 double mu = body.gravParameter;
                 double R = body.Radius;
-                double tom = state.maxThrustAccel; // From VesselState.
 
                 double dvDeorbit = DeorbitDVKeepApo(mu, R, orbit.ApA, orbit.PeA, peDesAlt); // Deorbit DV.
 
@@ -279,8 +281,8 @@ namespace MuMech
                 double deltaT = ut - currentUT;
                 double rotAngle = 360 * deltaT / body.rotationPeriod;
                 double predLon = (fixedLon - rotAngle + 360) % 360 - 180;
-                double latErrorDeg = Math.Abs(targetLat - predLat);
-                double lonErrorDeg = Math.Abs((targetLon - predLon + 180) % 360 - 180);
+                latErrorDeg = Math.Abs(targetLat - predLat);
+                lonErrorDeg = Math.Abs((targetLon - predLon + 180) % 360 - 180);
 
                 if (latErrorDeg < 5 && lonErrorDeg < 5) // Optimal to combine for small errors.
                 {
@@ -305,7 +307,7 @@ namespace MuMech
             }
 
             // Computes remaining time before deorbit burn start.
-            // state: VesselState with orbit, vessel.
+            // vessel: Vessel with orbit and body
             // targetLat: Target lat (degrees).
             // targetLon: Target lon (degrees).
             // peDesAlt: Desired PE alt (m).
@@ -447,8 +449,7 @@ namespace MuMech
                 for (int i = 0; i < maxIter; i++)
                 {
                     // Simulate deorbit at guess time: compute new orbit, PE lon.
-                    // (Requires orbit patching or simulation; pseudo-code).
-                    double predPeLon = PredictPeLonAfterBurn(vessel, guess, mu, R, peDesAlt); // Implement via orbit clone & vel change.
+                    double predPeLon = PredictPeLonAfterBurn(vessel, guess, mu, R, peDesAlt);
                     double deltaLon = predPeLon - targetLonRad;
                     double adj = DeorbitLonTimingAdj(deltaLon, mu, R, orbit.ApA, peDesAlt, rotPeriod); // Reuse adj.
                     guess += adj;
@@ -489,6 +490,284 @@ namespace MuMech
                 Vector3d pePos = newOrbit.getPositionAtUT(peUT);
                 double peLon = body.GetLongitude(pePos);
                 return peLon;
+            }
+
+            // Computes combined attitude vector using closest approach for errors.
+            // vessel: Vessel object.
+            // targetLat: Target latitude (degrees).
+            // targetLon: Target longitude (degrees).
+            // latErrorDeg: Output latitude error (degrees).
+            // lonErrorDeg: Output longitude error (degrees).
+            // Returns: Unit vector for combined burn direction.
+            public static Vector3d CombinedAttitudeForAdjGT(Vessel vessel, double targetLat, double targetLon, out double latErrorDeg, out double lonErrorDeg)
+            {
+                double timeToClosest;
+                CalculateClosestApproach(vessel, targetLat, targetLon, out timeToClosest);
+
+                Orbit orbit = vessel.orbit;
+                Vector3d vel = vessel.obt_velocity;
+                CelestialBody body = vessel.mainBody;
+
+                double currentUT = Planetarium.GetUniversalTime();
+                double ut = currentUT + timeToClosest;
+                Vector3d pos = orbit.getPositionAtUT(ut);
+
+                double predLat = body.GetLatitude(pos);
+                double fixedLon = body.GetLongitude(pos);
+
+                double deltaT = timeToClosest;
+                double rotAngle = 360 * deltaT / body.rotationPeriod;
+                double predLon = (fixedLon - rotAngle + 360) % 360 - 180;
+
+                latErrorDeg = targetLat - predLat;
+                lonErrorDeg = targetLon - predLon;
+                lonErrorDeg = (lonErrorDeg + 180) % 360 - 180;
+
+                double latErrorRad = latErrorDeg * Math.PI / 180;
+                double lonErrorRad = lonErrorDeg * Math.PI / 180;
+                double targetLatRad = targetLat * Math.PI / 180;
+
+                double vBurn = vel.magnitude;
+                double dvLat = 2 * vBurn * Math.Sin(latErrorRad / (2 * Math.Cos(targetLatRad)));
+                double dvLon = 2 * vBurn * Math.Sin(lonErrorRad / 2);
+
+                Vector3d prograde = vel.normalized;
+                Vector3d normal = orbit.GetOrbitNormal().normalized;
+                Vector3d latDir = (latErrorRad > 0 ? normal : -normal);
+                Vector3d lonDir = (lonErrorRad > 0 ? prograde : -prograde);
+                Vector3d combined = (latDir * dvLat + lonDir * dvLon).normalized;
+                return combined;
+            }
+
+            // Computes time to adjustment burn using closest approach.
+            // vessel: Vessel object.
+            // targetLat: Target lat (degrees).
+            // targetLon: Target lon (degrees).
+            // latErrorDeg: Output latitude error (degrees).
+            // lonErrorDeg: Output longitude error (degrees).
+            // Returns: Time to burn start (s).
+            public double TimeRemainingToAdjustmentBurnGT(Vessel vessel, double targetLat, double targetLon, out double latErrorDeg, out double lonErrorDeg)
+            {
+                double timeToClosest;
+                CalculateClosestApproach(vessel, targetLat, targetLon, out timeToClosest);
+
+                Orbit orbit = vessel.orbit;
+                CelestialBody body = vessel.mainBody;
+
+                double currentUT = Planetarium.GetUniversalTime();
+                double ut = currentUT + timeToClosest;
+                Vector3d pos = orbit.getPositionAtUT(ut);
+                double predLat = body.GetLatitude(pos);
+                double fixedLon = body.GetLongitude(pos);
+                double deltaT = timeToClosest;
+                double rotAngle = 360 * deltaT / body.rotationPeriod;
+                double predLon = (fixedLon - rotAngle + 360) % 360 - 180;
+                latErrorDeg = targetLat - predLat;
+                lonErrorDeg = targetLon - predLon;
+                lonErrorDeg = (lonErrorDeg + 180) % 360 - 180;
+
+                double latErrorAbs = Math.Abs(latErrorDeg);
+                double lonErrorAbs = Math.Abs(lonErrorDeg);
+
+                double vBurn = vessel.obt_velocity.magnitude;
+                double latErrorRad = latErrorDeg * Math.PI / 180;
+                double lonErrorRad = lonErrorDeg * Math.PI / 180;
+                double targetLatRad = targetLat * Math.PI / 180;
+                double dvLat = 2 * vBurn * Math.Sin(latErrorRad / (2 * Math.Cos(targetLatRad)));
+                double dvLon = 2 * vBurn * Math.Sin(lonErrorRad / 2);
+                double totalDv = Math.Sqrt(dvLat * dvLat + dvLon * dvLon);
+                double burnDur = EstBurnTime(totalDv, tom);
+
+                bool latDominant = latErrorAbs > lonErrorAbs;
+                double timeToPoint = latDominant ? orbit.timeToAp : orbit.timeToPe; // Still use ap/pe for burn point.
+                return timeToPoint - burnDur / 2;
+            }
+
+            // Computes attitude for deorbit burn combined with adjustments using closest approach.
+            // vessel: Vessel object.
+            // targetLat: Target lat (degrees).
+            // targetLon: Target lon (degrees).
+            // peDesAlt: Desired PE alt (m).
+            // latErrorDeg: Output latitude error (degrees).
+            // lonErrorDeg: Output longitude error (degrees).
+            // Returns: Unit vector for burn direction.
+            public Vector3d CombinedDeorbitAttitudeGT(Vessel vessel, double targetLat, double targetLon, double peDesAlt,
+                out double latErrorDeg, out double lonErrorDeg)
+            {
+                double timeToClosest;
+                CalculateClosestApproach(vessel, targetLat, targetLon, out timeToClosest);
+
+                Orbit orbit = vessel.orbit;
+                Vector3d vel = vessel.obt_velocity;
+                CelestialBody body = vessel.mainBody;
+                double mu = body.gravParameter;
+                double R = body.Radius;
+
+                double dvDeorbit = DeorbitDVKeepApo(mu, R, orbit.ApA, orbit.PeA, peDesAlt);
+
+                double currentUT = Planetarium.GetUniversalTime();
+                double ut = currentUT + timeToClosest;
+                Vector3d pos = orbit.getPositionAtUT(ut);
+                double predLat = body.GetLatitude(pos);
+                double fixedLon = body.GetLongitude(pos);
+                double deltaT = timeToClosest;
+                double rotAngle = 360 * deltaT / body.rotationPeriod;
+                double predLon = (fixedLon - rotAngle + 360) % 360 - 180;
+                latErrorDeg = Math.Abs(targetLat - predLat);
+                lonErrorDeg = Math.Abs((targetLon - predLon + 180) % 360 - 180);
+
+                if (latErrorDeg < 5 && lonErrorDeg < 5)
+                {
+                    double latErrorRad = (targetLat - predLat) * Math.PI / 180;
+                    double lonErrorRad = (targetLon - predLon) * Math.PI / 180;
+                    double targetLatRad = targetLat * Math.PI / 180;
+                    double vBurn = vel.magnitude;
+                    double dvLat = 2 * vBurn * Math.Sin(latErrorRad / (2 * Math.Cos(targetLatRad)));
+                    double dvLon = 2 * vBurn * Math.Sin(lonErrorRad / 2);
+
+                    Vector3d retro = -vel.normalized;
+                    Vector3d normal = orbit.GetOrbitNormal().normalized;
+                    Vector3d latDir = (latErrorRad > 0 ? normal : -normal);
+                    Vector3d lonDir = (lonErrorRad > 0 ? retro : -retro);
+                    Vector3d combined = (retro * dvDeorbit + latDir * dvLat + lonDir * dvLon).normalized;
+                    return combined;
+                }
+                else
+                {
+                    return -vel.normalized;
+                }
+            }
+
+            // Computes time to deorbit burn using closest approach.
+            // vessel: Vessel object.
+            // targetLat: Target lat (degrees).
+            // targetLon: Target lon (degrees).
+            // peDesAlt: Desired PE alt (m).
+            // Returns: Time to burn start (s), or NaN if no solution.
+            public double TimeRemainingToDeorbitBurnGT(Vessel vessel, double targetLat, double targetLon, double peDesAlt)
+            {
+                double timeToClosest;
+                CalculateClosestApproach(vessel, targetLat, targetLon, out timeToClosest);
+
+                CelestialBody body = vessel.mainBody;
+                double mu = body.gravParameter;
+                double R = body.Radius;
+                //double rotPeriod = body.rotationPeriod;
+
+                double dv = DeorbitDVKeepApo(mu, R, vessel.orbit.ApA, vessel.orbit.PeA, peDesAlt);
+                double burnDur = EstBurnTime(dv, tom);
+
+                return timeToClosest - burnDur / 2; // Burn before closest to set PE there.
+            }
+
+            // Calculates the closest approach distance on the groundtrack to the target location and the time to it.
+            // Samples the orbit at regular intervals (default 360 points for 1 deg resolution).
+            // If timeToClosestCenter is provided, refines around it within 2 deg range with finer sampling (error ≤5 km on Earth).
+            // vessel: Vessel object with orbit and mainBody.
+            // targetLat: Target latitude (degrees).
+            // targetLon: Target longitude (degrees).
+            // out timeToClosest: Time from now to closest approach (s).
+            // samples: Number of samples over one orbital period (default 360).
+            // timeToClosestCenter: Optional center time for refinement (s, default NaN for rough search only).
+            // Returns: Closest great-circle distance (m), or double.PositiveInfinity if invalid.
+            public static double CalculateClosestApproach(Vessel vessel, double targetLat, double targetLon, out double timeToClosest, int samples = 360, double timeToClosestCenter = double.NaN)
+            {
+                Orbit orbit = vessel.orbit;
+                CelestialBody body = vessel.mainBody;
+                double mu = body.gravParameter;
+                double rotPeriod = body.rotationPeriod;
+                double R = body.Radius;
+                double period = orbit.period;
+
+                if (double.IsNaN(period) || period <= 0)
+                {
+                    timeToClosest = double.NaN;
+                    return double.PositiveInfinity;
+                }
+
+                double currentUT = Planetarium.GetUniversalTime();
+                double minDist = double.PositiveInfinity;
+                double bestTime = double.NaN;
+                double step = period / samples;
+
+                if (double.IsNaN(timeToClosestCenter))
+                {
+                    // Rough search.
+                    for (int i = 0; i < samples; i++)
+                    {
+                        double ut = currentUT + i * step;
+                        Vector3d pos = orbit.getPositionAtUT(ut);
+                        double lat, lon, alt;
+                        body.GetLatLonAlt(pos, out lat, out lon, out alt);
+
+                        double deltaT = ut - currentUT;
+                        double rotAngle = 360 * deltaT / rotPeriod;
+                        double surfaceLon = (lon - rotAngle + 360) % 360 - 180;
+
+                        double dist = ComputeRangeToTargetFromLatLon(lat, surfaceLon, targetLat, targetLon, R);
+
+                        if (dist < minDist)
+                        {
+                            minDist = dist;
+                            bestTime = deltaT;
+                        }
+                    }
+                }
+                else
+                {
+                    bestTime = timeToClosestCenter;
+                }
+
+                // Refine if center provided or after rough.
+                if (!double.IsNaN(bestTime))
+                {
+                    double degRange = 2.0;
+                    double fineSamples = degRange / 0.045; // ~44 samples for 5 km on Earth.
+                    double fineStep = (period * degRange / 360) / fineSamples;
+                    double startTime = bestTime - (period * degRange / 720); // Center around best.
+
+                    minDist = double.PositiveInfinity;
+                    bestTime = double.NaN;
+
+                    for (int i = 0; i < (int)fineSamples; i++)
+                    {
+                        double deltaT = startTime + i * fineStep;
+                        double ut = currentUT + deltaT;
+                        Vector3d pos = orbit.getPositionAtUT(ut);
+                        double lat, lon, alt;
+                        body.GetLatLonAlt(pos, out lat, out lon, out alt);
+
+                        double rotAngle = 360 * deltaT / rotPeriod;
+                        double surfaceLon = (lon - rotAngle + 360) % 360 - 180;
+
+                        double dist = ComputeRangeToTargetFromLatLon(lat, surfaceLon, targetLat, targetLon, R);
+
+                        if (dist < minDist)
+                        {
+                            minDist = dist;
+                            bestTime = deltaT;
+                        }
+                    }
+                }
+
+                timeToClosest = bestTime;
+                return minDist;
+            }
+
+            // Computes great-circle distance between two lat/lon points (m).
+            // lat1, lon1: First point lat/lon (deg).
+            // lat2, lon2: Second point lat/lon (deg).
+            // radius: Body radius (m).
+            // Returns: Surface distance (m).
+            public static double ComputeRangeToTargetFromLatLon(double lat1, double lon1, double lat2, double lon2, double radius)
+            {
+                double lat1Rad = lat1 * Math.PI / 180;
+                double lat2Rad = lat2 * Math.PI / 180;
+                double dlonRad = (lon1 - lon2) * Math.PI / 180;
+                double a = Math.Sin((lat2Rad - lat1Rad) / 2) * Math.Sin((lat2Rad - lat1Rad) / 2) +
+                           Math.Cos(lat1Rad) * Math.Cos(lat2Rad) * Math.Sin(dlonRad / 2) * Math.Sin(dlonRad / 2);
+                double ang = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+                return radius * ang;
             }
         }
     }

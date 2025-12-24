@@ -66,8 +66,10 @@
     <Compile Include="LandingAutopilot\AtmosphericBurn.cs" />
     <Compile Include="LandingAutopilot\CoastToDeceleration.cs" />
     <Compile Include="LandingAutopilot\CourseCorrection.cs" />
+    <Compile Include="LandingAutopilot\CourseCorrectionGT.cs" />
     <Compile Include="LandingAutopilot\DecelerationBurn.cs" />
     <Compile Include="LandingAutopilot\DeorbitBurn.cs" />
+    <Compile Include="LandingAutopilot\DeorbitBurnGT.cs" />
     <Compile Include="LandingAutopilot\FinalDescent.cs" />
     <Compile Include="LandingAutopilot\KillHorizontalVelocity.cs" />
     <Compile Include="LandingAutopilot\LandingBurn.cs" />
