@@ -27,6 +27,7 @@ namespace MuMech.Landing
 
         public DeorbitBurnGT(MechJebCore core) : base(core)
         {
+            landEq = new LandingEquations();
             step = Step.STEP1_FIRST_TIME_TO_BURN;
             attitude = -Core.vessel.srf_velocity.normalized;
         }
@@ -48,11 +49,12 @@ namespace MuMech.Landing
 
         public override AutopilotStep OnFixedUpdate()
         {
-            double latErrorDeg;
-            double lonErrorDeg;
+            double latErrorDeg = 0;
+            double lonErrorDeg = 0;
             CelestialBody body = Core.vessel.mainBody;
             double peDesAlt = (body.atmosphere) ? body.atmosphereDepth / 2 : body.Radius * 0.0144873;
             double timeToBurn = 0;
+            double timeToBurnUT = 0;
             double tAlt = body.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
             double h = Core.vessel.terrainAltitude - tAlt;
             landEq.StartSamplePeriod(h, VesselState.dragUp, VesselState.mass, VesselState.speedVertical, VesselState.limitedMaxThrustAccel, VesselState.localg);
@@ -62,7 +64,7 @@ namespace MuMech.Landing
                 case Step.STEP1_FIRST_TIME_TO_BURN:
 
                     timeToBurn = landEq.TimeRemainingToAdjustmentBurnGT(Core.vessel, Core.Target.targetLatitude, Core.Target.targetLongitude, out latErrorDeg, out lonErrorDeg);
-                    if ((timeToBurn != 1) && (latErrorDeg < 5) && (lonErrorDeg < 5) )
+                    if ( (latErrorDeg < 5) && (lonErrorDeg < 5) )
                     {
                         step = Step.STEP2_TIME_TO_BURN;
                     }
@@ -75,10 +77,10 @@ namespace MuMech.Landing
                 // Warp to burn location, except the last 10 seconds.
                 case Step.STEP2_TIME_TO_BURN:
                     timeToBurn = landEq.TimeRemainingToDeorbitBurnGT(Core.vessel, Core.Target.targetLatitude, Core.Target.targetLongitude, peDesAlt);
-                    bool warpReady = ((Vessel.angularVelocity.magnitude < 0.005f) && (Core.Attitude.attitudeAngleFromTarget() < 5));
+                    bool warpReady = ((Vector3.Scale(Core.vessel.angularVelocity, new Vector3(1f, 0f, 1f)).magnitude < 0.001) && (Core.Attitude.attitudeAngleFromTarget() < 5));
                     if (warpReady && Core.Node.Autowarp && (timeToBurn > 1))
                     {
-                        Core.Warp.WarpToUT(timeToBurn + VesselState.time);
+                        Core.Warp.WarpToUT(timeToBurn/2.0 + VesselState.time);
                     }
                     else
                     {
@@ -118,9 +120,11 @@ namespace MuMech.Landing
                     {
                         return new LandingBurn(Core);
                     }
-                    break;
             }
 
+            // LAT/LONG ERR(deg):<<1>>/<<2>>
+            Status = Localizer.Format("#MechJeb_LandingGuidance_Status18",
+                latErrorDeg.ToString("F1"), lonErrorDeg.ToString("F1"));
             return this;
         }
     }

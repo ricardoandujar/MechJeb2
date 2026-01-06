@@ -11,7 +11,7 @@ namespace MuMech
             private const float MAX_ERROR_DEFAULT        = 150;
             private const float MAX_LARGE_DISTANCE       = 80000;
             private const float  FAST_SURFACE_SPEED      = 6500;
-            const double TIME_CONSTANT = 10.0;// 2.0(too much);// 10.0; //2.0
+            const double TIME_CONSTANT = 10.0;// (try 8.0???) <= 2.0(too much);// 10.0; //2.0
             const int THRUST_COUNTER = 150;
 
             private bool _courseCorrectionBurning = false;
@@ -19,9 +19,11 @@ namespace MuMech
             private int predictionCount = 1000;
             private double timeConstant = TIME_CONSTANT;
             private int thrustCounter = THRUST_COUNTER;
+            private Vector3d lastDesiredThrustVector;
 
             public CourseCorrection(MechJebCore core) : base(core)
             {
+                lastDesiredThrustVector = Vector3d.zero;
             }
 
             public override AutopilotStep Drive(FlightCtrlState s)
@@ -32,7 +34,7 @@ namespace MuMech
                     Status = Localizer.Format("#MechJeb_LandingGuidance_Status3",
                     temp.ToString("F1")); //"Performing course correction of about " +  + " m/s"
 
-                    Core.Thrust.TargetThrottle = 0;
+                    Core.Thrust.ThrustOff();
                     return new DecelerationBurn(Core);
                 }
                 else if (!Core.Landing.PredictionReady)
@@ -42,7 +44,7 @@ namespace MuMech
                     temp.ToString("F1")); //"Performing course correction of about " +  + " m/s"
 
                     predictionCount--; // This limits the wait in case its never ready
-                    Core.Thrust.TargetThrottle = 0;
+                    Core.Thrust.ThrustOff();
                     return this;
                 }
                 else
@@ -67,7 +69,7 @@ namespace MuMech
                 maxError = Mathf.Clamp(MAX_ERROR_DEFAULT, MAX_LARGE_DISTANCE, (float)VesselState.speedSurface / FAST_SURFACE_SPEED);
                 if ( (currentError < maxError) )
                 {
-                    Core.Thrust.TargetThrottle = 0;
+                    Core.Thrust.ThrustOff();
                     if (Core.Landing.RCSAdjustment)
                         Core.RCS.Enabled = true;
                     return new CoastToDeceleration(Core, false);
@@ -82,7 +84,7 @@ namespace MuMech
                 // If a parachute has already been deployed then we will not be able to control attitude anyway, so move back to the coast to deceleration step.
                 if (VesselState.parachuteDeployed)
                 {
-                    Core.Thrust.TargetThrottle = 0;
+                    Core.Thrust.ThrustOff();
                     return new CoastToDeceleration(Core, false);
                 }
 
@@ -100,19 +102,21 @@ namespace MuMech
                         deltaV.magnitude.ToString("F1")); //"Performing course correction of about " +  + " m/s"
 
                     Vector3d courseCorrection = Core.Landing.getHDirectionToTarget();
-                    Vector3d desiredThrustVector = 0.3 * courseCorrection.normalized + 0.7 * deltaV.normalized;
-
-                    Core.Attitude.attitudeTo(desiredThrustVector.normalized, AttitudeReference.INERTIAL, Core.Landing);
-
+//                    Vector3d desiredThrustVector = 0.3 * courseCorrection.normalized + 0.7 * deltaV.normalized;
+                    Vector3d desiredThrustVector = (0.35 * courseCorrection.normalized + 0.65 * deltaV.normalized).normalized;
+                    desiredThrustVector = (0.7*lastDesiredThrustVector + 0.3*desiredThrustVector).normalized;
+                    Core.Attitude.attitudeTo(desiredThrustVector, AttitudeReference.INERTIAL, Core.Landing);
+                    lastDesiredThrustVector = desiredThrustVector;
                     // TODO - Does this matter? Try to remove the attitude angle check and simply rely on accum.
                     // This has been here since day 1 but my change in DecelerationBurn does the same thing and does not use it at all.
                     // On Earth the prediction is way off since the altitude can be much lower - another thing would be to increase the angles
                     // orig = 2/30  - try 5/15  10/50   20/60 and compare results - might also try to increase time constant.
                     //20/60 - still stops and gos for a bit
                     //45/90 - does not seem to be working with time constant 10.0
-                    if (Core.Attitude.attitudeAngleFromTarget() < 45)
+                    //43/88 - ???
+                    if (Core.Attitude.attitudeAngleFromTarget() < 43)
                         _courseCorrectionBurning = true;
-                    else if (Core.Attitude.attitudeAngleFromTarget() > 90)
+                    else if (Core.Attitude.attitudeAngleFromTarget() > 88)
                     {
                         _courseCorrectionBurning = false;
                     }
@@ -129,14 +133,14 @@ namespace MuMech
                             thrustCounter--;
                             if (thrustCounter <= 0)
                             {
-                                timeConstant /= 5.0;
+                                timeConstant /= 4.0; //  5.0;
                                 thrustCounter = THRUST_COUNTER;
                             }
                         }
                     }
                     else
                     {
-                        Core.Thrust.TargetThrottle = 0;
+                        Core.Thrust.ThrustOff();
                         thrustCounter = THRUST_COUNTER;
                     }
                 }

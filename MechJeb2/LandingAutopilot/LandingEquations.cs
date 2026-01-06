@@ -7,6 +7,7 @@ using KSP.Localization;
 using ModuleWheels;
 using MuMech;
 using MuMech.Landing;
+using SaveUpgradePipeline;
 using UnityEngine;
 using static alglib;
 
@@ -499,7 +500,7 @@ namespace MuMech
             // latErrorDeg: Output latitude error (degrees).
             // lonErrorDeg: Output longitude error (degrees).
             // Returns: Unit vector for combined burn direction.
-            public static Vector3d CombinedAttitudeForAdjGT(Vessel vessel, double targetLat, double targetLon, out double latErrorDeg, out double lonErrorDeg)
+            public Vector3d CombinedAttitudeForAdjGT(Vessel vessel, double targetLat, double targetLon, out double latErrorDeg, out double lonErrorDeg)
             {
                 double timeToClosest;
                 CalculateClosestApproach(vessel, targetLat, targetLon, out timeToClosest);
@@ -768,6 +769,324 @@ namespace MuMech
                            Math.Cos(lat1Rad) * Math.Cos(lat2Rad) * Math.Sin(dlonRad / 2) * Math.Sin(dlonRad / 2);
                 double ang = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
                 return radius * ang;
+            }
+
+            public static double TimeToNodeForSurfacePoint2(
+                Vessel vessel, double targetLatDeg, double targetLonDeg)
+            {
+                Orbit current = vessel.orbit;
+                CelestialBody body = current.referenceBody;
+
+                double now = Planetarium.GetUniversalTime();
+
+                // --- 1. Surface point in body-fixed frame ---
+                Vector3d bodyFixed = body.GetRelSurfaceNVector(targetLatDeg, targetLonDeg);
+
+                // --- 2. Planet rotation rate (rad/s) ---
+                double rotRate = 2.0 * Math.PI / body.rotationPeriod;
+
+                // Helper function: compute target plane normal at a given UT
+                Vector3d GetTargetPlaneNormal(double UT)
+                {
+                    double dt = UT - now;
+
+                    // Rotation angle since "now"
+                    double angle = rotRate * dt;
+
+                    // Rotate body-fixed vector around planet's rotation axis (Z)
+                    QuaternionD rot = QuaternionD.AngleAxis(angle * Mathf.Rad2Deg, Vector3d.forward);
+                    Vector3d rotatedBodyFixed = rot * bodyFixed;
+
+                    // Convert to world space
+                    Vector3d worldVec = body.transform.rotation * rotatedBodyFixed;
+
+                    // Target plane normal = cross(surface vector, rotation axis)
+                    Vector3d axisWorld = body.transform.up;
+                    return Vector3d.Cross(worldVec, axisWorld).normalized;
+                }
+
+                // --- 3. First guess: compute target plane normal at current time ---
+                Vector3d nTargetNow = GetTargetPlaneNormal(now);
+
+                // --- 4. Build synthetic orbit for initial estimate ---
+                Orbit targetOrbitNow = BuildOrbitFromPlaneNormal(current, body, nTargetNow);
+
+                // --- 5. Get initial AN/DN UTs ---
+                double utAN0 = current.TimeOfAscendingNode(targetOrbitNow, now);
+                double utDN0 = current.TimeOfDescendingNode(targetOrbitNow, now);
+
+                // --- 6. Recompute target plane at those future UTs ---
+                Vector3d nTargetAN = GetTargetPlaneNormal(utAN0);
+                Vector3d nTargetDN = GetTargetPlaneNormal(utDN0);
+
+                // --- 7. Build corrected target orbits ---
+                Orbit targetOrbitAN = BuildOrbitFromPlaneNormal(current, body, nTargetAN);
+                Orbit targetOrbitDN = BuildOrbitFromPlaneNormal(current, body, nTargetDN);
+
+                // --- 8. Compute corrected node times ---
+                double utAN = current.TimeOfAscendingNode(targetOrbitAN, now);
+                double utDN = current.TimeOfDescendingNode(targetOrbitDN, now);
+
+                // --- 9. Convert to time offsets ---
+                double timeToAN = utAN - now;
+                double timeToDN = utDN - now;
+
+                if (timeToAN < 0) timeToAN += current.period;
+                if (timeToDN < 0) timeToDN += current.period;
+
+                return (timeToAN == -1) ? (timeToDN) : ((timeToDN == -1) ? (timeToAN) : ((timeToAN < timeToDN) ? timeToAN : timeToDN));
+            }
+
+            // Helper: build an orbit from a plane normal
+            private static Orbit BuildOrbitFromPlaneNormal(Orbit current, CelestialBody body, Vector3d n)
+            {
+                double inc = Math.Acos(n.z) * Mathf.Rad2Deg;
+                double LAN = Math.Atan2(n.x, -n.y) * Mathf.Rad2Deg;
+                if (LAN < 0) LAN += 360.0;
+
+                return new Orbit(
+                    inc,
+                    current.eccentricity,
+                    current.semiMajorAxis,
+                    LAN,
+                    current.argumentOfPeriapsis,
+                    current.meanAnomalyAtEpoch,
+                    current.epoch,
+                    body
+                );
+            }
+
+            /// <summary>
+            /// Computes time until ascending/descending node relative to the orbital plane
+            /// that passes over a fixed surface point (lat, lon) on the planet.
+            /// </summary>
+            public double TimeToNodeForSurfacePoint(
+                Vessel vessel, double targetLatDeg, double targetLonDeg)
+            {
+                Orbit current = vessel.orbit;
+                CelestialBody body = current.referenceBody;
+
+                double now = Planetarium.GetUniversalTime();
+
+                // 1. Convert target lat/lon to a world-space vector
+                Vector3d surfacePoint = body.GetWorldSurfacePosition(
+                    targetLatDeg, targetLonDeg, 0.0);
+
+                // Convert to body-centered coordinates
+                Vector3d r = surfacePoint - body.position;
+                r.Normalize();
+
+                // 2. Compute the normal of the orbital plane passing through that point
+                // The plane must contain the planet's up-axis (body.transform.up)
+                Vector3d bodyUp = body.transform.up;
+                Vector3d planeNormal = Vector3d.Cross(r, bodyUp).normalized;
+
+                // 3. Extract inclination and LAN from the plane normal
+                double inc = Math.Acos(planeNormal.z) * Mathf.Rad2Deg;
+                double LAN = Math.Atan2(planeNormal.x, -planeNormal.y) * Mathf.Rad2Deg;
+
+                // Normalize angles
+                if (LAN < 0) LAN += 360.0;
+
+                // 4. Build synthetic target orbit
+                Orbit targetOrbit = new Orbit(
+                    inc,
+                    current.eccentricity,
+                    current.semiMajorAxis,
+                    LAN,
+                    current.argumentOfPeriapsis,
+                    current.meanAnomalyAtEpoch,
+                    current.epoch,
+                    body
+                );
+
+                // 5. Compute AN/DN true anomalies
+                double anTA = current.TimeOfAscendingNode(targetOrbit, now);
+                double dnTA = current.TimeOfDescendingNode(targetOrbit, now);
+
+                // 6. Convert to UT
+                double utAN = current.GetUTforTrueAnomaly(anTA, now);
+                double utDN = current.GetUTforTrueAnomaly(dnTA, now);
+
+                // 7. Time differences
+                double timeToAN = utAN - now;
+                double timeToDN = utDN - now;
+
+                if (timeToAN < 0) timeToAN += current.period;
+                if (timeToDN < 0) timeToDN += current.period;
+
+                return (timeToAN == -1) ? (timeToDN) : ((timeToDN == -1) ? (timeToAN) : ((timeToAN < timeToDN) ? timeToAN : timeToDN));
+            }
+
+            /// <summary>
+            /// Computes the burn attitude (world-space direction) needed to reduce
+            /// the plane difference between the current orbit and the target plane
+            /// defined by a surface point (lat, lon).
+            /// </summary>
+            public static Vector3d GetPlaneCorrectionDirection(
+                Vessel vessel, double targetLatDeg, double targetLonDeg)
+            {
+                Orbit current = vessel.orbit;
+                CelestialBody body = current.referenceBody;
+
+                // --- 1. Current orbit plane normal ---
+                Vector3d nCurrent = current.GetOrbitNormal().normalized;
+
+                // --- 2. Target plane normal from surface point ---
+                Vector3d surfacePoint = body.GetWorldSurfacePosition(
+                    targetLatDeg, targetLonDeg, 0.0);
+
+                Vector3d r = (surfacePoint - body.position).normalized;
+                Vector3d bodyUp = body.transform.up;
+
+                // Plane normal = cross(surface point vector, planet up-axis)
+                Vector3d nTarget = Vector3d.Cross(r, bodyUp).normalized;
+
+                // --- 3. Compute rotation axis to reduce plane error ---
+                // This is the direction you burn toward.
+                Vector3d correctionAxis = Vector3d.Cross(nCurrent, nTarget);
+
+                // If the planes are already aligned, return zero vector
+                if (correctionAxis.sqrMagnitude < 1e-10)
+                    return Vector3d.zero;
+
+                correctionAxis.Normalize();
+
+                // --- 4. Convert correction axis into a burn direction ---
+                // The burn direction is perpendicular to the orbital plane,
+                // so we project the correction axis into the vessel's orbital frame.
+                Vector3d prograde = current.GetVel().normalized;
+                Vector3d radial = Vector3d.Cross(nCurrent, prograde).normalized;
+                Vector3d normal = nCurrent;
+
+                // Decompose correction axis into orbital frame
+                double cP = Vector3d.Dot(correctionAxis, prograde);
+                double cR = Vector3d.Dot(correctionAxis, radial);
+                double cN = Vector3d.Dot(correctionAxis, normal);
+
+                // The burn direction is the component perpendicular to velocity
+                Vector3d burnDir = (cR * radial + cN * normal).normalized;
+
+                return burnDir;
+            }
+
+            // Computes time to next ascending/descending node relative to target latitude plane.
+            // vessel: Vessel.
+            // targetLatRad: Target latitude (rad).
+            // ascending: True for AN, false for DN.
+            // Returns: Time to node (s), or double.NaN if parallel.
+            public static double TimeToNode(Vessel vessel, double targetLatRad, bool ascending)
+            {
+                Orbit orbit = vessel.orbit;
+                double deg2rad = Math.PI / 180;
+                double taAN = -orbit.argumentOfPeriapsis * deg2rad;
+                double taNode = ascending ? taAN : taAN + Math.PI;
+
+                double currentUT = Planetarium.GetUniversalTime();
+                double time = orbit.TimeOfTrueAnomaly(taNode, currentUT);
+                return time - currentUT;
+            }
+
+            public double TimeToNode(Vessel vessel, double targetLatDeg)
+            {
+                double UT;
+                double targetLatRad = targetLatDeg * Math.PI / 180;
+                double AUT = TimeToNode(vessel, targetLatRad, true);
+                double DUT = TimeToNode(vessel, targetLatRad, false);
+
+                UT = (AUT == -1) ? (DUT) : ((DUT == -1) ? (AUT) : ((AUT<DUT)?AUT:DUT) );
+                return UT;
+            }
+
+
+            public Vector3d NodeBasedAlignmentAttitude2(
+                Vessel vessel,
+                double targetLatDeg,
+                double targetLonDeg,
+                double nodeUT = 0)
+            {
+                Orbit current = vessel.orbit;
+                CelestialBody body = current.referenceBody;
+
+                double now = Planetarium.GetUniversalTime();
+                nodeUT = (nodeUT == 0) ? Planetarium.GetUniversalTime() + 1: nodeUT;
+
+                // --- 1. Surface point in body-fixed frame ---
+                Vector3d bodyFixed = body.GetRelSurfaceNVector(targetLatDeg, targetLonDeg);
+
+                // --- 2. Planet rotation rate (rad/s) ---
+                double rotRate = 2.0 * Math.PI / body.rotationPeriod;
+
+                // --- 3. Compute target plane normal at the node UT ---
+                double dt = nodeUT - now;
+                double angle = rotRate * dt;
+
+                // Rotate body-fixed vector around planet's rotation axis (Z)
+                QuaternionD rot = QuaternionD.AngleAxis(angle * Mathf.Rad2Deg, Vector3d.forward);
+                Vector3d rotatedBodyFixed = rot * bodyFixed;
+
+                // Convert to world space
+                Vector3d worldVec = body.transform.rotation * rotatedBodyFixed;
+
+                // Target plane normal = cross(surface vector, rotation axis)
+                Vector3d axisWorld = body.transform.up;
+                Vector3d nTarget = Vector3d.Cross(worldVec, axisWorld).normalized;
+
+                // --- 4. Current orbit plane normal ---
+                Vector3d nCurrent = current.GetOrbitNormal().normalized;
+
+                // --- 5. Correction axis: direction to rotate current plane toward target plane ---
+                Vector3d correctionAxis = Vector3d.Cross(nCurrent, nTarget);
+
+                if (correctionAxis.sqrMagnitude < 1e-10)
+                    return Vector3d.zero; // Already aligned
+
+                correctionAxis.Normalize();
+
+                // --- 6. Convert correction axis into burn direction in orbital frame ---
+                Vector3d prograde = current.GetVel().normalized;
+                Vector3d radial = Vector3d.Cross(nCurrent, prograde).normalized;
+                Vector3d normal = nCurrent;
+
+                double cP = Vector3d.Dot(correctionAxis, prograde);
+                double cR = Vector3d.Dot(correctionAxis, radial);
+                double cN = Vector3d.Dot(correctionAxis, normal);
+
+                // Burn direction is radial + normal components (no prograde)
+                Vector3d burnDir = (cR * radial + cN * normal).normalized;
+
+                return burnDir;
+            }
+
+            // Efficient alignment using nodes for latitude.
+            public Vector3d NodeBasedAlignmentAttitude(Vessel vessel, double targetLat, out double latErrorDeg, double maxDvPerBurn = 150, double minErrorDeg = 0.05)
+            {
+                // Compute lat error as before.
+                latErrorDeg = ComputeLatError(vessel, targetLat); // Reuse prior method.
+
+                if (Math.Abs(latErrorDeg) < minErrorDeg) return Vector3d.zero;
+
+                double v = vessel.obt_velocity.magnitude;
+                double dvFull = 2 * v * Math.Sin(Math.Abs(latErrorDeg * Math.PI / 180) / 2);
+                double scale = Math.Min(1.0, maxDvPerBurn / dvFull);
+                Vector3d normal = vessel.orbit.GetOrbitNormal().normalized;
+                Vector3d dir = latErrorDeg > 0 ? normal : -normal;
+                return dir * scale;
+            }
+
+            // Computes predicted latitude error at closest approach.
+            public double ComputeLatError(Vessel vessel, double targetLat)
+            {
+                double timeToClosest;
+                CalculateClosestApproach(vessel, targetLat, 0, out timeToClosest); // Lon irrelevant for lat.
+
+                Orbit orbit = vessel.orbit;
+                CelestialBody body = vessel.mainBody;
+                double currentUT = Planetarium.GetUniversalTime();
+                double ut = currentUT + timeToClosest;
+                Vector3d pos = orbit.getPositionAtUT(ut);
+                double predLat = body.GetLatitude(pos);
+                return targetLat - predLat;
             }
         }
     }

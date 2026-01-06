@@ -212,6 +212,9 @@ namespace MuMech
             _parachutePlan = new ParachutePlan(this);
             _parachutePlan.StartPlanning();
 
+#if false
+            SetStep(new DeorbitBurnGT(Core));
+#endif
             if (Orbit.PeA < 0)
             {
                 if ( UseOnlyMoveToTarget == true )

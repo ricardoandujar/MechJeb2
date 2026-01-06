@@ -97,7 +97,7 @@ namespace MuMech
                     }
                 }
 
-                if ( (Vessel.angularVelocity.magnitude < 0.005f) &&
+                if ( (Vector3.Scale(Core.vessel.angularVelocity, new Vector3(1f, 0f, 1f)).magnitude < 0.001) &&
                      (Core.Attitude.attitudeAngleFromTarget() < 1) ) { _warpReady = true; } // less warp start warp stop jumping
 
                 if (Core.Landing.PredictionReady)

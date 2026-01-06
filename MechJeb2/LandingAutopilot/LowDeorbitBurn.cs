@@ -61,7 +61,7 @@ namespace MuMech
                 //Warp toward deorbit burn if it hasn't been triggerd yet:
                 if (!_deorbitBurnTriggered && Core.Node.Autowarp && (rangeToTarget > 1.2 * triggerDistance))
                 {
-                    if ((Vessel.angularVelocity.magnitude < 0.005f) && (Core.Attitude.attitudeAngleFromTarget() < 1)) 
+                    if ((Vector3.Scale(Core.vessel.angularVelocity, new Vector3(1f, 0f, 1f)).magnitude < 0.001) && (Core.Attitude.attitudeAngleFromTarget() < 1)) 
                     {
                         Core.Warp.WarpRegularAtRate((float)(Orbit.period / 5));
                     }
