@@ -14,7 +14,7 @@ namespace MuMech
             private double _lowDeorbitBurnMaxThrottle;
             private bool   _lowDeorbitEndOnLandingSiteNearer;
 
-            private const double LOW_DEORBIT_BURN_TRIGGER_FACTOR = 2.15; // 2.15<=2.05 <= 2
+            private const double LOW_DEORBIT_BURN_TRIGGER_FACTOR = 2.01; // 2.01<=2.05<=2.15<=2.05 <= 2
 
             public LowDeorbitBurn(MechJebCore core) : base(core)
             {
@@ -42,16 +42,20 @@ namespace MuMech
             public override AutopilotStep OnFixedUpdate()
             {
                 //Decide when we will start the deorbit burn:
-                double pitchAngle = 30;//90.0 - Vector3d.Angle(VesselState.surfaceVelocity, VesselState.up);
-                double stoppingDistance = Math.Pow(VesselState.speedSurfaceHorizontal, 2) / (2 * VesselState.limitedMaxThrustAccel * Math.Abs(Math.Cos(pitchAngle * UtilMath.Deg2Rad)));
-                double triggerDistance = LOW_DEORBIT_BURN_TRIGGER_FACTOR * stoppingDistance;
+                double stoppingDistance = Math.Pow(VesselState.speedSurfaceHorizontal, 2) / (2 * VesselState.limitedMaxThrustAccel);
+                stoppingDistance *= (1 + Core.Landing.HorizMargin / 100);
+                double triggerDistance = Math.Max(stoppingDistance, (MainBody.Radius*Math.PI*Core.Landing.deorbitBurnAngle)/180.0);
                 double heightAboveTarget = VesselState.altitudeASL - Core.Landing.DecelerationEndAltitude();
                 if (triggerDistance < heightAboveTarget) triggerDistance = heightAboveTarget;
 
                 //See if it's time to start the deorbit burn:
                 double rangeToTarget = Core.Landing.getHDistanceToTarget();
 
-                if (!_deorbitBurnTriggered && (rangeToTarget < triggerDistance) ) _deorbitBurnTriggered = true;
+                if (!_deorbitBurnTriggered && (rangeToTarget < triggerDistance))
+                {
+                    _deorbitBurnTriggered = true;
+                    return new OrbitalTargeting(Core);
+                }
 
                 Status = Localizer.Format(_deorbitBurnTriggered
                     ? "#MechJeb_LandingGuidance_Status11" //"Executing low deorbit burn"
@@ -59,7 +63,8 @@ namespace MuMech
                     "#MechJeb_LandingGuidance_Status12"); //"Moving to low deorbit burn point"
 
                 //Warp toward deorbit burn if it hasn't been triggerd yet:
-                if (!_deorbitBurnTriggered && Core.Node.Autowarp && (rangeToTarget > 1.2 * triggerDistance))
+                triggerDistance += VesselState.speedSurfaceHorizontal * 10; // Add 10 seconds so we dont stop warp too close to burn time.
+                if (!_deorbitBurnTriggered && Core.Node.Autowarp && (rangeToTarget > triggerDistance))
                 {
                     if ((Vector3.Scale(Core.vessel.angularVelocity, new Vector3(1f, 0f, 1f)).magnitude < 0.001) && (Core.Attitude.attitudeAngleFromTarget() < 1)) 
                     {

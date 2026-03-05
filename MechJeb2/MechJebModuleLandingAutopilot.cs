@@ -1,11 +1,17 @@
 ﻿extern alias JetBrainsAnnotations;
 using System;
+//using System.Collections.Specialized;
+//using Contracts.Agents.Mentalities;
 using KSP.Localization;
-using MechJebLib.Utils;
+//using MechJebLib.Utils;
 using ModuleWheels;
 using MuMech.Landing;
+//using MuMech.LandingAutopilot;
 using UnityEngine;
-using static alglib;
+//using UnityToolbag;
+//using static alglib;
+//using static FinePrint.ContractDefs;
+//using static MuMech.MechJebModuleLandingPredictions;
 
 namespace MuMech
 {
@@ -16,19 +22,18 @@ namespace MuMech
     // -
     public class MechJebModuleLandingAutopilot : AutopilotModule
     {
-        public readonly double LOW_GRAVITY = 1.0;       // m/sec^2
-        public readonly double EARTH_GRAVITY = 9.81;    // m/sec^2
-        public readonly float BASE_STEEPNESS = 1400.0f;
-        public readonly double ATMOS_FAST_SPEED = 1500.0;
-        public static readonly float BASE_MINRATIO = 0.04001f;
-        public static readonly float BASE_MAXRATIO = 1.55001f;
-        public readonly float POST_TARGET_THRESHOLD = 25000.0f;
-        private bool _deployedGears;
-        public  bool LandAtTarget;
-        public bool UseOnlyMoveToTarget = false;
-        public double g;
-        public bool hop = false;
-        public bool increaseVertical = false;
+        public readonly double LOW_GRAVITY = 1.0;       // Any gravity lower than this is considered low gravity for landing purposes
+        public readonly double EARTH_GRAVITY = 9.81;    // Standard Earth gravity in m/sec^2
+        public readonly float BASE_STEEPNESS = 1400.0f;  // Base steepness value for the descent profile
+        public static readonly float DEFAULT_BASE_MINRATIO = 0.04001f;  // Default base min ratio for the descent profile
+        public static readonly float DEFAULT_BASE_MAXRATIO = 1.55001f;  // Default base max ratio for the descent profile
+        public readonly float POST_TARGET_THRESHOLD = 25000.0f;  // 25 km beyond target we switch to move to target
+        private bool _deployedGears;  // Have we already deployed the landing gears?
+        public  bool LandAtTarget;  // Are we landing at a position target?
+        public bool UseOnlyMoveToTarget = false;  // If true we will not do a retro burn first, just go straight to move to target.
+        public double g;  // Gravity of body at sea level
+        public bool hop = false;  // Is this a hop landing? hop = true means we will be increasing vertical speed first.
+        public bool increaseVertical = false;  // Are we currently increasing vertical speed?
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public readonly EditableDouble TouchdownSpeed = 0.5;
@@ -58,10 +63,30 @@ namespace MuMech
         public EditableDouble steepness = 1.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble minRatio = BASE_MINRATIO;
+        public EditableDouble minRatio = DEFAULT_BASE_MINRATIO;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble maxRatio = BASE_MAXRATIO;
+        public EditableDouble maxRatio = DEFAULT_BASE_MAXRATIO;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble RadialPercent = 10.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble VerticalMargin = 5.0;
+        public string Format => "F2";
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble HorizMargin = 5.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble TargetAltPercent = 20;
+        public double TgtAlt;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble deorbitBurnAngle = 90.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble atmosSafeSpeed = 1700.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public  EditableDouble debug1 = 1.0;
@@ -88,9 +113,6 @@ namespace MuMech
         public EditableDouble debug8 = 1.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble debug9 = 1.0;
-
-        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble debug10 = 1.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
@@ -104,9 +126,6 @@ namespace MuMech
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble debug14 = 1.0;
-
-        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble debug15 = 1.0;
 
         // This is used to adjust the height at which the parachutes semi deploy as a means of
         // targeting the landing in an atmosphere where it is not possible to control atitude
@@ -213,8 +232,8 @@ namespace MuMech
             _parachutePlan.StartPlanning();
 
 #if false
-            SetStep(new DeorbitBurnGT(Core));
-#endif
+            SetStep(new OrbitalTargeting(Core));
+#else
             if (Orbit.PeA < 0)
             {
                 if ( UseOnlyMoveToTarget == true )
@@ -223,7 +242,8 @@ namespace MuMech
                 }
                 else
                 {
-                    SetStep(new CourseCorrection(Core));
+                    SetStep(new OrbitalTargeting(Core));
+                    //SetStep(new CourseCorrection(Core));
                 }
             }
             else if (UseLowDeorbitStrategy())
@@ -234,6 +254,7 @@ namespace MuMech
             {
                 SetStep(new DeorbitBurn(Core));
             }
+#endif
         }
 
         public void LandUntargeted(object controller)
@@ -307,31 +328,61 @@ namespace MuMech
             SetStep(null);
         }
 
+        public Vector3d ComputeCourseCorrection(double heightASL = 0, double progradeFraction = 1.0, double radialFraction = 1.0, double lateralFraction = 1.0)
+        {
+            // Only use the original terrain-based solver when the specified height is equal or less than minimum height
+            // AND the periapsis altitude is negative relative to body radius
+            if ( (Core.Landing.PredictionReady==true) && (heightASL == 0) && (Orbit.PeA < MainBody.Radius) )
+            {
+                // 1. Try the original MechJeb landing solver that requires a landing prediction first.
+                double landRadius = DecelerationEndAltitude();
+                return ComputeCorrectionTerrain(landRadius, progradeFraction, radialFraction, lateralFraction, _rotatedLandingSite);
+            }
+
+            // 2. No predicted impact → use the alternate correction method using a shell altitude using heightASL.
+            //    This handles all cases where periapsis is above terrain or the solver fails.
+            return ComputeCorrectionShellG(heightASL, progradeFraction, radialFraction, lateralFraction);
+        }
+
         // Estimate the delta-V of the correction burn that would be required to put us on
         // course for the target
-        public Vector3d ComputeCourseCorrection(bool allowPrograde, double perturbDeltaV)
+        public Vector3d ComputeCorrectionTerrain(double heightASL, double progradeFraction, double radialFraction, double lateralFraction, Vector3d rotatedLandingSite, double tUT = 0)
         {
             // actualLandingPosition is the predicted actual landing position
-            Vector3d actualLandingPosition = _rotatedLandingSite - MainBody.position;
+            Vector3d actualLandingPosition = rotatedLandingSite - MainBody.position;
 
             // orbitLandingPosition is the point where our current orbit intersects the planet
-            double endRadius = MainBody.Radius + DecelerationEndAltitude() - 100;
+            heightASL = ((heightASL == 0) ? DecelerationEndAltitude() : heightASL);
+            double endRadius = MainBody.Radius + heightASL;
 
-            // Seems we are already landed ? just return zero vector
-            if (endRadius > Orbit.ApR || Vessel.LandedOrSplashed)
+            // Return zero vector if already landed.
+            if (Vessel.LandedOrSplashed)
                 return Vector3d.zero;
 
-            Vector3d orbitLandingPosition = Orbit.WorldBCIPositionAtUT(
-                Orbit.PeR < endRadius ? Orbit.NextTimeOfRadius(VesselState.time, endRadius) : Orbit.NextPeriapsisTime(VesselState.time)
-            );
+            Vector3d orbitLandingPosition;
+            if (tUT == 0)
+            {
+                orbitLandingPosition = Orbit.WorldBCIPositionAtUT(
+                    Orbit.PeR < endRadius ? Orbit.NextTimeOfRadius(VesselState.time, endRadius) : Orbit.NextPeriapsisTime(VesselState.time) );
+                tUT = Prediction.EndUT;
+            }
+            else
+            {
+                orbitLandingPosition = Orbit.WorldBCIPositionAtUT(tUT);
+            }
 
             // convertOrbitToActual is a rotation that rotates orbitLandingPosition on actualLandingPosition
             var convertOrbitToActual = Quaternion.FromToRotation(orbitLandingPosition, actualLandingPosition);
+
 
             // Consider the effect small changes in the velocity in each of these three directions
             Vector3d[] perturbationDirections =
             {
                 VesselState.surfaceVelocity.normalized, VesselState.radialPlusSurface, VesselState.normalPlusSurface
+            };
+            double[] perturbationFractions =
+            {
+                progradeFraction,radialFraction,lateralFraction
             };
 
             // Compute the effect burns in these directions would
@@ -340,12 +391,18 @@ namespace MuMech
             var deltas = new Vector3d[3];
             for (int i = 0; i < 3; i++)
             {
+                if (perturbationFractions[i] == 0)
+                {
+                    deltas[i] = Vector3d.zero;
+                    continue; // Skip it if fraction is zero
+                }
+
                 //warning: hard experience shows that setting this too low leads to bewildering bugs due to finite precision of Orbit functions
                 // use perturbDeltaV instead
-                //const double PERTURBATION_DELTA_V = 1;
+                double perturbDeltaV = Mathf.Max(1.0f, Mathf.Clamp01((float)MainBody.Radius / 6371000.0f) * 10);
 
                 Orbit perturbedOrbit =
-                    Orbit.PerturbedOrbit(VesselState.time, perturbDeltaV * perturbationDirections[i]); //compute the perturbed orbit
+                    Orbit.PerturbedOrbit(VesselState.time, perturbDeltaV * perturbationDirections[i]*perturbationFractions[i]); //compute the perturbed orbit
 
                 double perturbedLandingTime = perturbedOrbit.PeR < endRadius
                     ? perturbedOrbit.NextTimeOfRadius(VesselState.time, endRadius)
@@ -372,11 +429,11 @@ namespace MuMech
             // First we compute the target landing position. We have to convert the latitude and longitude of the target
             // into a position. We can't just get the current position of those coordinates, because the planet will
             // rotate during the descent, so we have to account for that.
-            Vector3d desiredLandingPosition =
-                MainBody.GetWorldSurfacePosition(Core.Target.targetLatitude, Core.Target.targetLongitude, 0) - MainBody.position;
-            float bodyRotationAngleDuringDescent = (float)(360 * (Prediction.EndUT - VesselState.time) / MainBody.rotationPeriod);
-            var bodyRotationDuringFall = Quaternion.AngleAxis(bodyRotationAngleDuringDescent, MainBody.angularVelocity.normalized);
-            desiredLandingPosition = bodyRotationDuringFall * desiredLandingPosition;
+            Vector3d desiredLandingPosition = MainBody.GetWorldSurfacePosition(Core.Target.targetLatitude, Core.Target.targetLongitude, heightASL) - MainBody.position;
+            desiredLandingPosition = RotateRelativePosition(desiredLandingPosition, tUT - VesselState.time);
+            //float bodyRotationAngleDuringDescent = (float)(360 * (Prediction.EndUT - VesselState.time) / MainBody.rotationPeriod);
+            //var bodyRotationDuringFall = Quaternion.AngleAxis(bodyRotationAngleDuringDescent, MainBody.angularVelocity.normalized);
+            //desiredLandingPosition = bodyRotationDuringFall * desiredLandingPosition;
 
             Vector3d desiredDelta = desiredLandingPosition - actualLandingPosition;
             desiredDelta = Vector3d.Exclude(actualLandingPosition, desiredDelta);
@@ -386,7 +443,7 @@ namespace MuMech
 
             Vector3d downrangeDirection;
             Vector3d downrangeDelta;
-            if (allowPrograde)
+            if (progradeFraction > 0)
             {
                 // Construct the linear combination of the prograde and radial+ perturbations
                 // that produces the largest effect on the landing position. The Math.Sign is to
@@ -417,10 +474,181 @@ namespace MuMech
             var b = new Vector2d(Vector3d.Dot(desiredDelta, downrangeDelta), Vector3d.Dot(desiredDelta, deltas[2]));
 
             Vector2d coeffs = a.Inverse() * b;
+            Vector3d courseCorrection = coeffs.x * downrangeDirection * 0.707102 + coeffs.y * perturbationDirections[2] * 0.707102;
 
-            Vector3d courseCorrection = coeffs.x * downrangeDirection + coeffs.y * perturbationDirections[2];
+            // --- 2. Define local reference frame ---
+            Vector3d prograde = Vector3d.Exclude(Vessel.up, Vessel.obt_velocity).normalized;
+            Vector3d normal = Vector3d.Cross(prograde, Vessel.up).normalized;
 
-            return courseCorrection;
+            // --- 3. Decompose raw Δv ---
+            double dvRadial = Vector3d.Dot(courseCorrection, Vessel.up);
+            double dvPrograde = Vector3d.Dot(courseCorrection, prograde);
+            double dvNormal   = Vector3d.Dot(courseCorrection, normal);
+
+            // Scale only radial & prograde
+            Vector3d shapedDv =
+                (((dvRadial * radialFraction)   * Vessel.up +
+                (dvPrograde * progradeFraction) * prograde +
+                (dvNormal   * lateralFraction)  * normal).normalized)*courseCorrection.magnitude;
+
+            // Set Debug Vectors as horizontal and vertical components of desired thrust vector
+            MechJebModuleDebugArrows.debugVector  = (((dvPrograde * progradeFraction) * prograde) + dvNormal*normal) / shapedDv.magnitude;
+            MechJebModuleDebugArrows.debugVector2 = ((dvRadial * radialFraction) * Vessel.up)/ shapedDv.magnitude;
+
+            return shapedDv;
+        }
+
+        private Vector3d ComputeCorrectionShellG(double targetHeightASL, double progradeFraction, double radialFraction, double lateralFraction)
+        {
+            ClosestPointToSurfaceTarget(out Vector3d closestPos, out double tUT, out double distance, out Vector3d surfaceVel);
+            _predictor.debug1MarkerRadius = 10;
+            _predictor.debug1Lat = MainBody.GetLatitude(closestPos);
+            _predictor.debug1Lon = MainBody.GetLongitude(closestPos);
+
+            closestPos = RotateRelativePosition(closestPos - MainBody.position, tUT - Planetarium.GetUniversalTime());
+            //            closestPos = closestPos - MainBody.position;
+            double height = closestPos.magnitude - MainBody.Radius;
+            Vector3d dvSolution;
+            if ( (targetHeightASL - height) < 0)
+            {
+                dvSolution = 100*Mathf.Clamp01((float)(targetHeightASL - height)/(40)) * VesselState.surfaceVelocity.normalized;
+            }
+            else
+            {
+                dvSolution = ComputeCorrectionTerrain(targetHeightASL, progradeFraction, radialFraction, lateralFraction, closestPos, tUT);
+            }
+
+            if ( Math.Abs(targetHeightASL - height) <= 10000 )
+            {
+                dvSolution = Vector3d.zero;
+            }
+
+            return dvSolution;
+        }
+        public double ArcDistance(Vector3d a, Vector3d b, double radius)
+        {
+            Vector3d na = a.normalized;
+            Vector3d nb = b.normalized;
+            double dot = Math.Max(-1.0, Math.Min(1.0, Vector3d.Dot(na, nb)));
+            double angle = Math.Acos(dot);
+            return angle * radius;
+        }
+
+        public void ClosestPointToSurfaceTarget(out Vector3d bestPos, out double bestUT, out double bestDist, out Vector3d surfaceVel, int coarseSamples = 50)
+        {
+            Orbit orbit = Vessel.orbit;
+            CelestialBody body = orbit.referenceBody;
+            double R = body.Radius;
+            double now = Planetarium.GetUniversalTime();
+            const double maxHorizon = 3600.0;
+            const double tol = 0.05;
+            // --- Helpers -------------------------------------------------------------
+            Vector3d TargetPosAtUT(double ut)
+            {
+                Vector3d targetNow =
+                    body.GetWorldSurfacePosition(Core.Target.targetLatitude,
+                                                 Core.Target.targetLongitude,
+                                                 0.0)
+                  - body.position;
+                return RotateRelativePosition(targetNow, ut - now);
+            }
+            double GetDist(double ut)
+            {
+                Vector3d srcPos = orbit.getPositionAtUT(ut) - body.position;
+                if (srcPos.magnitude < R) return double.MaxValue;
+                Vector3d tgtPos = TargetPosAtUT(ut);
+                return ArcDistance(srcPos, tgtPos, R);
+            }
+            // --- 1. Binary-search horizon detection ---------------------------------
+            double FindImpactUT(double nowUT, double horizon)
+            {
+                double lo = nowUT;
+                double hi = nowUT + horizon;
+                Vector3d pHi = orbit.getPositionAtUT(hi) - body.position;
+                if (pHi.magnitude > R)
+                    return hi;
+                for (int i = 0; i < 40; i++)
+                {
+                    double mid = 0.5 * (lo + hi);
+                    Vector3d p = orbit.getPositionAtUT(mid) - body.position;
+                    if (p.magnitude < R)
+                        hi = mid;
+                    else
+                        lo = mid;
+                }
+                return hi;
+            }
+            double endUT = FindImpactUT(now, maxHorizon);
+            // --- 2. Coarse global search --------------------------------------------
+            bestDist = double.MaxValue;
+            bestUT = now;
+            bestPos = Vector3d.zero;
+            double step = (endUT - now) / coarseSamples;
+            for (int i = 0; i <= coarseSamples; i++)
+            {
+                double ut = now + i * step;
+                Vector3d srcPos = orbit.getPositionAtUT(ut) - body.position;
+                if (srcPos.magnitude < R)
+                    break;
+                double dist = ArcDistance(srcPos, TargetPosAtUT(ut), R);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    bestUT = ut;
+                    bestPos = srcPos;
+                }
+            }
+            // --- 3. Fine refinement with golden section search ----------------------
+            double refineWindow = step * 5.0;
+            double refineStart = Math.Max(now, bestUT - refineWindow);
+            double refineEnd = Math.Min(endUT, bestUT + refineWindow);
+            double phi = (1.0 + Math.Sqrt(5.0)) / 2.0;
+            double invPhi = 1.0 / phi;
+            double invPhi2 = invPhi * invPhi;
+            double a = refineStart;
+            double b = refineEnd;
+            int maxIter = 100;
+            for (int iter = 0; iter < maxIter && (b - a) > tol; iter++)
+            {
+                double x1 = a + invPhi2 * (b - a);
+                double x2 = a + invPhi * (b - a);
+                double f1 = GetDist(x1);
+                double f2 = GetDist(x2);
+                if (f1 < f2)
+                {
+                    b = x2;
+                }
+                else
+                {
+                    a = x1;
+                }
+            }
+            double fineUT = (a + b) / 2.0;
+            double fineDist = GetDist(fineUT);
+            if (fineDist < bestDist)
+            {
+                bestDist = fineDist;
+                bestUT = fineUT;
+                bestPos = orbit.getPositionAtUT(bestUT) - body.position;
+            }
+            Vector3d velFuture = Vessel.orbit.getOrbitalVelocityAtUT(bestUT); // Future inertial velocity ---
+            Vector3d rotVelFuture = Vector3d.Cross(MainBody.angularVelocity, bestPos.normalized); // Body rotation velocity at that future point ---
+            surfaceVel = velFuture - rotVelFuture;// Future surface-relative velocity ---
+            Debug.Log("bestUT:" + (bestUT - now) + " dist:" + bestDist + " alt:" + (bestPos.magnitude - R));
+            bestPos += body.position;
+        }
+
+        public Vector3d RotateRelativePosition(Vector3d posBodyCentered, double timeDeltaSeconds)
+        {
+            // Rotates position that is relative to Body forward/backward in time to where it will be after timeDeltaSeconds
+            // (positive angle for eastward planet rotation).
+            // Input: posBodyCentered = relative to MainBody.position (body-centered)
+            //        timeDeltaSeconds = time delta in seconds (positive = forward in time) (negative = backward in time)
+            // Output: forward-rotated body-centered position
+            double angleDeg = MainBody.angularV * timeDeltaSeconds * Mathf.Rad2Deg;
+            QuaternionD rot = QuaternionD.AngleAxis(angleDeg, MainBody.angularVelocity.normalized);
+
+            return rot * posBodyCentered;
         }
 
         public void ControlParachutes()
@@ -684,6 +912,67 @@ namespace MuMech
             // Get the horizontal direction vector to target
             return Vector3d.Exclude(VesselState.up, Core.vessel.mainBody.GetWorldSurfacePosition(Core.Target.targetLatitude, Core.Target.targetLongitude, asl)
                 - Core.vessel.mainBody.GetWorldSurfacePosition(Core.vessel.latitude, Core.vessel.longitude, asl));
+        }
+
+        /// <summary>
+        /// Computes the circular orbit speed at a given altitude above a celestial body.
+        /// </summary>
+        /// <param name="altitude">The altitude above the body's surface in meters.</param>
+        /// <param name="body">The celestial body around which the orbit occurs.</param>
+        /// <returns>The circular orbit speed in meters per second.</returns>
+        /// <remarks>
+        /// This calculation is based on the vis-viva equation simplified for circular orbits: v = sqrt(μ / r),
+        /// where μ is the gravitational parameter (GM) and r is the orbital radius (body radius + altitude).
+        /// </remarks>
+        public double GetCircularOrbitSpeed(double altitude, CelestialBody body)
+        {
+            if (body == null)
+            {
+                throw new ArgumentNullException(nameof(body));
+            }
+            if (altitude < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(altitude), "Altitude must be non-negative.");
+            }
+
+            double mu = body.gravParameter;
+            double radius = body.Radius;
+            double r = radius + altitude;
+            return Math.Sqrt(mu / r);
+        }
+
+        /// <summary>
+        /// Computes the downrange and crossrange vectors from the vessel to a fixed surface target on the vessel's main body,
+        /// based on shortest arc angular distances.
+        /// </summary>
+        /// <param name="vessel">The current vessel in orbit.</param>
+        /// <param name="targetLatitude">The target latitude in degrees.</param>
+        /// <param name="targetLongitude">The target longitude in degrees.</param>
+        /// <param name="targetAltitude">The target altitude above sea level in meters. Defaults to 0 (surface level).</param>
+        /// <returns>A tuple containing the downrange vector and crossrange vector as Vector3d.</returns>
+        /// <remarks>
+        /// Vectors are computed using angular decompositions in the orbital frame:
+        /// - Downrange: r * phi_down * t_hat, where phi_down is the signed in-plane angular separation.
+        /// - Crossrange: r * phi_cross * c_hat, where phi_cross is the signed out-of-plane angular separation.
+        /// The magnitudes represent arc distances along the orbit at radius r.
+        /// Positive downrange indicates the target is ahead along the prograde direction.
+        /// Assumes the vessel is in a valid orbit with non-zero angular momentum.
+        /// </remarks>
+        /// <exception cref="ArgumentNullException">Thrown if the vessel is null.</exception>
+        /// <exception cref="InvalidOperationException">Thrown if the vessel has no orbit, main body, or insufficient angular momentum.</exception>
+        public void GetRangeVectorsToSurfaceTarget(Vessel vessel, VesselState vstate, Vector3d targetPos, double tUT, out Vector3d downrangeVec, out Vector3d crossrangeVec, out Vector3d horizontalVec)
+        {
+            //targetPos = Core.Landing.RotateRelativePosition(targetPos, (tUT - Planetarium.GetUniversalTime()));
+            //Vector3d vesselPos = Core.Landing.RotateRelativePosition(vessel.mainBody.GetWorldSurfacePosition(vessel.latitude, vessel.longitude, vessel.terrainAltitude) - vessel.mainBody.position, (tUT - Planetarium.GetUniversalTime()));
+            Vector3d vesselPos = vessel.mainBody.GetWorldSurfacePosition(vessel.latitude, vessel.longitude, vessel.terrainAltitude) - vessel.mainBody.position;
+            Vector3d rel = targetPos - vesselPos;
+            double angle = Vector3d.Angle(vesselPos, targetPos) * Math.PI / 180.0;
+            horizontalVec = (Vector3d.Exclude(vstate.up, rel)).normalized * angle * (vessel.mainBody.Radius + vessel.terrainAltitude);
+            Vector3d hvel = Vector3d.Exclude(vstate.up, vessel.srf_velocity).normalized;
+            Vector3d track_dir = hvel;
+            Vector3d cross_dir = Vector3d.Cross(vstate.up, hvel).normalized;
+            downrangeVec  = track_dir * Vector3d.Dot(horizontalVec, track_dir);
+            crossrangeVec = cross_dir * Vector3d.Dot(horizontalVec, cross_dir);
         }
     }
 

@@ -54,7 +54,6 @@ namespace MuMech.Landing
             CelestialBody body = Core.vessel.mainBody;
             double peDesAlt = (body.atmosphere) ? body.atmosphereDepth / 2 : body.Radius * 0.0144873;
             double timeToBurn = 0;
-            double timeToBurnUT = 0;
             double tAlt = body.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
             double h = Core.vessel.terrainAltitude - tAlt;
             landEq.StartSamplePeriod(h, VesselState.dragUp, VesselState.mass, VesselState.speedVertical, VesselState.limitedMaxThrustAccel, VesselState.localg);
@@ -118,7 +117,7 @@ namespace MuMech.Landing
                     }
                     else
                     {
-                        return new LandingBurn(Core);
+                        return new LandingBurnV(Core);
                     }
             }
 

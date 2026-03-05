@@ -5,6 +5,8 @@ using System.Linq;
 using JetBrainsAnnotations::JetBrains.Annotations;
 using KSP.Localization;
 using UnityEngine;
+using static alglib;
+using static FlightCamera;
 using static MechJebLib.Utils.Statics;
 
 namespace MuMech
@@ -86,8 +88,10 @@ namespace MuMech
 
                 GUILayout.Label("ASL: " + asl.ToSI() + "m   "
                     + Core.Target.targetBody.GetExperimentBiomeSafe(Core.Target.targetLatitude, Core.Target.targetLongitude));
-                double range = Core.Landing.getHDistanceToTarget();
-                GUILayout.Label("Range to target: " + range.ToSI() + "m");
+
+                Vector3d target_pos = MainBody.GetWorldSurfacePosition(Core.Target.targetLatitude, Core.Target.targetLongitude, Vessel.mainBody.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude)) - MainBody.position;
+                Core.Landing.GetRangeVectorsToSurfaceTarget(Vessel, VesselState, target_pos, 0, out Vector3d downrangeVec, out Vector3d crossrangeVec, out Vector3d horizontalVec);
+                GUILayout.Label("Range D/C: " + downrangeVec.magnitude.ToSI() + "m" + "/" + crossrangeVec.magnitude.ToSI() + "m");
             }
             else
             {
@@ -154,44 +158,37 @@ namespace MuMech
                 Core.Landing.DeployGears =
                     GUILayout.Toggle(Core.Landing.DeployGears, Localizer.Format("#MechJeb_LandingGuidance_checkbox2")); //Deploy Landing Gear
                 GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_label4"), Core.Landing.LimitGearsStage, "", 35); //"Stage Limit:"
-
                 Core.Landing.FlySafe =
                     GUILayout.Toggle(Core.Landing.FlySafe, Localizer.Format("#MechJeb_LandingGuidance_checkbox10")); // Safe Mode
                 Core.Landing.SelectMoveToTarget =
                     GUILayout.Toggle(Core.Landing.SelectMoveToTarget, Localizer.Format("#MechJeb_LandingGuidance_checkbox11")); // Use Move To Target
-
-
                 Core.Landing.DeployChutes =
                     GUILayout.Toggle(Core.Landing.DeployChutes, Localizer.Format("#MechJeb_LandingGuidance_checkbox3")); //Deploy Parachutes
                 _predictor.deployChutes = Core.Landing.DeployChutes;
                 GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_label5"), Core.Landing.LimitChutesStage, "", 35); //Stage Limit:
                 _predictor.limitChutesStage = Core.Landing.LimitChutesStage;
                 Core.Landing.RCSAdjustment =
-                    GUILayout.Toggle(Core.Landing.RCSAdjustment,
-                        Localizer.Format("#MechJeb_LandingGuidance_checkbox4")); //Use RCS for small adjustment
+                    GUILayout.Toggle(Core.Landing.RCSAdjustment, Localizer.Format("#MechJeb_LandingGuidance_checkbox4")); //Use RCS for small adjustment
                 Core.Thrust.LimiterMinThrottleInfoItem(); //Toggle to prevent full engine shutdowns
 
-                GuiUtils.SimpleTextBox("steepness", Core.Landing.steepness, "", 35);
-
+                GuiUtils.SimpleTextBox("Landing Slope", Core.Landing.steepness, "", 35);
                 GuiUtils.SimpleTextBox("H/V Ratio min:", Core.Landing.minRatio, "", 35);
-                GuiUtils.SimpleTextBox("                 max:", Core.Landing.maxRatio, "", 35);
-
-                //GuiUtils.SimpleTextBox("selVec", Core.Landing.selectDebugVector, "", 35);
-                //GuiUtils.SimpleTextBox("baseGain", Core.Landing.debug1, "", 35);
-                //GuiUtils.SimpleTextBox("hcorr", Core.Landing.debug2, "", 35);
-                //GuiUtils.SimpleTextBox("gComp", Core.Landing.debug3, "", 35);
-                //GuiUtils.SimpleTextBox("pidKI", Core.Landing.debug4, "", 35);
-                //GuiUtils.SimpleTextBox("pidKP", Core.Landing.debug5, "", 35);
-                //GuiUtils.SimpleTextBox("pidKILimit", Core.Landing.debug6, "", 35);
-                GuiUtils.SimpleTextBox("correct", Core.Landing.debug7, "", 35);
-                GuiUtils.SimpleTextBox("tratio1", Core.Landing.debug8, "", 35);
-                GuiUtils.SimpleTextBox("tratio2", Core.Landing.debug9, "", 35);
-                GuiUtils.SimpleTextBox("skipcnt", Core.Landing.debug10, "", 35);
-                GuiUtils.SimpleTextBox("cntspeed", Core.Landing.debug11, "", 35);
-                GuiUtils.SimpleTextBox("decrease", Core.Landing.debug12, "", 35);
-                GuiUtils.SimpleTextBox("ignore", Core.Landing.debug13, "", 35);
-                GuiUtils.SimpleTextBox("increase", Core.Landing.debug14, "", 35);
-                GuiUtils.SimpleTextBox("warpend", Core.Landing.debug15, "", 35);
+                GuiUtils.SimpleTextBox("               max:", Core.Landing.maxRatio, "", 35);
+                GuiUtils.SimpleTextBox("Radial Correct %:", Core.Landing.RadialPercent, "", 35);      // [0-100] %
+                GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_Label20", Core.Landing.TgtAlt.ToString("F1")), Core.Landing.TargetAltPercent, "%", 35);  // [0-100] %
+                GuiUtils.SimpleTextBox("Vertical Margin %:", Core.Landing.VerticalMargin, "", 35);    // [0-100] %
+                GuiUtils.SimpleTextBox("Horizontal Margin %:", Core.Landing.HorizMargin, "", 35);     // [0-100] %
+                GuiUtils.SimpleTextBox("Deorbit Burn Angle:", Core.Landing.deorbitBurnAngle, "", 35); // [0-90] degrees
+                GuiUtils.SimpleTextBox("Atmos Burn Speed:", Core.Landing.atmosSafeSpeed, "", 35);     //  m/sec
+                
+                GuiUtils.SimpleTextBox("Target Offset:", Core.Landing.debug1, "", 35);
+                GuiUtils.SimpleTextBox("debug2", Core.Landing.debug2, "", 35);
+                GuiUtils.SimpleTextBox("debug3", Core.Landing.debug3, "", 35);
+                GuiUtils.SimpleTextBox("debug4", Core.Landing.debug4, "", 35);
+                GuiUtils.SimpleTextBox("debug5", Core.Landing.debug5, "", 35);
+                GuiUtils.SimpleTextBox("debug6", Core.Landing.debug6, "", 35);
+                GuiUtils.SimpleTextBox("debug7", Core.Landing.debug7, "", 35);
+                GuiUtils.SimpleTextBox("debug8", Core.Landing.debug8, "", 35);
 
                 if (Core.Landing.Enabled)
                 {

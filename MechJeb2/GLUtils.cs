@@ -34,6 +34,7 @@ namespace MuMech
             Vector3d north = Vector3d.Exclude(up, body.transform.up).normalized;
 
             if (radius <= 0) { radius = map ? body.Radius / 15 : 5; }
+            else { radius = map ? body.Radius / 15 : radius; }
 
             if (!map)
             {

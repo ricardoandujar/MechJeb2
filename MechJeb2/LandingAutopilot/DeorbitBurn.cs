@@ -32,8 +32,9 @@ namespace MuMech
                 //in the orbit to deorbt; we already have deorbited.
                 if (Orbit.ApA < MainBody.RealMaxAtmosphereAltitude())
                 {
-                    Core.Thrust.TargetThrottle = 0;
-                    return new CourseCorrection(Core);
+                    Core.Thrust.ThrustOff();
+                    return new OrbitalTargeting(Core);
+                    //return new CourseCorrection(Core);
                 }
 
                 //We aim for a trajectory that
@@ -89,6 +90,7 @@ namespace MuMech
                     || (targetAheadAngle < 90 && targetAheadAngle > 60 && planeChangeAngle < 90))
                 {
                     _deorbitBurnTriggered = true;
+                    return new OrbitalTargeting(Core);
                 }
 
                 if (_deorbitBurnTriggered)

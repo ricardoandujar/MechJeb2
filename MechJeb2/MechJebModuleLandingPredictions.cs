@@ -150,6 +150,13 @@ namespace MuMech
         private double lastSimSteps;
         private double lastErrorSimTime;
         private double lastErrorSimSteps;
+        public double predictedMarkerRadius = 10;
+        public double debug1MarkerRadius = 0;
+        public double debug1Lat = 0;
+        public double debug1Lon = 0;
+        public double debug2MarkerRadius = 0;
+        public double debug2Lat = 0;
+        public double debug2Lon = 0;
 
         [ValueInfoItem("#MechJeb_LandingSim", InfoItem.Category.Misc, showInEditor = false)] //LandingSim
         public string LandingSimTime() =>
@@ -496,9 +503,13 @@ namespace MuMech
                 ReentrySimulation.Result drawnResult = Result;
                 if (drawnResult != null)
                 {
+                    if (debug1MarkerRadius != 0) GLUtils.DrawGroundMarker(drawnResult.Body, debug1Lat, debug1Lon, Color.green, MapView.MapIsEnabled, 0, debug1MarkerRadius);
+                    if (debug2MarkerRadius != 0) GLUtils.DrawGroundMarker(drawnResult.Body, debug2Lat, debug2Lon, Color.yellow, MapView.MapIsEnabled, 0, debug2MarkerRadius);
+
                     if (drawnResult.Outcome == ReentrySimulation.Outcome.LANDED)
-                        GLUtils.DrawGroundMarker(drawnResult.Body, drawnResult.EndPosition.Latitude, drawnResult.EndPosition.Longitude, Color.blue,
-                            MapView.MapIsEnabled, 60);
+                    {
+                        GLUtils.DrawGroundMarker(drawnResult.Body, drawnResult.EndPosition.Latitude, drawnResult.EndPosition.Longitude, Color.cyan, MapView.MapIsEnabled, 60, 10);
+                    }
 
                     if (showTrajectory && drawnResult.Outcome != ReentrySimulation.Outcome.ERROR &&
                         drawnResult.Outcome != ReentrySimulation.Outcome.NO_REENTRY)
