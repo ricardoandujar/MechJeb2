@@ -1,5 +1,5 @@
 /*************************************************************************
-ALGLIB 4.06.0 (source code generated 2025-10-08)
+ALGLIB 4.07.0 (source code generated 2025-12-29)
 Copyright (c) Sergey Bochkanov (ALGLIB project).
 
 >>> SOURCE LICENSE >>>
@@ -3232,9 +3232,19 @@ public partial class alglib
     and arbitrary number of linear constraints. Quadratic and conic constraints
     are supported by another solver (DENSE-GENIPM).
 
-    IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
+    IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+               phase of this function (this phase takes most time when solving
+               large-scale problems). It can also use  a  performance  backend
+               (e.g.  Intel  MKL  or  another  platform-specific  library)  to
+               accelerate dense factorization.
+
+               Dense Cholesky factorization is a well  studied  and  optimized
+               algorithm. ALGLIB  includes  a  good  implementation;  however,
+               using a hardware vendor-provided  performance  library  usually
+               results in a better performance.
+
                See the ALGLIB Reference Manual for more information on how  to
-               activate parallelism support.
+               activate parallelism and backend support.
 
     IMPORTANT: this  algorithm  is  likely  to  fail  on  nonconvex  problems,
                furthermore, sometimes it fails without a notice. If you try to
@@ -3341,11 +3351,20 @@ public partial class alglib
     will be handled separately  by  the  dense  BLAS  -  but  the  more  dense
     constraints you have, the more time solver needs.
 
-    IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
-               Specific speed-up due  to  parallelism  heavily  depends  on  a
-               sparsity pattern of quadratic term and constraints.
+    IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+               phase of this function (this phase takes most time when solving
+               large-scale problems). It can also use  a  performance  backend
+               (e.g. Intel PARDISO or another  platform-specific  library)  to
+               accelerate sparse factorization.
+
+               Specific speed-up due to parallelism  and  performance  backend
+               usage heavily depends on the sparsity pattern of quadratic term
+               and constraints. For some problem  types  performance  backends
+               provide great speed-up. For other  ones,  ALGLIB's  own  sparse
+               factorization code is the preferred option.
+
                See the ALGLIB Reference Manual for more information on how  to
-               activate parallelism support.
+               activate parallelism and backend support.
 
     IMPORTANT: internally this solver performs large  and  sparse  (N+M)x(N+M)
                triangular factorization. So it expects both quadratic term and
@@ -3456,9 +3475,19 @@ public partial class alglib
     more general constraints as well as nonconvexity of  the  target.  In  the
     latter case, a local solution is found.
 
-    IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
+    IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+               phase of this function (this phase takes most time when solving
+               large-scale problems). It can also use  a  performance  backend
+               (e.g.  Intel  MKL  or  another  platform-specific  library)  to
+               accelerate dense factorization.
+
+               Dense Cholesky factorization is a well  studied  and  optimized
+               algorithm.  ALGLIB  includes  a  good  implementation; however,
+               using a hardware vendor-provided  performance  library  usually
+               results in a better performance.
+
                See the ALGLIB Reference Manual for more information on how  to
-               activate parallelism support.
+               activate parallelism and backend support.
 
     ALGORITHM FEATURES:
 
@@ -3547,11 +3576,19 @@ public partial class alglib
     handling more general constraints as well as nonconvexity of  the  target.
     In the latter case, a local solution is found.
 
-    IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
-               Specific speed-up due  to  parallelism  heavily  depends  on  a
-               sparsity pattern of quadratic term and constraints.
+    IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+               phase of this function (this phase takes most time when solving
+               large-scale problems). Specific  speed-up  due  to  parallelism
+               heavily depends on the sparsity pattern of quadratic  term  and
+               constraints.
+
                See the ALGLIB Reference Manual for more information on how  to
                activate parallelism support.
+
+               This function does not use performance backends  to  accelerate
+               sparse factorization because external  libraries  typically  do
+               not  provide   fine  control over regularization, pivoting  and
+               sparse orderings.
 
     IMPORTANT: internally this solver performs large  and  sparse  (N+M)x(N+M)
                triangular factorization. So it expects both quadratic term and
@@ -3648,6 +3685,20 @@ public partial class alglib
     the rest of the problem,  thus  achieving  significant  speed-up  on  many
     types of problems.
 
+    IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+               phase of this function (this phase takes most time when solving
+               large-scale problems). Specific  speed-up  due  to  parallelism
+               heavily depends on the sparsity pattern of quadratic  term  and
+               constraints.
+
+               See the ALGLIB Reference Manual for more information on how  to
+               activate parallelism support.
+
+               This function does not use performance backends  to  accelerate
+               sparse factorization because external  libraries  typically  do
+               not  provide   fine  control over regularization, pivoting  and
+               sparse orderings.
+
     IMPORTANT: performance of this function depends on both  sparsity  pattern
                of the problem and on its conditioning properties.  The running
                time for a dense QP/QCQP problem grows with variables count  as
@@ -3659,7 +3710,7 @@ public partial class alglib
                10000.
 
                In practice, on a dense QCQP problem HYBRID algorithm starts to
-               singificantly outperform DENSE-GENIPM for N>=5000.
+               singificantly outperform DENSE-GENIPM for N>=1000.
 
     INPUT PARAMETERS:
         State   -   structure which stores algorithm state
@@ -3729,11 +3780,20 @@ public partial class alglib
     direct nature, it does not need stopping criteria and performs much faster
     than interior point methods.
 
-    IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
-               Specific speed-up due  to  parallelism  heavily  depends  on  a
-               sparsity pattern of quadratic term and constraints.
+    IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+               phase of this function (this phase takes most time when solving
+               large-scale problems). It can also use  a  performance  backend
+               (e.g. Intel PARDISO or another  platform-specific  library)  to
+               accelerate sparse factorization.
+
+               Specific speed-up due to parallelism  and  performance  backend
+               usage heavily depends on the sparsity pattern of quadratic term
+               and constraints. For some problem  types  performance  backends
+               provide great speed-up. For other  ones,  ALGLIB's  own  sparse
+               factorization code is the preferred option.
+
                See the ALGLIB Reference Manual for more information on how  to
-               activate parallelism support.
+               activate parallelism and backend support.
 
     IMPORTANT: internally this solver performs large  and  sparse  (N+M)x(N+M)
                triangular factorization. So it expects both quadratic term and
@@ -13077,8 +13137,8 @@ public partial class alglib
     This function selects large-scale  sparse  filter-based  SQP  solver,  the
     most robust solver in ALGLIB, a recommended option.
 
-    This algorithm is scalable to problems with tens of thousands of variables
-    and can efficiently handle sparsity of constraints.
+    This algorithm is scalable to problems with millions of variables and  can
+    efficiently handle sparsity of constraints.
 
     The convergence is proved for the following case:
     * function and constraints are continuously differentiable (C1 class)
@@ -13095,6 +13155,21 @@ public partial class alglib
       them as much as possible
     * numerical differentiation does  not  violate  box  constraints  (although
       general linear and nonlinear ones can be violated during differentiation)
+
+    IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+               phase of this function (this phase takes significant amounts of
+               time when solving large-scale problems).  It  can  also  use  a
+               performance backend (e.g. Intel PARDISO  or  another  platform-
+               specific library) to accelerate sparse factorization.
+
+               Specific speed-up due to parallelism  and  performance  backend
+               usage heavily depends on the sparsity pattern  of  constraints.
+               For some  problem  types  performance  backends  provide  great
+               speed-up. For other ones,  ALGLIB's  own  sparse  factorization
+               code is the preferred option.
+
+               See the ALGLIB Reference Manual for more information on how  to
+               activate parallelism and backend support.
 
     INPUT PARAMETERS:
         State   -   structure which stores algorithm state
@@ -13263,6 +13338,21 @@ public partial class alglib
     * numerical differentiation does  not  violate  box  constraints  (although
       general linear and nonlinear ones can be violated during differentiation)
 
+
+    IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+               phase of this function (this phase takes most time when solving
+               large-scale problems). It can also use  a  performance  backend
+               (e.g.  Intel  MKL  or  another  platform-specific  library)  to
+               accelerate dense factorization.
+
+               Dense Cholesky factorization is a well  studied  and  optimized
+               algorithm. ALGLIB includes  a  well  optimized  implementation;
+               however, using a hardware vendor-provided  performance  library
+               usually results in a better performance.
+
+               See the ALGLIB Reference Manual for more information on how  to
+               activate parallelism and backend support.
+
     INPUT PARAMETERS:
         State   -   structure which stores algorithm state
 
@@ -13349,6 +13439,23 @@ public partial class alglib
       does not even evaluate the target outside of the box constrained area)
     * numerical differentiation does  not  violate  box  constraints  (although
       general linear and nonlinear ones can be violated during differentiation)
+
+
+    IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+               phase of this function (this phase takes significant amounts of
+               time when solving large-scale problems).  It  can  also  use  a
+               performance backend (e.g. Intel PARDISO  or  another  platform-
+               specific library) to accelerate sparse factorization.
+
+               Specific speed-up due to parallelism  and  performance  backend
+               usage heavily depends on the sparsity pattern  of  constraints.
+               For some  problem  types  performance  backends  provide  great
+               speed-up. For other ones,  ALGLIB's  own  sparse  factorization
+               code is the preferred option.
+
+               See the ALGLIB Reference Manual for more information on how  to
+               activate parallelism and backend support.
+
 
     INPUT PARAMETERS:
         State   -   structure which stores algorithm state
@@ -52047,50 +52154,6 @@ public partial class alglib
                 //
                 if( state.dotrace )
                 {
-                    spchol.spsymmextract(state.reducedsparsesystem.analysis, state.tmpsparse0, ref state.tmp0, ref state.tmpi, _params);
-                    alglib.ap.trace("> diagonal terms D and E\n");
-                    if( (double)(alpha0)!=(double)(0) )
-                    {
-                        v = Math.Abs(d[0]);
-                        vv = Math.Abs(d[0]);
-                        for(i=1; i<=n-1; i++)
-                        {
-                            v = Math.Min(v, Math.Abs(d[i]));
-                            vv = Math.Max(vv, Math.Abs(d[i]));
-                        }
-                        alglib.ap.trace(System.String.Format("diagD        = {0,0:E3} (min) ... {1,0:E3} (max)\n", v, vv));
-                    }
-                    if( m>0 && (double)(beta0)!=(double)(0) )
-                    {
-                        v = Math.Abs(e[0]);
-                        vv = Math.Abs(e[0]);
-                        for(i=1; i<=m-1; i++)
-                        {
-                            v = Math.Min(v, Math.Abs(e[i]));
-                            vv = Math.Max(vv, Math.Abs(e[i]));
-                        }
-                        alglib.ap.trace(System.String.Format("diagE        = {0,0:E3} (min) ... {1,0:E3} (max)\n", v, vv));
-                    }
-                    alglib.ap.trace("> LDLT factorization of entire KKT matrix\n");
-                    v = Math.Abs(state.tmp0[0]);
-                    vv = Math.Abs(state.tmp0[0]);
-                    for(i=0; i<=state.tmpsparse0.n-1; i++)
-                    {
-                        v = Math.Max(v, Math.Abs(state.tmp0[i]));
-                        vv = Math.Min(vv, Math.Abs(state.tmp0[i]));
-                    }
-                    alglib.ap.trace(System.String.Format("|D|          = {0,0:E3} (min) ... {1,0:E3} (max)\n", vv, v));
-                    v = 0.0;
-                    for(i=0; i<=state.tmpsparse0.n-1; i++)
-                    {
-                        k0 = state.tmpsparse0.ridx[i];
-                        k1 = state.tmpsparse0.didx[i];
-                        for(k=k0; k<=k1; k++)
-                        {
-                            v = Math.Max(v, Math.Abs(state.tmpsparse0.vals[k]));
-                        }
-                    }
-                    alglib.ap.trace(System.String.Format("max(|L|)     = {0,0:E3}\n", v));
                     alglib.ap.trace(System.String.Format("diag-err     = {0,0:E3} (diagonal reproduction error)\n", Math.Sqrt(errsq/(1+sumsq))));
                 }
             }
@@ -54188,6 +54251,7 @@ public partial class alglib
 
 
 
+        public const int spsymmfacttype = 21;
         public const double muquasidense = 10.0;
         public const double mupromote = 10.0;
         public const int defipmits = 200;
@@ -55066,7 +55130,7 @@ public partial class alglib
                     state.reducedsystem.compactpriorities[n+i] = densegroup;
                 }
             }
-            if( !spchol.spsymmanalyze(state.reducedsystem.compactkkt, state.reducedsystem.compactpriorities, mupromote, densegroup, 1, 3, 1, state.reducedsystem.analysis, _params) )
+            if( !spchol.spsymmanalyze(state.reducedsystem.compactkkt, state.reducedsystem.compactpriorities, mupromote, densegroup, spsymmfacttype, 3, 1, state.reducedsystem.analysis, _params) )
             {
                 alglib.ap.assert(false, "ReducedSystemPowerUp: critical integrity check failed, symbolically degenerate KKT system encountered");
             }
@@ -56231,7 +56295,7 @@ public partial class alglib
             // Analyze
             //
             apserv.stimerstartcond(state.timeranalyze, state.dotimers, _params);
-            if( !spchol.spsymmanalyze(s.compactkkt, s.compactpriorities, mupromote, densegroup, 1, orderingtouse, 1, s.analysis, _params) )
+            if( !spchol.spsymmanalyze(s.compactkkt, s.compactpriorities, mupromote, densegroup, spsymmfacttype, orderingtouse, 1, s.analysis, _params) )
             {
                 alglib.ap.assert(false, "ReducedSystemPowerUp: critical integrity check failed, symbolically degenerate KKT system encountered");
             }
@@ -56243,9 +56307,22 @@ public partial class alglib
             alglib.ap.assert(alglib.ap.len(x)>=ntotal, "IPM2: integrity check 7400 failed");
             alglib.ap.assert(alglib.ap.len(y)>=m, "IPM2: integrity check 7401 failed");
             ablasf.rallocv(ntotal+m, ref s.extendedeffdiagonal, _params);
-            ablasf.rsetvx(ntotal, -1.0, s.extendedeffdiagonal, 0, _params);
-            ablasf.rsetvx(m, 1.0, s.extendedeffdiagonal, ntotal, _params);
-            ablasf.raddv(ntotal+m, 1.0, s.extendedrawdiagonal, s.extendedeffdiagonal, _params);
+            for(i=0; i<=nuser-1; i++)
+            {
+                s.extendedeffdiagonal[i] = Math.Min(s.extendedrawdiagonal[i], 0.0)-1.0;
+            }
+            for(i=nuser; i<=naug-1; i++)
+            {
+                s.extendedeffdiagonal[i] = s.extendedrawdiagonal[i]+apserv.possign(s.extendedrawdiagonal[i], _params);
+            }
+            for(i=naug; i<=ntotal-1; i++)
+            {
+                s.extendedeffdiagonal[i] = Math.Min(s.extendedrawdiagonal[i], 0.0)-1.0;
+            }
+            for(i=ntotal; i<=ntotal+m-1; i++)
+            {
+                s.extendedeffdiagonal[i] = Math.Max(s.extendedrawdiagonal[i], 0.0)+1.0;
+            }
             ablasf.rallocv(naug+m, ref s.compacteffdiagonal, _params);
             for(i=0; i<=naug-1; i++)
             {
@@ -57160,6 +57237,7 @@ public partial class alglib
             double sumsq = 0;
             double errsq = 0;
             int rfsidx = 0;
+            int facttype = 0;
 
             terminationtype = 0;
 
@@ -57284,10 +57362,11 @@ public partial class alglib
             //
             // Prepare sparse Cholesky
             //
+            facttype = 21;
             ablasf.isetallocv(state.haug.n, 0, ref state.priorities, _params);
             ablasf.isetv(nuser, 1, state.priorities, _params);
             apserv.stimerstartcond(state.timeranalyze, state.dotimers, _params);
-            if( !spchol.spsymmanalyze(state.haug, state.priorities, mupromote, 0, 1, 3, 1, state.analysis, _params) )
+            if( !spchol.spsymmanalyze(state.haug, state.priorities, mupromote, 0, facttype, 3, 1, state.analysis, _params) )
             {
                 alglib.ap.assert(false, "ReducedSystemPowerUp: critical integrity check failed, symbolically degenerate KKT system encountered");
             }
@@ -62467,6 +62546,7 @@ public partial class alglib
             int dstidx = 0;
             int srcidx = 0;
             int srcrange1 = 0;
+            int facttype = 0;
 
             n = state.n;
             mlc = state.mlc;
@@ -62843,6 +62923,7 @@ public partial class alglib
                 optionaldensefromsparseqc(opti, qci, _params);
                 state.optionaldensexqc.append(opti);
             }
+            facttype = 1;
             ablasf.isetallocv(n+mtotal+2*state.hessmemlen, 0, ref state.priorities, _params);
             if( state.algomode!=amhybrid )
             {
@@ -62859,7 +62940,7 @@ public partial class alglib
             {
                 state.priorities[i] = 2;
             }
-            if( !spchol.spsymmanalyze(state.sparsesys, state.priorities, mupromote, 0, 1, 3, 1, state.analysis, _params) )
+            if( !spchol.spsymmanalyze(state.sparsesys, state.priorities, mupromote, 0, facttype, 3, 1, state.analysis, _params) )
             {
                 alglib.ap.assert(false, "QPGIPM: critical integrity check failed, symbolically degenerate KKT system encountered");
             }
@@ -71538,9 +71619,19 @@ public partial class alglib
         and arbitrary number of linear constraints. Quadratic and conic constraints
         are supported by another solver (DENSE-GENIPM).
 
-        IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
+        IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+                   phase of this function (this phase takes most time when solving
+                   large-scale problems). It can also use  a  performance  backend
+                   (e.g.  Intel  MKL  or  another  platform-specific  library)  to
+                   accelerate dense factorization.
+                   
+                   Dense Cholesky factorization is a well  studied  and  optimized
+                   algorithm. ALGLIB  includes  a  good  implementation;  however,
+                   using a hardware vendor-provided  performance  library  usually
+                   results in a better performance.
+                   
                    See the ALGLIB Reference Manual for more information on how  to
-                   activate parallelism support.
+                   activate parallelism and backend support.
 
         IMPORTANT: this  algorithm  is  likely  to  fail  on  nonconvex  problems,
                    furthermore, sometimes it fails without a notice. If you try to
@@ -71646,11 +71737,20 @@ public partial class alglib
         will be handled separately  by  the  dense  BLAS  -  but  the  more  dense
         constraints you have, the more time solver needs.
 
-        IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
-                   Specific speed-up due  to  parallelism  heavily  depends  on  a
-                   sparsity pattern of quadratic term and constraints.
+        IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+                   phase of this function (this phase takes most time when solving
+                   large-scale problems). It can also use  a  performance  backend
+                   (e.g. Intel PARDISO or another  platform-specific  library)  to
+                   accelerate sparse factorization.
+                   
+                   Specific speed-up due to parallelism  and  performance  backend
+                   usage heavily depends on the sparsity pattern of quadratic term
+                   and constraints. For some problem  types  performance  backends
+                   provide great speed-up. For other  ones,  ALGLIB's  own  sparse
+                   factorization code is the preferred option.
+                   
                    See the ALGLIB Reference Manual for more information on how  to
-                   activate parallelism support.
+                   activate parallelism and backend support.
 
         IMPORTANT: internally this solver performs large  and  sparse  (N+M)x(N+M)
                    triangular factorization. So it expects both quadratic term and
@@ -71760,9 +71860,19 @@ public partial class alglib
         more general constraints as well as nonconvexity of  the  target.  In  the
         latter case, a local solution is found.
 
-        IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
+        IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+                   phase of this function (this phase takes most time when solving
+                   large-scale problems). It can also use  a  performance  backend
+                   (e.g.  Intel  MKL  or  another  platform-specific  library)  to
+                   accelerate dense factorization.
+                   
+                   Dense Cholesky factorization is a well  studied  and  optimized
+                   algorithm.  ALGLIB  includes  a  good  implementation; however,
+                   using a hardware vendor-provided  performance  library  usually
+                   results in a better performance.
+                   
                    See the ALGLIB Reference Manual for more information on how  to
-                   activate parallelism support.
+                   activate parallelism and backend support.
 
         ALGORITHM FEATURES:
 
@@ -71850,11 +71960,19 @@ public partial class alglib
         handling more general constraints as well as nonconvexity of  the  target.
         In the latter case, a local solution is found.
 
-        IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
-                   Specific speed-up due  to  parallelism  heavily  depends  on  a
-                   sparsity pattern of quadratic term and constraints.
+        IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+                   phase of this function (this phase takes most time when solving
+                   large-scale problems). Specific  speed-up  due  to  parallelism
+                   heavily depends on the sparsity pattern of quadratic  term  and
+                   constraints.
+                   
                    See the ALGLIB Reference Manual for more information on how  to
                    activate parallelism support.
+                   
+                   This function does not use performance backends  to  accelerate
+                   sparse factorization because external  libraries  typically  do
+                   not  provide   fine  control over regularization, pivoting  and
+                   sparse orderings.
 
         IMPORTANT: internally this solver performs large  and  sparse  (N+M)x(N+M)
                    triangular factorization. So it expects both quadratic term and
@@ -71950,6 +72068,20 @@ public partial class alglib
         the rest of the problem,  thus  achieving  significant  speed-up  on  many
         types of problems.
 
+        IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+                   phase of this function (this phase takes most time when solving
+                   large-scale problems). Specific  speed-up  due  to  parallelism
+                   heavily depends on the sparsity pattern of quadratic  term  and
+                   constraints.
+                   
+                   See the ALGLIB Reference Manual for more information on how  to
+                   activate parallelism support.
+                   
+                   This function does not use performance backends  to  accelerate
+                   sparse factorization because external  libraries  typically  do
+                   not  provide   fine  control over regularization, pivoting  and
+                   sparse orderings.
+                   
         IMPORTANT: performance of this function depends on both  sparsity  pattern
                    of the problem and on its conditioning properties.  The running
                    time for a dense QP/QCQP problem grows with variables count  as
@@ -71961,7 +72093,7 @@ public partial class alglib
                    10000.
                    
                    In practice, on a dense QCQP problem HYBRID algorithm starts to
-                   singificantly outperform DENSE-GENIPM for N>=5000.
+                   singificantly outperform DENSE-GENIPM for N>=1000.
                    
         INPUT PARAMETERS:
             State   -   structure which stores algorithm state
@@ -72036,11 +72168,20 @@ public partial class alglib
         direct nature, it does not need stopping criteria and performs much faster
         than interior point methods.
 
-        IMPORTANT: the commercial edition of ALGLIB can parallelize this function.
-                   Specific speed-up due  to  parallelism  heavily  depends  on  a
-                   sparsity pattern of quadratic term and constraints.
+        IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+                   phase of this function (this phase takes most time when solving
+                   large-scale problems). It can also use  a  performance  backend
+                   (e.g. Intel PARDISO or another  platform-specific  library)  to
+                   accelerate sparse factorization.
+                   
+                   Specific speed-up due to parallelism  and  performance  backend
+                   usage heavily depends on the sparsity pattern of quadratic term
+                   and constraints. For some problem  types  performance  backends
+                   provide great speed-up. For other  ones,  ALGLIB's  own  sparse
+                   factorization code is the preferred option.
+                   
                    See the ALGLIB Reference Manual for more information on how  to
-                   activate parallelism support.
+                   activate parallelism and backend support.
 
         IMPORTANT: internally this solver performs large  and  sparse  (N+M)x(N+M)
                    triangular factorization. So it expects both quadratic term and
@@ -74796,7 +74937,6 @@ public partial class alglib
             public sparse.sparsematrix pattern;
             public sparse.sparsematrix elasticpattern;
             public sparse.sparsematrix upcomingpattern;
-            public spchol.spcholanalysis analysis;
             public double[] curb;
             public double[] curbndl;
             public double[] curbndu;
@@ -74846,7 +74986,6 @@ public partial class alglib
                 pattern = new sparse.sparsematrix();
                 elasticpattern = new sparse.sparsematrix();
                 upcomingpattern = new sparse.sparsematrix();
-                analysis = new spchol.spcholanalysis();
                 curb = new double[0];
                 curbndl = new double[0];
                 curbndu = new double[0];
@@ -74891,7 +75030,6 @@ public partial class alglib
                 _result.pattern = pattern!=null ? (sparse.sparsematrix)pattern.make_copy() : null;
                 _result.elasticpattern = elasticpattern!=null ? (sparse.sparsematrix)elasticpattern.make_copy() : null;
                 _result.upcomingpattern = upcomingpattern!=null ? (sparse.sparsematrix)upcomingpattern.make_copy() : null;
-                _result.analysis = analysis!=null ? (spchol.spcholanalysis)analysis.make_copy() : null;
                 _result.curb = (double[])curb.Clone();
                 _result.curbndl = (double[])curbndl.Clone();
                 _result.curbndu = (double[])curbndu.Clone();
@@ -83754,6 +83892,7 @@ public partial class alglib
             int j1 = 0;
             double ci = 0;
             double fi = 0;
+            int facttype = 0;
 
             n = state.n;
             cntlc = state.cntlc;
@@ -83967,8 +84106,9 @@ public partial class alglib
             //
             // Perform analysis and factorization
             //
+            facttype = 21;
             ablasf.isetallocv(naug, 0, ref prec.priorities, _params);
-            if( !spchol.spsymmanalyze(prec.augsys, prec.priorities, 0.0, 0, 1, 3, 1, prec.analysis, _params) )
+            if( !spchol.spsymmanalyze(prec.augsys, prec.priorities, 0.0, 0, facttype, 3, 1, prec.analysis, _params) )
             {
                 alglib.ap.assert(false, "AUL: integrity check 8126 failed");
             }
@@ -108118,7 +108258,7 @@ public partial class alglib
             
         where
             
-            rz1 = -rz0/U
+            rz1 = rz0/U
             x is a vector primal variables
             z is a vector of dual multipliers, which is taken to be equal to z_prim for the primal algorithm
             z_prim is a vector of primal multiplier estimates, which is -ci(x)/mu for ce-rows ; mu/ci(x)  for ci-rows
@@ -114110,6 +114250,7 @@ public partial class alglib
             int j0 = 0;
             int j1 = 0;
             int jj = 0;
+            int facttype = 0;
 
             n = state.n;
             mtotal = state.mnlc+state.mxx+state.mlc;
@@ -114178,6 +114319,7 @@ public partial class alglib
                 state.sparsesys.ridx[n+mtotal+i+1] = offs;
             }
             sparse.sparsecreatecrsinplace(state.sparsesys, _params);
+            facttype = 21;
             ablasf.iallocv(n+mtotal+state.hessmemlen, ref state.priorities, _params);
             for(i=0; i<=n-1; i++)
             {
@@ -114191,7 +114333,7 @@ public partial class alglib
             {
                 state.priorities[i] = 2;
             }
-            if( !spchol.spsymmanalyze(state.sparsesys, state.priorities, mupromote, 0, 1, 3, 1, state.analysis, _params) )
+            if( !spchol.spsymmanalyze(state.sparsesys, state.priorities, mupromote, 0, facttype, 3, 1, state.analysis, _params) )
             {
                 alglib.ap.assert(false, "NLCGIPM2: critical integrity check failed, symbolically degenerate KKT system encountered");
             }
@@ -118514,8 +118656,8 @@ public partial class alglib
         This function selects large-scale  sparse  filter-based  SQP  solver,  the
         most robust solver in ALGLIB, a recommended option.
 
-        This algorithm is scalable to problems with tens of thousands of variables
-        and can efficiently handle sparsity of constraints.
+        This algorithm is scalable to problems with millions of variables and  can
+        efficiently handle sparsity of constraints.
 
         The convergence is proved for the following case:
         * function and constraints are continuously differentiable (C1 class)
@@ -118532,6 +118674,21 @@ public partial class alglib
           them as much as possible
         * numerical differentiation does  not  violate  box  constraints  (although
           general linear and nonlinear ones can be violated during differentiation)
+
+        IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+                   phase of this function (this phase takes significant amounts of
+                   time when solving large-scale problems).  It  can  also  use  a
+                   performance backend (e.g. Intel PARDISO  or  another  platform-
+                   specific library) to accelerate sparse factorization.
+                   
+                   Specific speed-up due to parallelism  and  performance  backend
+                   usage heavily depends on the sparsity pattern  of  constraints.
+                   For some  problem  types  performance  backends  provide  great
+                   speed-up. For other ones,  ALGLIB's  own  sparse  factorization
+                   code is the preferred option.
+                   
+                   See the ALGLIB Reference Manual for more information on how  to
+                   activate parallelism and backend support.
 
         INPUT PARAMETERS:
             State   -   structure which stores algorithm state
@@ -118697,6 +118854,21 @@ public partial class alglib
         * numerical differentiation does  not  violate  box  constraints  (although
           general linear and nonlinear ones can be violated during differentiation)
 
+
+        IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+                   phase of this function (this phase takes most time when solving
+                   large-scale problems). It can also use  a  performance  backend
+                   (e.g.  Intel  MKL  or  another  platform-specific  library)  to
+                   accelerate dense factorization.
+                   
+                   Dense Cholesky factorization is a well  studied  and  optimized
+                   algorithm. ALGLIB includes  a  well  optimized  implementation;
+                   however, using a hardware vendor-provided  performance  library
+                   usually results in a better performance.
+                   
+                   See the ALGLIB Reference Manual for more information on how  to
+                   activate parallelism and backend support.
+
         INPUT PARAMETERS:
             State   -   structure which stores algorithm state
             
@@ -118778,6 +118950,23 @@ public partial class alglib
           does not even evaluate the target outside of the box constrained area)
         * numerical differentiation does  not  violate  box  constraints  (although
           general linear and nonlinear ones can be violated during differentiation)
+
+
+        IMPORTANT: the commercial edition of ALGLIB can parallelize  factorization
+                   phase of this function (this phase takes significant amounts of
+                   time when solving large-scale problems).  It  can  also  use  a
+                   performance backend (e.g. Intel PARDISO  or  another  platform-
+                   specific library) to accelerate sparse factorization.
+                   
+                   Specific speed-up due to parallelism  and  performance  backend
+                   usage heavily depends on the sparsity pattern  of  constraints.
+                   For some  problem  types  performance  backends  provide  great
+                   speed-up. For other ones,  ALGLIB's  own  sparse  factorization
+                   code is the preferred option.
+                   
+                   See the ALGLIB Reference Manual for more information on how  to
+                   activate parallelism and backend support.
+                   
 
         INPUT PARAMETERS:
             State   -   structure which stores algorithm state

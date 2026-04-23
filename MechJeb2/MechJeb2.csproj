@@ -62,17 +62,13 @@
     <Compile Include="GLUtils.cs" />
     <Compile Include="GuiUtils.cs" />
     <Compile Include="InstallChecker.cs" />
-    <Compile Include="LandingAutopilot\Ascend2Target.cs" />
     <Compile Include="LandingAutopilot\CoastToDeceleration.cs" />
     <Compile Include="LandingAutopilot\CourseCorrection.cs" />
-    <Compile Include="LandingAutopilot\MoveToTarget.cs" />
     <Compile Include="LandingAutopilot\DecelerationBurn.cs" />
     <Compile Include="LandingAutopilot\DeorbitBurn.cs" />
     <Compile Include="LandingAutopilot\FinalDescent.cs" />
     <Compile Include="LandingAutopilot\KillHorizontalVelocity.cs" />
-    <Compile Include="LandingAutopilot\LandingBurn.cs" />
     <Compile Include="LandingAutopilot\LowDeorbitBurn.cs" />
-    <Compile Include="LandingAutopilot\TargetSubOrbit.cs" />
     <Compile Include="LandingAutopilot\PlaneChange.cs" />
     <Compile Include="LandingAutopilot\UntargetedDeorbit.cs" />
     <Compile Include="Maneuver\Operation.cs" />
@@ -101,8 +97,6 @@
     <Compile Include="MathExtensions.cs" />
     <Compile Include="MechJebAR202.cs" />
     <Compile Include="MechJebCore.cs" />
-    <Compile Include="MechJebModuleAirplaneAutopilot.cs" />
-    <Compile Include="MechJebModuleAirplaneGuidance.cs" />
     <Compile Include="MechJebModuleAscentBaseAutopilot.cs" />
     <Compile Include="MechJebModuleAscentClassicAutopilot.cs" />
     <Compile Include="MechJebModuleAscentClassicPathMenu.cs" />
@@ -143,8 +137,6 @@
     <Compile Include="MechJebModuleSmartASS.cs" />
     <Compile Include="MechJebModuleSmartRcs.cs" />
     <Compile Include="MechJebModuleSolarPanelController.cs" />
-    <Compile Include="MechJebModuleSpaceplaneAutopilot.cs" />
-    <Compile Include="MechJebModuleSpaceplaneGuidance.cs" />
     <Compile Include="MechJebModuleSpinupController.cs" />
     <Compile Include="MechJebModuleStagingController.cs" />
     <Compile Include="MechJebModuleSuicideTimer.cs" />
@@ -190,10 +182,12 @@
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Assembly-CSharp, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/Assembly-CSharp.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="Assembly-CSharp-firstpass, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/Assembly-CSharp-firstpass.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
@@ -202,52 +196,72 @@
       <Aliases>JetBrainsAnnotations</Aliases>
     </Reference>
     <Reference Include="mscorlib">
+      <HintPath>$(KspData)/Managed/mscorlib.dll</HintPath>
+      <SpecificVersion>False</SpecificVersion>
+      <Private>False</Private>
     </Reference>
     <Reference Include="System">
+      <HintPath>$(KspData)/Managed/System.dll</HintPath>
+      <SpecificVersion>False</SpecificVersion>
+      <Private>False</Private>
     </Reference>
     <Reference Include="System.Core">
+      <HintPath>$(KspData)/Managed/System.Core.dll</HintPath>
+      <SpecificVersion>False</SpecificVersion>
+      <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.AnimationModule, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.AnimationModule.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.AssetBundleModule, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.AssetBundleModule.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.CoreModule.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.ImageConversionModule, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.ImageConversionModule.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.IMGUIModule.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.InputLegacyModule, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.InputLegacyModule.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.PhysicsModule, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.PhysicsModule.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.TextRenderingModule, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.TextRenderingModule.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UI, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.UI.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.VehiclesModule, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>$(KspData)/Managed/UnityEngine.VehiclesModule.dll</HintPath>
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>

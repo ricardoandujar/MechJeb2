@@ -1,3 +1,7 @@
+/*
+ * Copyright Lamont Granquist, Sebastien Gaggini and the MechJeb contributors
+ * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
+ */
 ﻿using MechJebLib.Primitives;
 
 namespace MechJebLib.PSG
@@ -96,7 +100,7 @@ namespace MechJebLib.PSG
         private          double[] _vars = null!;
         private readonly int      _btOffset;
 
-        public PhaseProxy(int n, int idx, int p, Phase phase)
+        public PhaseProxy(Problem problem, int n, int idx, int p, Phase phase)
         {
             int k     = 2 * n - 1;
             int start = idx;
@@ -165,13 +169,17 @@ namespace MechJebLib.PSG
             if (!phase.GuidedCoast)
                 NumConstraints += phase.Unguided ? 1 : k; // control magnitude constraint
             //if (phase.Unguided)
-                //NumConstraints += 3; // unguided control constraint
+            //NumConstraints += 3; // unguided control constraint
             if (!phase.Coast)
                 NumConstraints += (n - 1) * 2; // dynamical constraints for m
             if (p > 0)
                 NumConstraints += 9; // continuity constraints
             if (p > 0 && phase.MassContinuity)
                 NumConstraints += 1; // mass continuity with previous stage
+            if (problem.H0 > 0 && problem.Rho0InvQAlphaMax > 0)
+                NumConstraints += k;
+            if (problem.H0 > 0 && problem.Rho0InvQMax > 0)
+                NumConstraints += k;
         }
 
         public     DoubleArrayProxy Rx             { get; }

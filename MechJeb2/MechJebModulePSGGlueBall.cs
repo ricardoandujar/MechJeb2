@@ -6,11 +6,12 @@
 
 extern alias JetBrainsAnnotations;
 using System;
-using System.Threading.Tasks;
 using MechJebLib.FuelFlowSimulation;
+using MechJebLib.Primitives;
 using MechJebLib.PSG;
 using UnityEngine;
 using static MechJebLib.Utils.Statics;
+using static System.Math;
 
 #nullable enable
 
@@ -31,31 +32,27 @@ namespace MuMech
 
         public  Exception? Exception;
         public  double     Staleness;
-        public  double     LastZnorm;
+        public  double     LastInfeasibility;
         private double     _lastTime;
 
         public MechJebModulePSGGlueBall(MechJebCore core) : base(core) { }
 
         private MechJebModuleAscentSettings _ascentSettings => Core.AscentSettings;
 
-        private Task? _task;
-
         private Ascent? _ascent;
 
         protected override void OnModuleEnabled()
         {
             Debug.Log("Enabling PSG GlueBall");
-            SuccessfulConverges = LastLmStatus     = MaxLmIterations = 0;
-            LastLmStatus        = LastLmIterations = 0;
-            Staleness           = LastZnorm        = _lastTime = 0;
-            _task               = null;
+            SuccessfulConverges = LastLmStatus      = MaxLmIterations = 0;
+            LastLmStatus        = LastLmIterations  = 0;
+            Staleness           = LastInfeasibility = _lastTime = 0;
             _ascent             = null;
         }
 
         protected override void OnModuleDisabled()
         {
             Debug.Log("Disabling PSG GlueBall");
-            _task   = null;
             _ascent = null;
         }
 
@@ -71,22 +68,20 @@ namespace MuMech
 
         private bool IsFixed(int s) => _ascentSettings.FixedStages.Contains(s);
 
-        // FIXME: maybe this could be a callback to the Task?
         private void HandleDoneTask()
         {
-            if (!(_task is { IsCompleted: true }) || _ascent == null)
+            if (!(_ascent is { IsCompleted: true }))
                 return;
 
             try
             {
-                // FIXME: the way this pokes around the optimizer has code smell
                 Optimizer? psg = _ascent.GetOptimizer();
                 if (psg == null)
                     return;
 
-                LastLmStatus     = psg.TerminationType;
-                LastLmIterations = psg.Iterations;
-                LastZnorm        = psg.PrimalFeasibility;
+                LastLmStatus      = psg.TerminationType;
+                LastLmIterations  = psg.Iterations;
+                LastInfeasibility = psg.PrimalFeasibility;
 
                 if (LastLmIterations > MaxLmIterations)
                     MaxLmIterations = LastLmIterations;
@@ -105,18 +100,26 @@ namespace MuMech
             }
             finally
             {
-                _task = null;
+                _ascent.TryMarkReady();
             }
         }
 
         private void GatherException()
         {
-            if (!(_task is { IsCompleted: true }))
+            if (!(_ascent is { IsFaulted: true }))
                 return;
 
-            Exception = _task.Exception?.InnerException;
+            if (_ascent.ExceptionMessage != null)
+                Debug.Log(_ascent.ExceptionMessage);
+        }
 
-            Debug.Log(Exception);
+        private void MarkReady()
+        {
+            if (!(_ascent is { IsStopped: true }))
+                return;
+
+            if (!_ascent.TryMarkReady())
+                throw new Exception("[MechJebModulePSGGlueBall] could not mark job as ready");
         }
 
         public void SetTarget(double peR, double apR, double attR, double inclination, double lan, double fpa, bool attachAltFlag, bool lanflag)
@@ -127,19 +130,25 @@ namespace MuMech
 
             Staleness = VesselState.time - _lastTime;
 
+            if (_ascent is { IsRunning: true })
+                return;
+
             GatherException();
 
             HandleDoneTask();
 
-            if (_task is { IsCompleted: false })
-                return;
+            MarkReady();
 
             if (_ascentSettings.OptimizeStageFlag)
             {
-                // clamp the AttR between peR and apR but not if we're using AttR for a fixed time rocket
+                // Except if we're using AttR for a fixed time rocket;
+                // If 0 < apR < peR then circularize at peR (apR < 0 means hyperbolic orbit)
+                if (apR > 0 && apR < peR)
+                    apR = peR;
+                // Clamp the AttR between peR and apR
                 if (attR < peR)
                     attR = peR;
-                if (attR > apR && apR > peR)
+                if (apR > 0 && attR > apR)
                     attR = apR;
             }
 
@@ -200,6 +209,24 @@ namespace MuMech
                   , MainBody.gravParameter, MainBody.Radius)
                 .SetTarget(peR, apR, attR, Deg2Rad(inclination), Deg2Rad(lan), 0, fpa, attachAltFlag, lanflag, false);
 
+            if (MainBody.atmosphere)
+            {
+                // This very crudely fits an exponential between "sea" level and 15% of the way to space to find rho0 and h0
+                double r1 = MainBody.atmosphereDepth * 0.15;
+
+                double rho0 = MainBody.atmDensityASL;
+                double rho1 = MainBody.GetDensity(MainBody.GetPressure(r1), MainBody.GetTemperature(r1));
+
+                double h0        = r1 / Log(rho0 / rho1);
+                double cd        = _ascentSettings.Cd;
+                double aRef      = _ascentSettings.Aref;
+                double qAlphaMax = _ascentSettings.LimitQa;
+                double qMax      = Core.Thrust.LimitDynamicPressure ? Core.Thrust.MaxDynamicPressure.Val : 0.0;
+                V3     w         = 2 * PI / MainBody.rotationPeriod * V3.northpole;
+
+                ascentBuilder.AerodynamicConstants(cd, aRef, rho0, qAlphaMax, qMax, h0, w);
+            }
+
             if (Core.Guidance.Solution != null)
                 ascentBuilder.OldSolution(Core.Guidance.Solution);
 
@@ -207,8 +234,11 @@ namespace MuMech
 
             for (int mjPhase = Core.StageStats.VacStats.Count - 1; mjPhase >= 0; mjPhase--)
             {
-                FuelStats fuelStats = Core.StageStats.VacStats[mjPhase];
-                int       kspStage  = Core.StageStats.VacStats[mjPhase].KSPStage;
+                FuelStats fuelStats   = Core.StageStats.VacStats[mjPhase];
+                int       kspStage    = Core.StageStats.VacStats[mjPhase].KSPStage;
+                double    ispCurrent  = Core.StageStats.AtmoStats[mjPhase].Isp;
+                double    minThrottle = Core.StageStats.VacStats[mjPhase].MinThrust / Core.StageStats.VacStats[mjPhase].MaxThrust;
+
                 if (kspStage < _ascentSettings.LastStage)
                     break;
 
@@ -225,8 +255,8 @@ namespace MuMech
                         {
                             if (fuelStats.DeltaV > _ascentSettings.MinDeltaV)
                             {
-                                ascentBuilder.AddStageUsingFinalMass(fuelStats.StartMass * 1000, fuelStats.EndMass * 1000, fuelStats.Isp, fuelStats.DeltaTime,
-                                    kspStage, mjPhase, IsUnguided(kspStage), !IsFixed(kspStage));
+                                ascentBuilder.AddStage(fuelStats.StartMass * 1000, fuelStats.EndMass * 1000, fuelStats.MaxThrust * 1000, fuelStats.Isp,
+                                    kspStage, mjPhase, IsUnguided(kspStage), !IsFixed(kspStage), ispCurrent: ispCurrent, minThrottle: minThrottle);
                                 massContinuity = true;
                             }
                         }
@@ -237,8 +267,8 @@ namespace MuMech
 
                         if (Core.Guidance.IsCoasting())
                         {
-                            maxt = Math.Max(maxt - (VesselState.time - Core.Guidance.StartCoast), 0);
-                            mint = Math.Max(mint - (VesselState.time - Core.Guidance.StartCoast), 0);
+                            maxt = Max(maxt - (VesselState.time - Core.Guidance.StartCoast), 0);
+                            mint = Max(mint - (VesselState.time - Core.Guidance.StartCoast), 0);
                         }
 
                         bool unguidedCoast = IsUnguided(kspStage);
@@ -251,21 +281,22 @@ namespace MuMech
                 if (fuelStats.DeltaV < _ascentSettings.MinDeltaV)
                     continue;
 
-                ascentBuilder.AddStageUsingFinalMass(fuelStats.StartMass * 1000, fuelStats.EndMass * 1000, fuelStats.Isp, fuelStats.DeltaTime,
-                    kspStage, mjPhase, IsUnguided(kspStage), !IsFixed(kspStage), massContinuity);
+                ascentBuilder.AddStage(fuelStats.StartMass * 1000, fuelStats.EndMass * 1000, fuelStats.MaxThrust * 1000, fuelStats.Isp,
+                    kspStage, mjPhase, IsUnguided(kspStage), !IsFixed(kspStage), massContinuity, ispCurrent, minThrottle);
             }
 
             _ascent = ascentBuilder.Build();
 
-            _task = new Task(_ascent.Run);
-            _task.Start();
+            // TODO: wire up Cancellation and Timeouts
+            if (!_ascent.TryStartJob())
+                throw new Exception("[MechJebModulePSGGlueBall] could not start optimizer job");
 
             _blockOptimizerUntilTime = VesselState.time + 1;
         }
 
         private bool IsCurrentCoastAfterStage(int kspStage)
         {
-            if (kspStage == Vessel.currentStage && Core.Guidance.IsCoasting() && !CoastingBefore())
+            if (kspStage == Vessel.currentStage && Core.Guidance.IsCoasting() && CoastingAfter())
                 return true;
 
             return false;

@@ -1,3 +1,7 @@
+/*
+ * Copyright Lamont Granquist, Sebastien Gaggini and the MechJeb contributors
+ * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
+ */
 ﻿using System.Collections.Generic;
 using MechJebLib.PSG.Terminal;
 
@@ -10,14 +14,14 @@ namespace MechJebLib.PSG
         public readonly int TotalVariables;
         public readonly int TotalConstraints;
 
-        public VariableProxy(PhaseCollection phases, ITerminal terminal, int n)
+        public VariableProxy(Problem problem, PhaseCollection phases, ITerminal terminal, int n)
         {
             int idx  = 0;
             int cons = 0;
 
             for (int p = 0; p < phases.Count; p++)
             {
-                var proxy = new PhaseProxy(n, idx, p, phases[p]);
+                var proxy = new PhaseProxy(problem, n, idx, p, phases[p]);
                 _proxies.Add(proxy);
                 idx  += proxy.NumVars;
                 cons += proxy.NumConstraints;

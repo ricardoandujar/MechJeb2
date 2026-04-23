@@ -1,3 +1,7 @@
+/*
+ * Copyright Lamont Granquist, Sebastien Gaggini and the MechJeb contributors
+ * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
+ */
 ﻿using System.Collections.Generic;
 using MechJebLib.Functions;
 using MechJebLib.ODE;
@@ -31,7 +35,7 @@ namespace MechJebLib.PSG
                 var y  = InterpolantLayout.CreateFrom(yin);
                 var dy = new InterpolantLayout();
 
-                double thrust = Phase.Infinite ? 2 * Phase.Thrust : Phase.Thrust;
+                double thrust = Phase.VacThrust;
                 double at     = thrust / y.M;
 
                 double r2 = V3.Dot(y.R, y.R);
@@ -40,7 +44,7 @@ namespace MechJebLib.PSG
 
                 dy.R  = y.V;
                 dy.V  = -y.R / r3 + at * y.U;
-                dy.M  = Phase.Infinite ? 0 : -Phase.Mdot;
+                dy.M  = -Phase.Mdot;
                 dy.U  = V3.zero;
                 dy.Dv = at;
 
@@ -84,7 +88,7 @@ namespace MechJebLib.PSG
         {
             if (p + 2 > phases.Count - 1) // need three phases in a row
                 return false;
-            if (!phases[p + 1].MassContinuity || !phases[p + 2].MassContinuity) // need 2 mass continuity stages
+            if (!phases[p + 2].MassContinuity) // next burn should be mass continuity stage
                 return false;
             if (phases[p].Coast || !phases[p + 1].Coast || phases[p + 2].Coast) // need burn-coast-burn
                 return false;
@@ -111,9 +115,9 @@ namespace MechJebLib.PSG
                 Phase phase = phases[p];
 
                 if (!phase.MassContinuity)
-                    y0.M = phase.m0;
+                    y0.M = phase.M0;
 
-                double bt = phase.Coast ? phase.mint + 0.5 * (phase.maxt - phase.mint) : phase.BurnTimeFromMass(y0.M);
+                double bt = phase.Coast ? phase.MinT + 0.5 * (phase.MaxT - phase.MinT) : phase.BurnTimeFromMass(y0.M);
                 if (bt < 0)
                     bt = 0;
 
@@ -128,7 +132,7 @@ namespace MechJebLib.PSG
                 if (WillIntraPhaseCoast(phases, p))
                 {
                     double btActual     = interpolant.MaxTime - interpolant.MinTime;
-                    Hn     interpolant2 = Integrate(initial, terminal, phase, t0, t0 + btActual / 2);
+                    Hn     interpolant2 = Integrate(initial, terminal, phase, t0, t0 + btActual * 0.75);
                     solution.AddSegment(interpolant2.MinTime, interpolant2.MaxTime, interpolant2, phase);
                 }
                 else

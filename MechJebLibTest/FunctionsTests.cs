@@ -1,3 +1,7 @@
+/*
+ * Copyright Lamont Granquist, Sebastien Gaggini and the MechJeb contributors
+ * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
+ */
 ﻿/*
  * Copyright Lamont Granquist (lamont@scriptkiddie.org)
  * Dual licensed under the MIT (MIT-LICENSE) license
@@ -460,37 +464,15 @@ namespace MechJebLibTest.MathsTests
                     double lng = i * 45;
                     double lan = j * 45;
 
-                    // advance by 90 degrees
-                    double delay = PERIOD / 8 * ((j - i + 8 + 2) % 8);
+                    double delay = 0;
 
-                    if (delay != 0)
-                    {
-                        Astro.TimeToPlane(PERIOD, 45, lng, lan, 0).ShouldEqual(delay, ACC);
-                    }
+                    Astro.TimeToPlane(PERIOD, 45, lng, lan, 0).ShouldEqual(delay, ACC);
 
-                    // advance by 270 degrees
-                    delay = PERIOD / 8 * ((j - i + 8 + 6) % 8);
+                    Astro.TimeToPlane(PERIOD, -45, lng, lan, 0).ShouldEqual(delay, ACC);
 
-                    if (delay != 0)
-                    {
-                        Astro.TimeToPlane(PERIOD, -45, lng, lan, 0).ShouldEqual(delay, ACC);
-                    }
+                    Astro.TimeToPlane(-PERIOD, 45, lng, lan, 0).ShouldEqual(delay, ACC);
 
-                    // reverse and advance by 270 degrees
-                    delay = PERIOD / 8 * ((i - j + 8 + 6) % 8);
-
-                    if (delay != 0)
-                    {
-                        Astro.TimeToPlane(-PERIOD, 45, lng, lan, 0).ShouldEqual(delay, ACC);
-                    }
-
-                    // reverse and advance by 90 degrees
-                    delay = PERIOD / 8 * ((i - j + 8 + 2) % 8);
-
-                    if (delay != 0)
-                    {
-                        Astro.TimeToPlane(-PERIOD, -45, lng, lan, 0).ShouldEqual(delay, ACC);
-                    }
+                    Astro.TimeToPlane(-PERIOD, -45, lng, lan, 0).ShouldEqual(delay, ACC);
                 }
             }
         }
@@ -505,41 +487,21 @@ namespace MechJebLibTest.MathsTests
                     double lng = i * 45;
                     double lan = j * 45;
 
-                    // advance by 270 degrees
-                    double delay = PERIOD / 8 * ((j - i + 8 + 6) % 8);
+                    double delay = 0;
 
-                    if (delay != 0)
-                    {
-                        Astro.TimeToPlane(PERIOD, 45, lng, lan, 180).ShouldEqual(delay, ACC2);
-                        Astro.TimeToPlane(PERIOD, 45, lng, lan, -180).ShouldEqual(delay, ACC2);
-                    }
 
-                    // advance by 90 degrees
-                    delay = PERIOD / 8 * ((j - i + 8 + 2) % 8);
+                    Astro.TimeToPlane(PERIOD, 45, lng, lan, 180).ShouldEqual(delay, ACC2);
+                    Astro.TimeToPlane(PERIOD, 45, lng, lan, -180).ShouldEqual(delay, ACC2);
 
-                    if (delay != 0)
-                    {
-                        Astro.TimeToPlane(PERIOD, -45, lng, lan, 180).ShouldEqual(delay, ACC2);
-                        Astro.TimeToPlane(PERIOD, -45, lng, lan, -180).ShouldEqual(delay, ACC2);
-                    }
 
-                    // reverse and advance by 90 degrees
-                    delay = PERIOD / 8 * ((i - j + 8 + 2) % 8);
+                    Astro.TimeToPlane(PERIOD, -45, lng, lan, 180).ShouldEqual(delay, ACC2);
+                    Astro.TimeToPlane(PERIOD, -45, lng, lan, -180).ShouldEqual(delay, ACC2);
 
-                    if (delay != 0)
-                    {
-                        Astro.TimeToPlane(-PERIOD, 45, lng, lan, 180).ShouldEqual(delay, ACC2);
-                        Astro.TimeToPlane(-PERIOD, 45, lng, lan, -180).ShouldEqual(delay, ACC2);
-                    }
+                    Astro.TimeToPlane(-PERIOD, 45, lng, lan, 180).ShouldEqual(delay, ACC2);
+                    Astro.TimeToPlane(-PERIOD, 45, lng, lan, -180).ShouldEqual(delay, ACC2);
 
-                    // reverse and advance by 270 degrees
-                    delay = PERIOD / 8 * ((i - j + 8 + 6) % 8);
-
-                    if (delay != 0)
-                    {
-                        Astro.TimeToPlane(-PERIOD, -45, lng, lan, 180).ShouldEqual(delay, ACC2);
-                        Astro.TimeToPlane(-PERIOD, -45, lng, lan, -180).ShouldEqual(delay, ACC2);
-                    }
+                    Astro.TimeToPlane(-PERIOD, -45, lng, lan, 180).ShouldEqual(delay, ACC2);
+                    Astro.TimeToPlane(-PERIOD, -45, lng, lan, -180).ShouldEqual(delay, ACC2);
                 }
             }
         }

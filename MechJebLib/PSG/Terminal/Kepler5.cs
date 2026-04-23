@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
  */
 
-using System;
 using MechJebLib.Functions;
 using MechJebLib.Primitives;
 using static MechJebLib.Utils.Statics;
@@ -27,7 +26,7 @@ namespace MechJebLib.PSG.Terminal
             NumConstraints = 6;
             _smaT          = smaT;
             _eccT          = eccT;
-            _incT          = Abs(ClampPi(incT));
+            _incT          = incT;
             _lanT          = lanT;
             _argpT         = argpT;
 
@@ -65,13 +64,9 @@ namespace MechJebLib.PSG.Terminal
             }
         }
 
-        public ITerminal GetFPA()
-        {
-            double attR = Astro.PeriapsisFromKeplerian(_smaT, _eccT);
-            (double vT, double gammaT) = Astro.FPATargetFromKeplerian(_smaT, _eccT, attR, 1.0);
-            return new FlightPathAngle5(gammaT, attR, vT, _incT, _lanT);
-        }
+        /* doing FPA attachment on Kepler5 doesn't work since you wind up with a very different argp */
+        public ITerminal GetFPA() => this;
 
-        public bool IsFPA() => false;
+        public bool IsFPA() => true;
     }
 }

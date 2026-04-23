@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
  */
 
-using System;
 using MechJebLib.Functions;
 using MechJebLib.Primitives;
 using static MechJebLib.Utils.Statics;
@@ -25,7 +24,7 @@ namespace MechJebLib.PSG.Terminal
             NumConstraints = 3;
             _smaT          = smaT;
             _eccT          = eccT;
-            _incT          = Abs(ClampPi(incT));
+            _incT          = incT;
             _hTm           = Astro.HmagFromKeplerian(1.0, _smaT, _eccT);
             _energyT       = -1.0 / (2.0 * _smaT);
         }

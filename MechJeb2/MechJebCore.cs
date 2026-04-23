@@ -48,7 +48,6 @@ namespace MuMech
         public MechJebModuleDeployableAntennaController AntennaControl;
         public MechJebModuleLandingAutopilot            Landing;
         public MechJebModuleSettings                    Settings;
-        public MechJebModuleAirplaneAutopilot           Airplane;
         public MechJebModuleStageStats                  StageStats;
         public MechJebModuleAscentSettings              AscentSettings;
         public MechJebModuleSpinupController            Spinup;
@@ -746,7 +745,6 @@ namespace MuMech
             AntennaControl = GetComputerModule<MechJebModuleDeployableAntennaController>();
             Landing        = GetComputerModule<MechJebModuleLandingAutopilot>();
             Settings       = GetComputerModule<MechJebModuleSettings>();
-            Airplane       = GetComputerModule<MechJebModuleAirplaneAutopilot>();
             Guidance       = GetComputerModule<MechJebModuleGuidanceController>();
             Glueball       = GetComputerModule<MechJebModulePSGGlueBall>();
             StageStats     = GetComputerModule<MechJebModuleStageStats>();
@@ -787,7 +785,7 @@ namespace MuMech
                 LoadComputerModules();
 
                 var global = new ConfigNode("MechJebGlobalSettings");
-                if (File.Exists<MechJebCore>("mechjeb_settings_global.cfg"))
+                if (MuUtils.FileExistsCreateDirectory(MuUtils.GetCfgPath("mechjeb_settings_global.cfg")))
                 {
                     try
                     {
@@ -809,7 +807,7 @@ namespace MuMech
                     vessel != null
                         ? string.Join("_", vessel.vesselName.Split(Path.GetInvalidFileNameChars()))
                         : ""; // Strip illegal char from the filename
-                if (vessel != null && File.Exists<MechJebCore>("mechjeb_settings_type_" + vesselName + ".cfg"))
+                if (vessel != null && MuUtils.FileExistsCreateDirectory(MuUtils.GetCfgPath("mechjeb_settings_type_" + vesselName + ".cfg")))
                 {
                     try
                     {

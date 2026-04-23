@@ -62,6 +62,7 @@ namespace MechJebLib.FuelFlowSimulation.PartModules
         public bool   UseVelCurveIsp;
         public double ModuleResiduals;
         public double ModuleSpoolupTime;
+        public bool   AutoCutoff;
         public bool   NoPropellants;
         public bool   IsModuleEnginesRf;
         public bool   IsUnrestartableDeadEngine;
@@ -90,6 +91,19 @@ namespace MechJebLib.FuelFlowSimulation.PartModules
                 return;
 
             IsOperational = false;
+
+            if (!AutoCutoff)
+                return;
+
+            foreach (SimPart part in Part.SymmetryCounterParts)
+            {
+                foreach (SimPartModule module in part.Modules)
+                {
+                    if (!(module is SimModuleEngines engine))
+                        continue;
+                    engine.IsOperational = false;
+                }
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -263,9 +277,8 @@ namespace MechJebLib.FuelFlowSimulation.PartModules
                 V3 thrustDirectionVector = ThrustDirectionVectors[i];
 
                 double thrustTransformMultiplier = ThrustTransformMultipliers[i];
-                double tCurrentThrust            = eCurrentThrust * thrustTransformMultiplier;
 
-                ThrustCurrent += tCurrentThrust * thrustDirectionVector;
+                ThrustCurrent += eCurrentThrust * thrustDirectionVector * thrustTransformMultiplier;
                 ThrustMax     += eMaxThrust * thrustDirectionVector * thrustTransformMultiplier;
                 ThrustMin     += eMinThrust * thrustDirectionVector * thrustTransformMultiplier;
             }
@@ -334,7 +347,7 @@ namespace MechJebLib.FuelFlowSimulation.PartModules
                 SimPropellant p       = Propellants[j];
                 double        density = p.density;
 
-                // skip zero density (eC, air intakes, etc) assuming those are available and infinite
+                // skip zero density (eC, air intakes, etc.) assuming those are available and infinite
                 if (density <= 0)
                     continue;
 

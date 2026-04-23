@@ -1,3 +1,7 @@
+/*
+ * Copyright Lamont Granquist, Sebastien Gaggini and the MechJeb contributors
+ * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
+ */
 using MechJebLib.Control;
 using Xunit;
 using static System.Math;
@@ -139,12 +143,7 @@ namespace MechJebLibTest.ControlTests
         public void FirstOrderLagWithIntegratorNoDerivative()
         {
             // From Matlab with pidtune() to reference-tracking
-            var pid = new PIDLoop2
-            {
-                Kp = 2.10612233627086,
-                Ti = 58.8041302675465,
-                Ts = 0.02
-            };
+            var pid = new PIDLoop2 { Kp = 2.10612233627086, Ti = 58.8041302675465, Ts = 0.02 };
 
             pid.K.ShouldEqual(2.10612233627086);
             pid.Ti.ShouldEqual(58.8041302675465);

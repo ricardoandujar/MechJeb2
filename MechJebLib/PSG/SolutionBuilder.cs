@@ -1,3 +1,7 @@
+/*
+ * Copyright Lamont Granquist, Sebastien Gaggini and the MechJeb contributors
+ * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
+ */
 ﻿using MechJebLib.Primitives;
 
 namespace MechJebLib.PSG
@@ -33,7 +37,7 @@ namespace MechJebLib.PSG
                 double     bt        = thisPhase.Bt();
 
                 // is there unburned propellant going to be left in this stage?
-                bool freeBurntimeLeft = phase.bt - bt > 1e-3;
+                bool freeBurntimeLeft = phase.Bt - bt > 1e-3;
                 // is this is a prunable stage (negligible propellant use after we can prune)
                 bool prunableStage = pruningStages && bt < 1e-3;
 

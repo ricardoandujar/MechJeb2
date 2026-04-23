@@ -29,7 +29,7 @@ namespace MechJebLib.PSG.Terminal
             _gammaT        = gammaT;
             _rT            = rT;
             _vT            = vT;
-            _incT          = Abs(ClampPi(incT));
+            _incT          = incT;
         }
 
         public ITerminal Rescale(Scale scale)  => new FlightPathAngle4(_gammaT, _rT / scale.LengthScale, _vT / scale.VelocityScale, _incT);
@@ -42,11 +42,11 @@ namespace MechJebLib.PSG.Terminal
         {
             double gammaT = _gammaT;
             double rT     = _rT;
-            double incT = _incT;
+            double incT   = _incT;
             double vT     = _vT;
 
-            var    rf     = V3.CopyFromIndices(x, ri);
-            var    vf     = V3.CopyFromIndices(x, vi);
+            var rf = V3.CopyFromIndices(x, ri);
+            var vf = V3.CopyFromIndices(x, vi);
 
             ci = ApplyScalarConstraintV3(f, j, ci, FlightPathAngleConstraint, new[] { rf, vf }, new[] { ri, vi });
             ci = ApplyScalarConstraintV3(f, j, ci, RadiusConstraint, new[] { rf }, new[] { ri });

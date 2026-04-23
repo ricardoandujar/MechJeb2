@@ -1,6 +1,9 @@
+/*
+ * Copyright Lamont Granquist, Sebastien Gaggini and the MechJeb contributors
+ * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
+ */
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using MechJebLib.Primitives;
 
@@ -344,8 +347,6 @@ namespace MechJebLib.Utils
             }
         }
 
-        public static Stopwatch timer1 = new Stopwatch();
-
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static int ApplyHermiteSimpsonDynamics(double[] f, alglib.sparsematrix j, int ci, DynamicsCallback vDot, HermiteSimpsonSegment segment, HermiteSimpsonIndexes indexes, int n)
         {
@@ -361,8 +362,6 @@ namespace MechJebLib.Utils
             /*
              * RDot
              */
-
-            timer1.Start();
 
             Dual H  = dbt / (n - 1);
             Dual H6 = H / 6.0;
@@ -530,8 +529,6 @@ namespace MechJebLib.Utils
                 if (jac[k].z != 0)
                     alglib.sparseappendelement(j, indexes.Index(k), jac[k].z);
 
-            timer1.Stop();
-
             /*
              * VDOT
              */
@@ -672,6 +669,7 @@ namespace MechJebLib.Utils
                     lastindex = index;
                 }
 
+            // here
             f[ci++] = ans.M.y;
 
             lastindex = -1;

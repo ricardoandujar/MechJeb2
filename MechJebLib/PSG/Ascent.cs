@@ -4,13 +4,12 @@
  */
 
 using System;
-using System.Collections.Generic;
-using MechJebLib.PSG.Terminal;
+using MechJebLib.Utils;
 using static MechJebLib.Utils.Statics;
 
 namespace MechJebLib.PSG
 {
-    public partial class Ascent
+    public partial class Ascent : AsyncJob
     {
         private readonly Problem         _problem;
         private          Optimizer?      _optimizer;
@@ -29,9 +28,7 @@ namespace MechJebLib.PSG
 
         private readonly Solution? _solution;
 
-        private Optimizer NewOptimizer(PhaseCollection phases, ITerminal terminal, Optimizer.Cost cost) => new Optimizer(_problem, phases, terminal, cost);
-
-        public void Run()
+        public override void Run(object? o = null)
         {
             if (_solution == null)
             {
@@ -49,8 +46,8 @@ namespace MechJebLib.PSG
 
         private Optimizer ConvergedOptimization(Solution oldSolution)
         {
-            Optimizer.Cost cost = _fixedBurnTime ? Optimizer.Cost.MAX_ENERGY : Optimizer.Cost.MIN_THRUST_ACCEL;
-            Optimizer      psg  = NewOptimizer(_phases, _problem.Terminal, cost);
+            Optimizer.ObjectiveType cost = _fixedBurnTime ? Optimizer.ObjectiveType.MAX_ENERGY : Optimizer.ObjectiveType.MIN_THRUST_ACCEL;
+            var                     psg  = new Optimizer(_problem, _phases, _problem.Terminal, cost);
             psg.TranscribePreviousSolution(oldSolution);
             Solution? solution = psg.Run();
 
@@ -68,8 +65,8 @@ namespace MechJebLib.PSG
             foreach (Phase p in bootPhases)
                 p.Unguided = false;
 
-            Optimizer psg      = NewOptimizer(bootPhases, _problem.Terminal, Optimizer.Cost.MAX_ENERGY);
-            Solution  solution = _guesser.InitialGuess(bootPhases, _problem.Terminal.IncT(), _problem.Terminal.TargetOrbitalEnergy());
+            var      psg      = new Optimizer(_problem, bootPhases, _problem.Terminal, Optimizer.ObjectiveType.MAX_ENERGY);
+            Solution solution = _guesser.InitialGuess(bootPhases, _problem.Terminal.IncT(), _problem.Terminal.TargetOrbitalEnergy());
             psg.TranscribePreviousBootSolution(solution);
             Solution? solution2 = psg.Run();
 
@@ -78,7 +75,7 @@ namespace MechJebLib.PSG
 
             PhaseCollection bootphases2 = _phases.DeepCopy();
 
-            Optimizer psg2 = NewOptimizer(bootphases2, _problem.Terminal, Optimizer.Cost.MAX_ENERGY);
+            var psg2 = new Optimizer(_problem, bootphases2, _problem.Terminal, Optimizer.ObjectiveType.MAX_ENERGY);
             psg2.TranscribePreviousBootSolution(solution2);
             Solution? solution3 = psg2.Run();
 
@@ -90,14 +87,31 @@ namespace MechJebLib.PSG
 
         private Optimizer InitialBootstrappingOptimized()
         {
+            Optimizer psg      = InitialBootstrappingOptimizedWithoutQAlpha();
+            Solution? solution = psg.Solution;
+
+            if (_problem.Rho0InvQAlphaMax <= 0 || solution == null)
+                return psg;
+
+            DebugPrint("*** PHASE 6: Imposing QAlpha Constraints ***");
+            var psg2 = new Optimizer(_problem, psg.Phases, _problem.Terminal, Optimizer.ObjectiveType.MIN_THRUST_ACCEL);
+            psg2.TranscribePreviousBootSolution(solution);
+            Solution? solution2 = psg2.Run();
+
+            if (!psg2.Success() || solution2 == null)
+                throw new Exception("MaxQ/QAlpha failed");
+
+            return psg2;
+        }
+
+        private Optimizer InitialBootstrappingOptimizedWithoutQAlpha()
+        {
             /*
              * Initial bootstrapping with infinite stage, forced FPA attachment
              */
 
             PhaseCollection bootPhases = _phases.DeepCopy();
 
-            // set everything to guided, find the last allowShutdown stage
-            var allowShutdownIndexes = new List<int>();
             for (int p = 0; p < bootPhases.Count; p++)
             {
                 bootPhases[p].Tagged = false;
@@ -106,16 +120,12 @@ namespace MechJebLib.PSG
                     bootPhases[p].Unguided = false;
                     bootPhases[p].Tagged   = true;
                 }
-
-                if (bootPhases[p].AllowShutdown && !bootPhases[p].Coast)
-                    allowShutdownIndexes.Add(p);
             }
 
-            int allowShutdownStage = allowShutdownIndexes[allowShutdownIndexes.Count - 1];
-            bootPhases[allowShutdownStage].AllowInfiniteBurntime = true;
+            Problem problemNoQa = _problem.WithoutDynamicPressure();
 
             DebugPrint("*** PHASE 1: DOING INITIAL ALL-GUIDED ROCKET ***");
-            Optimizer psg      = NewOptimizer(bootPhases, _problem.Terminal.GetFPA(), Optimizer.Cost.MIN_THRUST_ACCEL);
+            var       psg      = new Optimizer(problemNoQa, bootPhases, _problem.Terminal.GetFPA(), Optimizer.ObjectiveType.MIN_THRUST_ACCEL);
             Solution? solution = _guesser.InitialGuess(bootPhases, _problem.Terminal.IncT(), _problem.Terminal.TargetOrbitalEnergy());
             psg.TranscribePreviousBootSolution(solution);
             solution = psg.Run();
@@ -137,7 +147,7 @@ namespace MechJebLib.PSG
             if (reConverge)
             {
                 DebugPrint("*** PHASE 4: ADDING BACK UNGUIDED STAGES ***");
-                psg = NewOptimizer(bootPhases, _problem.Terminal.GetFPA(), Optimizer.Cost.MIN_THRUST_ACCEL);
+                psg = new Optimizer(problemNoQa, bootPhases, _problem.Terminal.GetFPA(), Optimizer.ObjectiveType.MIN_THRUST_ACCEL);
                 psg.TranscribePreviousBootSolution(solution);
                 solution = psg.Run();
 
@@ -153,7 +163,7 @@ namespace MechJebLib.PSG
              */
 
             DebugPrint("*** PHASE 5: RELAXING TO FREE ATTACHMENT ***");
-            Optimizer psg2 = NewOptimizer(bootPhases, _problem.Terminal, Optimizer.Cost.MIN_THRUST_ACCEL);
+            var psg2 = new Optimizer(problemNoQa, bootPhases, _problem.Terminal, Optimizer.ObjectiveType.MIN_THRUST_ACCEL);
             psg2.TranscribePreviousBootSolution(solution);
             Solution? solution2 = psg2.Run();
 
@@ -166,7 +176,7 @@ namespace MechJebLib.PSG
             // this should catch if free attachment picked the apoapsis accidentally
             if (solution.Vgo(solution2.T0) < solution2.Vgo(solution2.T0))
             {
-                DebugPrint($"*** PERIAPSIS ATTACHMENT IS MORE OPTIMAL ({solution.Vgo(solution2.T0)} < {solution2.Vgo(solution2.T0)}) THAN FREE ATTACHMENT SOLN ***");
+                DebugPrint($"*** PERIAPSIS ATTACHMENT IS MORE OPTIMAL ({solution.Vgo(solution2.T0)} < {solution2.Vgo(solution2.T0)}) THAN FREE ATTACHMENT SOLUTION ***");
                 return psg;
             }
 

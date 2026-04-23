@@ -1,3 +1,7 @@
+/*
+ * Copyright Lamont Granquist, Sebastien Gaggini and the MechJeb contributors
+ * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
+ */
 ﻿using System;
 using System.Reflection;
 using UnityEngine;
@@ -6,6 +10,21 @@ namespace MechJebLibBindings
 {
     public static class ReflectionUtils
     {
+        public static readonly bool IsLoadedProceduralFairing;
+        public static readonly bool IsLoadedRealFuels;
+        public static readonly bool IsLoadedRealismOverhaul;
+        public static readonly bool IsLoadedPrincipia;
+        public static readonly bool IsLoadedFAR;
+
+        static ReflectionUtils()
+        {
+            IsLoadedProceduralFairing = IsAssemblyLoaded("ProceduralFairings");
+            IsLoadedRealFuels         = IsAssemblyLoaded("RealFuels");
+            IsLoadedPrincipia         = IsAssemblyLoaded("principia.ksp_plugin_adapter");
+            IsLoadedFAR               = IsAssemblyLoaded("FerramAerospaceResearch");
+            IsLoadedRealismOverhaul   = IsAssemblyLoaded("RealismOverhaul");
+        }
+
         public static bool IsAssemblyLoaded(string assemblyName)
         {
             foreach (AssemblyLoader.LoadedAssembly assembly in AssemblyLoader.loadedAssemblies)

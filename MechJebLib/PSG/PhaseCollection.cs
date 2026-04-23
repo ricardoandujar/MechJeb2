@@ -1,3 +1,7 @@
+/*
+ * Copyright Lamont Granquist, Sebastien Gaggini and the MechJeb contributors
+ * SPDX-License-Identifier: LicenseRef-PD-hp OR Unlicense OR CC0-1.0 OR 0BSD OR MIT-0 OR MIT OR LGPL-2.1+
+ */
 ﻿using System.Collections.Generic;
 
 namespace MechJebLib.PSG
@@ -12,6 +16,26 @@ namespace MechJebLib.PSG
                 dup.Add(phase.DeepCopy());
 
             return dup;
+        }
+
+        public void FixLastShutdownStage()
+        {
+            int lastShutdownStage = -1;
+            for (int i = Count - 1; i >= 0; i--)
+            {
+                if (!this[i].AllowShutdown || this[i].Coast)
+                    continue;
+
+                lastShutdownStage = i;
+                break;
+            }
+
+            if (lastShutdownStage < 0)
+                return;
+
+            Phase phase = this[lastShutdownStage];
+            phase.MaxT              = 0.999 * phase.Tau;
+            this[lastShutdownStage] = phase;
         }
     }
 }
