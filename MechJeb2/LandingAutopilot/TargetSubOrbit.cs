@@ -7,7 +7,7 @@ namespace MuMech
 {
     namespace Landing
     {
-        public class OrbitalTargeting : AutopilotStep
+        public class TargetSubOrbit : AutopilotStep
         {
             enum Step { STATE_INIT, STATE_LATERAL, STATE_PROGRADE, STATE_LATERAL_FINE, STATE_RETROGRADE, STATE_CORRECT };
             Step step = Step.STATE_INIT;
@@ -47,6 +47,7 @@ namespace MuMech
             private int hThrustIntegrateCount = 200;// Initial count to ignore when starting up.
             double baseGain; // Calibrated gain for horizontal angle and to correct movement that would diverge from target.
             private double throttleAngle = 30; // (degrees) Throttle is only applied if pointing in direction of requested attitude
+            private double ratio = 0; // Set once to check to see if we need to defer to landing burn
 
             private MechJebModuleLandingPredictions _predictor; //Landing prediction data:
             private bool forceHoriz = true;
@@ -54,7 +55,7 @@ namespace MuMech
             private double tUT;
 
 
-            public OrbitalTargeting(MechJebCore core) : base(core)
+            public TargetSubOrbit(MechJebCore core) : base(core)
             {
                 Core.Warp.MinimumWarp();
                 _predictor = Core.GetComputerModule<MechJebModuleLandingPredictions>();
@@ -100,6 +101,16 @@ namespace MuMech
 
             public override AutopilotStep Drive(FlightCtrlState s)
             {
+                // This is checked once to determine if we need to move on to landing burn
+                if (ratio == 0)                    
+                {
+                    ratio = Core.Landing.getHDistanceToTarget() / VesselState.altitudeTrue;
+                    if ( (ratio < 0.9 * Core.Landing.maxRatio) && (VesselState.altitudeTrue <= 2 * TargetAltitude) )
+                    {
+                        return new DecelerationBurn(Core);
+                    }
+                }
+
                 if ( step != Step.STATE_CORRECT )
                 {
                     double desiredVerticalSpeed = 0; // for now just set to zero vertical velocity
@@ -108,7 +119,9 @@ namespace MuMech
                     MoveToTarget(ref desiredVerticalSpeed, ref thrustDir);
 
                     // Desired thrust direction in inertial frame
-                    Core.Attitude.attitudeTo(thrustDir, AttitudeReference.INERTIAL, Core.Landing);
+                    Quaternion targetRot = Quaternion.LookRotation(thrustDir.normalized, Vessel.up)
+                                         * Quaternion.Euler(0, 0, (float)Core.Landing.vesselAngle);
+                    Core.Attitude.attitudeTo(targetRot, AttitudeReference.INERTIAL, this);
 
                     // Disable thrust when not pointing to target attitude
                     if ((Core.Attitude.attitudeAngleFromTarget() > throttleAngle))
@@ -146,8 +159,7 @@ namespace MuMech
                     if (dvSolMag < MinDeltaV)
                     {
                         Core.Thrust.ThrustOff();
-                    //    return new DecelerationBurn(Core);
-                        return new LandingBurnV(Core);
+                        return new LandingBurn(Core);
                     }
                     deltaVApplied = Vector3d.zero;
                     executingBurn = true;
@@ -502,7 +514,7 @@ namespace MuMech
                 double hVertical = (vCirc * vCirc) / (2.0 * aNet);
 
                 // --- Horizontal scaling factor ---
-                double S = 0.05;
+                double S = 0.035; // 0.035 <= 0.05
 
                 // --- Final optimal gate altitude ---
                 double hGate = Math.Max(MIN_TARGET_ALTITUDE, hVertical * S);

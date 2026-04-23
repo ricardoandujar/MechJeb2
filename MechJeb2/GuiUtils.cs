@@ -152,7 +152,7 @@ namespace MuMech
             angle    -= Degrees.Val;
             Minutes  =  new EditableDouble((int)(60 * angle));
             angle    -= Minutes.Val / 60;
-            Seconds  =  new EditableDouble(Math.Round(3600 * angle));
+            Seconds  =  new EditableDouble(Math.Round(3600 * angle, 2));
         }
 
         public static implicit operator double(EditableAngle x) => (x.Negative ? -1 : 1) * (x.Degrees + x.Minutes / 60.0 + x.Seconds / 3600.0);
@@ -166,9 +166,9 @@ namespace MuMech
             GUILayout.BeginHorizontal();
             Degrees.Text = GUILayout.TextField(Degrees.Text, GUILayout.Width(30));
             GUILayout.Label("°", GUILayout.ExpandWidth(false));
-            Minutes.Text = GUILayout.TextField(Minutes.Text, GUILayout.Width(30));
+            Minutes.Text = GUILayout.TextField(Minutes.Text, GUILayout.Width(25));
             GUILayout.Label("'", GUILayout.ExpandWidth(false));
-            Seconds.Text = GUILayout.TextField(Seconds.Text, GUILayout.Width(30));
+            Seconds.Text = GUILayout.TextField(Seconds.Text, GUILayout.Width(35));
             GUILayout.Label("\"", GUILayout.ExpandWidth(false));
             string dirString = direction == Direction.NS ? Negative ? "S" : "N" : Negative ? "W" : "E";
             if (GUILayout.Button(dirString, GUILayout.Width(25))) Negative = !Negative;

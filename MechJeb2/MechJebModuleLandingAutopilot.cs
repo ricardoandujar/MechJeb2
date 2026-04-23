@@ -25,8 +25,10 @@ namespace MuMech
         public readonly double LOW_GRAVITY = 1.0;       // Any gravity lower than this is considered low gravity for landing purposes
         public readonly double EARTH_GRAVITY = 9.81;    // Standard Earth gravity in m/sec^2
         public readonly float BASE_STEEPNESS = 1400.0f;  // Base steepness value for the descent profile
-        public static readonly float DEFAULT_BASE_MINRATIO = 0.04001f;  // Default base min ratio for the descent profile
-        public static readonly float DEFAULT_BASE_MAXRATIO = 1.55001f;  // Default base max ratio for the descent profile
+        public static readonly float DEFAULT_BASE_SLOPE    = 0.6f;   // Default base slope for the descent profile
+        public static readonly float DEFAULT_BASE_MINRATIO = 0.05f;  // Default base min ratio for the descent profile
+        public static readonly float DEFAULT_BASE_MAXRATIO = 1.55f;  // Default base max ratio for the descent profile
+        public static readonly float DEFAULT_DEORBIT_BURN_ANGLE = 90.0f; // Default angle of the deorbit burn
         public readonly float POST_TARGET_THRESHOLD = 25000.0f;  // 25 km beyond target we switch to move to target
         private bool _deployedGears;  // Have we already deployed the landing gears?
         public  bool LandAtTarget;  // Are we landing at a position target?
@@ -54,13 +56,13 @@ namespace MuMech
         public bool RCSAdjustment = true;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public bool FlySafe = true;
+        public bool FlySafe = false;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public bool SelectMoveToTarget = false;
+        public EditableInt LandingType = 0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble steepness = 1.0;
+        public EditableDouble steepness = 0.6;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble minRatio = DEFAULT_BASE_MINRATIO;
@@ -69,48 +71,44 @@ namespace MuMech
         public EditableDouble maxRatio = DEFAULT_BASE_MAXRATIO;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble RadialPercent = 10.0;
+        public EditableDouble RadialPercent = 0.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble VerticalMargin = 5.0;
-        public string Format => "F2";
+        public EditableDouble BurnMarginPerc = 0.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble HorizMargin = 5.0;
-
-        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble TargetAltPercent = 20;
+        public EditableDouble TargetAltPercent = 0;
         public double TgtAlt;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble deorbitBurnAngle = 90.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble atmosSafeSpeed = 1700.0;
+        public EditableDouble vesselAngle = 90.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public  EditableDouble debug1 = 1.0;
+        public EditableDouble atmosSafeSpeed = 7000;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public  EditableDouble debug2 = 1.0;
+        public EditableDouble TargetOffset = 5.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public  EditableDouble debug3 = 1.0;
+        public EditableDouble LandWithMoverAlt = 100.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public  EditableDouble debug4 = 1.0;
+        public EditableDouble LandWithMoverOffset = 20.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public  EditableDouble debug5 = 1.0;
+        public EditableDouble ZemH = 8.5;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public  EditableDouble debug6 = 1.0;
+        public EditableDouble ZevH = -1.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble debug7 = 1.0;
+        public EditableDouble ZemV = 6.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble debug8 = 1.0;
+        public EditableDouble ZevV = -1.3;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble debug10 = 1.0;
@@ -206,14 +204,20 @@ namespace MuMech
         public void LandAtPositionTarget(object controller)
         {
             LandAtTarget = true;
-            increaseVertical = false;    // Default - do not increase vertical speed
-            UseOnlyMoveToTarget = false; // Default - Use retroburm before transitioning to move to target
-            if ( hop == true )
+
+            // Hop to new target activated - we will increase vertical speed for a while to get a higher landing angle and thus more room for course correction.
+            if (hop == true)
             {
-                increaseVertical = true; // Increasing vertical due to hop
+                hop = false; // Disable hop - user has to re-activate by selecting new location while landed, then press land at target
+                increaseVertical = true;
                 UseOnlyMoveToTarget = true;
-                hop = false;
             }
+            else
+            {
+                increaseVertical = false;    // Default - do not increase vertical speed
+                UseOnlyMoveToTarget = false; // Default - Use retroburm before transitioning to move to target
+            }
+
             Users.Add(controller);
 
             _predictor.Users.Add(this);
@@ -222,7 +226,9 @@ namespace MuMech
             _deployedGears = false;
 
             g = MainBody.GeeASL * EARTH_GRAVITY; // in m/sec^2
-            if ( (g <= LOW_GRAVITY) || (SelectMoveToTarget == true) )
+
+            // For low gravity only use move to target - it appears to work much better than normal landing algos
+            if (g <= LOW_GRAVITY)
             {
                 UseOnlyMoveToTarget = true;
             }
@@ -231,19 +237,19 @@ namespace MuMech
             _parachutePlan = new ParachutePlan(this);
             _parachutePlan.StartPlanning();
 
-#if false
-            SetStep(new OrbitalTargeting(Core));
-#else
             if (Orbit.PeA < 0)
             {
-                if ( UseOnlyMoveToTarget == true )
+                if (UseOnlyMoveToTarget == true)
                 {
-                    SetStep(new DecelerationBurn(Core));
+                    SetStep(new MoveToTarget(Core));
+                }
+                else if (Core.Landing.LandingType == 1)
+                {
+                    SetStep(new TargetSubOrbit(Core));
                 }
                 else
                 {
-                    SetStep(new OrbitalTargeting(Core));
-                    //SetStep(new CourseCorrection(Core));
+                    SetStep(new CourseCorrection(Core));
                 }
             }
             else if (UseLowDeorbitStrategy())
@@ -254,7 +260,6 @@ namespace MuMech
             {
                 SetStep(new DeorbitBurn(Core));
             }
-#endif
         }
 
         public void LandUntargeted(object controller)

@@ -6,7 +6,7 @@ using JetBrainsAnnotations::JetBrains.Annotations;
 using KSP.Localization;
 using UnityEngine;
 using static alglib;
-using static FlightCamera;
+using static KSP.UI.Screens.Settings.Controls.SettingsInputBinding;
 using static MechJebLib.Utils.Statics;
 
 namespace MuMech
@@ -158,10 +158,6 @@ namespace MuMech
                 Core.Landing.DeployGears =
                     GUILayout.Toggle(Core.Landing.DeployGears, Localizer.Format("#MechJeb_LandingGuidance_checkbox2")); //Deploy Landing Gear
                 GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_label4"), Core.Landing.LimitGearsStage, "", 35); //"Stage Limit:"
-                Core.Landing.FlySafe =
-                    GUILayout.Toggle(Core.Landing.FlySafe, Localizer.Format("#MechJeb_LandingGuidance_checkbox10")); // Safe Mode
-                Core.Landing.SelectMoveToTarget =
-                    GUILayout.Toggle(Core.Landing.SelectMoveToTarget, Localizer.Format("#MechJeb_LandingGuidance_checkbox11")); // Use Move To Target
                 Core.Landing.DeployChutes =
                     GUILayout.Toggle(Core.Landing.DeployChutes, Localizer.Format("#MechJeb_LandingGuidance_checkbox3")); //Deploy Parachutes
                 _predictor.deployChutes = Core.Landing.DeployChutes;
@@ -171,24 +167,96 @@ namespace MuMech
                     GUILayout.Toggle(Core.Landing.RCSAdjustment, Localizer.Format("#MechJeb_LandingGuidance_checkbox4")); //Use RCS for small adjustment
                 Core.Thrust.LimiterMinThrottleInfoItem(); //Toggle to prevent full engine shutdowns
 
-                GuiUtils.SimpleTextBox("Landing Slope", Core.Landing.steepness, "", 35);
-                GuiUtils.SimpleTextBox("H/V Ratio min:", Core.Landing.minRatio, "", 35);
-                GuiUtils.SimpleTextBox("               max:", Core.Landing.maxRatio, "", 35);
-                GuiUtils.SimpleTextBox("Radial Correct %:", Core.Landing.RadialPercent, "", 35);      // [0-100] %
-                GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_Label20", Core.Landing.TgtAlt.ToString("F1")), Core.Landing.TargetAltPercent, "%", 35);  // [0-100] %
-                GuiUtils.SimpleTextBox("Vertical Margin %:", Core.Landing.VerticalMargin, "", 35);    // [0-100] %
-                GuiUtils.SimpleTextBox("Horizontal Margin %:", Core.Landing.HorizMargin, "", 35);     // [0-100] %
-                GuiUtils.SimpleTextBox("Deorbit Burn Angle:", Core.Landing.deorbitBurnAngle, "", 35); // [0-90] degrees
-                GuiUtils.SimpleTextBox("Atmos Burn Speed:", Core.Landing.atmosSafeSpeed, "", 35);     //  m/sec
-                
-                GuiUtils.SimpleTextBox("Target Offset:", Core.Landing.debug1, "", 35);
-                GuiUtils.SimpleTextBox("debug2", Core.Landing.debug2, "", 35);
-                GuiUtils.SimpleTextBox("debug3", Core.Landing.debug3, "", 35);
-                GuiUtils.SimpleTextBox("debug4", Core.Landing.debug4, "", 35);
-                GuiUtils.SimpleTextBox("debug5", Core.Landing.debug5, "", 35);
-                GuiUtils.SimpleTextBox("debug6", Core.Landing.debug6, "", 35);
-                GuiUtils.SimpleTextBox("debug7", Core.Landing.debug7, "", 35);
-                GuiUtils.SimpleTextBox("debug8", Core.Landing.debug8, "", 35);
+                GUIStyle noWrap = new GUIStyle(GUI.skin.label) { wordWrap = false };
+                string[] LandingType = {"Default Landing", "Ground Track Landing" };
+                Core.Landing.LandingType = GuiUtils.ComboBox.Box(Core.Landing.LandingType, LandingType, this);
+
+                if ( Core.Landing.steepness == 0 )
+                {
+                    Core.Landing.steepness = MechJebModuleLandingAutopilot.DEFAULT_BASE_SLOPE;
+                    Core.Landing.minRatio = MechJebModuleLandingAutopilot.DEFAULT_BASE_MINRATIO;
+                    Core.Landing.maxRatio = MechJebModuleLandingAutopilot.DEFAULT_BASE_MAXRATIO;
+                }
+                if (Core.Landing.deorbitBurnAngle == 0)
+                {
+                    Core.Landing.deorbitBurnAngle = MechJebModuleLandingAutopilot.DEFAULT_DEORBIT_BURN_ANGLE;
+                }
+                if ( Core.Landing.atmosSafeSpeed == 0 )
+                {
+                    Core.Landing.atmosSafeSpeed = 7000; // This effectively disables the atmosphere braking speed limit
+                }
+                if ( Core.Landing.TargetOffset == 0)
+                {
+                    Core.Landing.TargetOffset = 5; // Default to 5m offset vertically above target
+                }
+                if (Core.Landing.LandWithMoverAlt == 0)
+                {
+                    Core.Landing.LandWithMoverAlt = 100; // Below this altitude, the landing guidance will use the mover algorithm to try to hit the target more precisely, at the cost of more fuel consumption.
+                    Core.Landing.LandWithMoverOffset = 20; // The altitude offset to use when using the mover algorithm. This is to prevent the mover from trying to hit the target too low and crashing into the ground.
+                }
+                if (Core.Landing.ZemH == 0)
+                {
+                    Core.Landing.ZemH = 8.5;
+                    Core.Landing.ZevH = -1.0;
+                }
+                if (Core.Landing.ZemV == 0)
+                {
+                    Core.Landing.ZemV = 6.0;
+                    Core.Landing.ZevV = -1.3;
+                }
+
+                // The following parameters are only for Ground Track Landing
+                if ( Core.Landing.LandingType == 1)
+                {
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("Slope,min,max", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.steepness.Text = GUILayout.TextField(Core.Landing.steepness.Text, GUILayout.Width(30));
+                    Core.Landing.minRatio.Text = GUILayout.TextField(Core.Landing.minRatio.Text, GUILayout.Width(35));
+                    Core.Landing.maxRatio.Text = GUILayout.TextField(Core.Landing.maxRatio.Text, GUILayout.Width(35));
+                    GUILayout.EndHorizontal();
+
+                    GuiUtils.SimpleTextBox(Localizer.Format("#MechJeb_LandingGuidance_Label20", Core.Landing.TgtAlt.ToString("F1")), Core.Landing.TargetAltPercent, "%", 35, noWrap);  // [0-100] %
+
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("BMargin%", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.BurnMarginPerc.Text = GUILayout.TextField(Core.Landing.BurnMarginPerc.Text, GUILayout.Width(35));
+                    GUILayout.Label("BAngle", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.deorbitBurnAngle.Text = GUILayout.TextField(Core.Landing.deorbitBurnAngle.Text, GUILayout.Width(35));
+                    GUILayout.Label("VAngle", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.vesselAngle.Text = GUILayout.TextField(Core.Landing.vesselAngle.Text, GUILayout.Width(35));
+                    GUILayout.EndHorizontal();
+
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("LOffset:", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.TargetOffset.Text = GUILayout.TextField(Core.Landing.TargetOffset.Text, GUILayout.Width(35));
+                    GUILayout.Label(" Mover V", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.LandWithMoverAlt.Text = GUILayout.TextField(Core.Landing.LandWithMoverAlt.Text, GUILayout.Width(35));
+                    GUILayout.Label(" H", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.LandWithMoverOffset.Text = GUILayout.TextField(Core.Landing.LandWithMoverOffset.Text, GUILayout.Width(30));                
+                    GUILayout.EndHorizontal();
+
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("Horiz ZEM:", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.ZemH.Text = GUILayout.TextField(Core.Landing.ZemH.Text, GUILayout.Width(35));
+                    GUILayout.Label(" ZEV:", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.ZevH.Text = GUILayout.TextField(Core.Landing.ZevH.Text, GUILayout.Width(35));
+                    GUILayout.EndHorizontal();
+
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("Vert  ZEM:", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.ZemV.Text = GUILayout.TextField(Core.Landing.ZemV.Text, GUILayout.Width(35));
+                    GUILayout.Label(" ZEV:", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.ZevV.Text = GUILayout.TextField(Core.Landing.ZevV.Text, GUILayout.Width(35));
+                    GUILayout.EndHorizontal();
+                }
+
+                //GuiUtils.SimpleTextBox("debug2", Core.Landing.debug2, "", 35);
+                //GuiUtils.SimpleTextBox("debug3", Core.Landing.debug3, "", 35);
+                //GuiUtils.SimpleTextBox("debug4", Core.Landing.debug4, "", 35);
+                //GuiUtils.SimpleTextBox("debug5", Core.Landing.debug5, "", 35);
+                //GuiUtils.SimpleTextBox("debug6", Core.Landing.debug6, "", 35);
+                //GuiUtils.SimpleTextBox("debug7", Core.Landing.debug7, "", 35);
+                //GuiUtils.SimpleTextBox("debug8", Core.Landing.debug8, "", 35);
 
                 if (Core.Landing.Enabled)
                 {

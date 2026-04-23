@@ -43,7 +43,7 @@ namespace MuMech
             {
                 //Decide when we will start the deorbit burn:
                 double stoppingDistance = Math.Pow(VesselState.speedSurfaceHorizontal, 2) / (2 * VesselState.limitedMaxThrustAccel);
-                stoppingDistance *= (1 + Core.Landing.HorizMargin / 100);
+                stoppingDistance *= (1 + Core.Landing.BurnMarginPerc / 100);
                 double triggerDistance = Math.Max(stoppingDistance, (MainBody.Radius*Math.PI*Core.Landing.deorbitBurnAngle)/180.0);
                 double heightAboveTarget = VesselState.altitudeASL - Core.Landing.DecelerationEndAltitude();
                 if (triggerDistance < heightAboveTarget) triggerDistance = heightAboveTarget;
@@ -54,7 +54,10 @@ namespace MuMech
                 if (!_deorbitBurnTriggered && (rangeToTarget < triggerDistance))
                 {
                     _deorbitBurnTriggered = true;
-                    return new OrbitalTargeting(Core);
+                    if (Core.Landing.LandingType == 1)
+                    {
+                        return new TargetSubOrbit(Core);
+                    }
                 }
 
                 Status = Localizer.Format(_deorbitBurnTriggered

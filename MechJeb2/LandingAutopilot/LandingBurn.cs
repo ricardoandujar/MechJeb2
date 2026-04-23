@@ -1,5 +1,4 @@
 ﻿using System;
-using MuMech;
 using MuMech.Landing;
 using UnityEngine;
 using static alglib;
@@ -8,38 +7,60 @@ using static DishController;
 namespace MuMech.LandingAutopilot
 {
     /// <summary>
-    /// MechJeb autopilot step that performs powered descent using ZEM/ZEV guidance
-    /// with suicide-burn start logic, lateral velocity damping, and time-warp management.
+    /// MechJeb autopilot step for powered descent using vector-based ZEM/ZEV guidance.
+    /// Controls thrust direction and throttle during final descent.
     /// </summary>
     public class LandingBurn : AutopilotStep
     {
+        // Used to print every 50 times
         private long debugCounter = 0;
-        private bool shouldBurnStarted = false;
-        private bool warpOn = false;                        // Tracks if warp is currently active
-        private bool checkWarp = true;                      // Flag to allow warping when safe
 
-        private const double ALT_MIN_WARP_CONSTANT = 5000.0; // Minimum altitude (m) below which warp is disallowed
+        // Flag to indicate if burn has started (latches on once triggered)
+        private bool shouldBurnStarted = false;
+        private double densityAtBurnStart = 0;
+
+        // Flag: is time warp currently active?
+        private bool warpOn = false;
+
+        // Flag: is time warp allowed right now?
+        private bool checkWarp = true;
+
+        // Minimum altitude (meters) below which warp is disabled for safety
+        private const double ALT_MIN_WARP_CONSTANT = 5000.0;
+
+        // Downrange distance (meters) below which vertical ZEV gain is reduced for smoother final descent (used if ZevV<0 for conditional vertical braking boost)
+        private const float DOWNRANGE_THRESHOLD_CONSTANT = 1500.0f;
+
+        private double targetOffset;      // Removed once reached.
+        //private double zevCounter;        // Used to enable zevV via a smoothing function.
+        private float  minDownRange;      // Minimum downrange distance to target for full ZevV application (used if ZevV<0 for conditional vertical braking boost)
+        private double lateralGain = 0.4; // Lateral gain correction
+        private double prev_t_go = 0;     // Previous t_go used to force timep step changes for better guidance convergence (not strictly necessary)
 
         /// <summary>
-        /// Constructor – receives MechJeb core reference.
+        /// Constructor - receives MechJeb core reference.
         /// </summary>
+        /// <param name="Core">MechJeb core instance</param>
         public LandingBurn(MechJebCore Core) : base(Core)
         {
-            Core.Thrust.ThrustOff();
-            Core.Attitude.attitudeTo(-VesselState.surfaceVelocity.normalized, AttitudeReference.INERTIAL, this);
+            targetOffset = Math.Max(1, Core.Landing.TargetOffset); // Must be non-zero at start to prevent premature burn cutoff, but can be reduced to 0 for final touchdown precision
+            //zevCounter = 0;
+            minDownRange = 1500.0f;
         }
 
         /// <summary>
-        /// Called every frame when autopilot is active.
-        /// Runs guidance and control logic if not landed.
+        /// Main drive loop - called every frame.
+        /// Runs guidance if vessel is not landed/splashed.
         /// </summary>
+        /// <param name="s">Current flight control state</param>
+        /// <returns>This step (remains active)</returns>
         public override AutopilotStep Drive(FlightCtrlState s)
         {
             if (!Vessel.LandedOrSplashed)
             {
-                if ( true == UpdateGuidanceAndControl(s) )
+                if (true == UpdateGuidanceAndControl(s))
                 {
-                    return new DecelerationBurn(Core);
+                    return new MoveToTarget(Core);
                 }
                 return this;
             }
@@ -51,8 +72,9 @@ namespace MuMech.LandingAutopilot
         }
 
         /// <summary>
-        /// Fixed-update hook – handles time-warp decisions.
+        /// Fixed-update hook - handles time-warp decisions.
         /// </summary>
+        /// <returns>This step (remains active)</returns>
         public override AutopilotStep OnFixedUpdate()
         {
             if ( checkWarp == false )
@@ -60,49 +82,49 @@ namespace MuMech.LandingAutopilot
                 return this;
             }
 
-            // Compute pitch angle of current surface velocity relative to local up
+            // Angle between surface velocity and local up (90° = horizontal flight)
             double pitchAngle = 90.0 - Vector3d.Angle(VesselState.surfaceVelocity, VesselState.up);
+
+            // Cosine and sine of pitch angle for thrust projection calculations
             double cosPitch = Math.Abs(Math.Cos(pitchAngle * UtilMath.Deg2Rad));
             double sinPitch = Math.Abs(Math.Sin(pitchAngle * UtilMath.Deg2Rad));
 
-            // Horizontal stopping distance at max thrust
-            double hStoppingDistance = Math.Pow(VesselState.speedSurfaceHorizontal, 2)/(2 * VesselState.limitedMaxThrustAccel * cosPitch);
-            hStoppingDistance *= (1.25 + Core.Landing.HorizMargin / 100);
+            // Horizontal distance required to stop at max thrust (projected)
+            double hStoppingDistance = VesselState.speedSurfaceHorizontal * VesselState.speedSurfaceHorizontal /
+                                       (2 * VesselState.limitedMaxThrustAccel * cosPitch);
 
-            // Vertical stopping distance (only if descending)
-            double vStoppingDistance = (VesselState.speedVertical < 0) ? Math.Pow(VesselState.speedVertical, 2) /(2 * (VesselState.limitedMaxThrustAccel * sinPitch - VesselState.localg)):0;
-            vStoppingDistance *= (1.25 + Core.Landing.VerticalMargin / 100);
+            // Vertical distance required to stop if descending
+            double vStoppingDistance = (VesselState.speedVertical < 0)
+                ? VesselState.speedVertical * VesselState.speedVertical /
+                  (2 * (VesselState.limitedMaxThrustAccel * sinPitch - VesselState.localg))
+                : 0;
 
-            // Horizontal distance to target
+            // Horizontal distance to target landing site
             double hTargetError = Core.Landing.getHDistanceToTarget();
 
-            // Conditions that force warp to stop (safety near ground/target)
+            // Ratio of horizontal error to altitude (used for warp safety)
+            float ratio = (float)(hTargetError / VesselState.altitudeTrue);
+
+            // Conditions that force warp to stop (safety near ground/target/unsafe speed)
             bool mustStopWarp =
-                (hTargetError < 1.05 * hStoppingDistance) ||
-                (VesselState.altitudeTrue < 1.05 * vStoppingDistance) ||
-                ((VesselState.speedVertical < 0) &&
-                 ((VesselState.altitudeTrue < ALT_MIN_WARP_CONSTANT) ||
-                  ((MainBody.atmosphere==true) && (VesselState.altitudeASL < Vessel.mainBody.RealMaxAtmosphereAltitude()) &&
-                   (VesselState.speedSurface > Core.Landing.atmosSafeSpeed))));
+                (hTargetError < 1.5 * hStoppingDistance) ||
+                (VesselState.altitudeTrue < 1.5 * vStoppingDistance);
 
-            if (mustStopWarp)
-            {
-                checkWarp = false;
-            }
+            if (mustStopWarp) checkWarp = false;
 
-            // Perform warp only if safe and requested
+            // Perform warp if allowed and requested
             if (checkWarp && Core.Node.Autowarp && !Vessel.LandedOrSplashed)
             {
+                // Conservative velocity estimate for 10-second impact buffer
                 double velocityGuess = Math.Max(Math.Abs(VesselState.speedVertical), VesselState.localg * 5);
-                float warpRate = (float)Math.Min(
-                    VesselState.altitudeASL / (6 * velocityGuess),
-                    (Orbit.period / 6)
-                );
+
+                // Safe warp rate: limit based on altitude and orbital period
+                float warpRate = (float)Math.Min(VesselState.altitudeASL / (6 * velocityGuess), (Orbit.period / 6));
 
                 Core.Warp.WarpRegularAtRate(warpRate);
                 warpOn = true;
             }
-            else if (warpOn && !MuUtils.PhysicsRunning())
+            else if (warpOn || !MuUtils.PhysicsRunning())
             {
                 Core.Warp.MinimumWarp();
                 warpOn = false;
@@ -111,131 +133,233 @@ namespace MuMech.LandingAutopilot
             return this;
         }
 
-        /// <summary>
-        /// Determines if thrusting should begin based on suicide-burn safety margin.
-        /// Returns true if remaining altitude is within 90% of what is needed to stop.
-        /// </summary>
-        private bool ShouldStartBurn(double y, double vy, double hTargetError)
+        private bool ShouldStartBurn(ref Vector3d posError, ref Vector3d vel)
         {
             if (shouldBurnStarted) return true;
 
-            // Compute pitch angle of current surface velocity relative to local up
-            double pitchAngle = 90.0 - Vector3d.Angle(VesselState.surfaceVelocity, VesselState.up);
-            double cosPitch = Math.Abs(Math.Cos(pitchAngle * UtilMath.Deg2Rad));
-            double sinPitch = Math.Abs(Math.Sin(pitchAngle * UtilMath.Deg2Rad));
+            if (vel.magnitude < 1.0) return false;
 
-            // Horizontal stopping distance at max thrust
-            double hStoppingDistance = (VesselState.speedSurfaceHorizontal* VesselState.speedSurfaceHorizontal)/(2 * VesselState.limitedMaxThrustAccel * cosPitch);
-            hStoppingDistance *= (1.25 + Core.Landing.HorizMargin / 100);
+            Vector3d up = Vessel.up;
+            Vector3d retro = -vel.normalized;
+            double sin_theta = Math.Abs(Vector3d.Dot(retro, -up));   // sin of angle from horizontal
+            double cos_theta = Math.Sqrt(1.0 - sin_theta * sin_theta);
 
-            // Vertical stopping distance (only if descending)
-            double vStoppingDistance = (VesselState.speedVertical < 0) ? (VesselState.speedVertical* VesselState.speedVertical) /(2 * (VesselState.limitedMaxThrustAccel * sinPitch - VesselState.localg)) : 0;
-            vStoppingDistance *= (1.25 + Core.Landing.VerticalMargin / 100);
-
-            // Effective stopping range - start burn if either vertical or horizontal distance is within stopping distance
-            bool rc = (y <= vStoppingDistance) || (hTargetError <= hStoppingDistance);
-            if (rc) shouldBurnStarted = true;
-
-            if (--debugCounter <= 0)
+            double Vy = Vector3d.Dot(vel, -up);             // downward component
+            if (Vy < 1.0)
             {
-                Debug.Log($"[ShouldStartBurn] burn?={shouldBurnStarted}, y={y:F0} ystop={vStoppingDistance:F0}, x={hTargetError:F0} xstop={hStoppingDistance:F0}");
-                debugCounter = 50;
+                Debug.Log($"[ShouldStartBurn2] sin_theta={sin_theta:F3}, cos_theta={cos_theta:F3}, Vy={Vy:F3}");
+                return false;
+            }
+
+            double Vx = vel.magnitude * cos_theta;
+
+            double g = VesselState.localg;
+            double a = VesselState.limitedMaxThrustAccel;
+
+            // Effective accelerations along retrograde direction
+            double ay = a * sin_theta - g;                  // vertical (downward positive)
+            double ax = a * cos_theta;                      // horizontal
+
+            double h_vert  = (1 + Core.Landing.BurnMarginPerc / 100.0) * (Vy * Vy) / (2.0 * ay);
+            double d_horiz = (1 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * ax);
+
+            if (sin_theta < 0.25)
+            {
+                h_vert = 0; // If nearly horizontal, ignore vertical stopping distance to prevent premature burn trigger
+            }
+
+            double current_h = -Vector3d.Dot(posError, up);
+
+            // Horizontal distance only (projection onto horizontal plane)
+            Vector3d posError_horizontal = posError - Vector3d.Dot(posError, up) * up;
+            double current_d = posError_horizontal.magnitude;
+
+            Debug.Log($"[ShouldStartBurn2] current_h={current_h:F0}, h_vert={h_vert:F0}, current_d={current_d:F0}, d_horiz={d_horiz:F0}");
+
+            bool rc = current_h <= h_vert || current_d <= d_horiz;
+            if (rc)
+            {
+                shouldBurnStarted = true;
+                densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h/5.0, MainBody), FlightGlobals.getExternalTemperature(current_h/5.0, MainBody));
             }
             return rc;
         }
 
         /// <summary>
-        /// Main guidance loop: computes ZEM/ZEV commands, applies lateral damping,
-        /// sets throttle, and directs attitude.
+        /// Computes vector ZEM/ZEV guidance commands and sets throttle/attitude.
+        /// Uses full vector math for position/velocity errors.
+        /// Applies lateral damping to eliminate off-target velocity.
         /// </summary>
         private bool UpdateGuidanceAndControl(FlightCtrlState s)
         {
             bool recover = false;
-            Vector3d up = (Vessel.CoM - Vessel.mainBody.position).normalized;
-            Vector3d targetPos = Vessel.mainBody.GetWorldSurfacePosition(Core.Target.targetLatitude, Core.Target.targetLongitude, 0) - Vessel.mainBody.position;
-            Vector3d downrangeVec, crossrangeVec, horizontalVec;
-            Core.Landing.GetRangeVectorsToSurfaceTarget(Vessel, VesselState, targetPos, VesselState.time, out downrangeVec, out crossrangeVec, out horizontalVec);
 
-            double y = VesselState.altitudeTrue;
-            double vy = Vector3d.Dot(VesselState.surfaceVelocity, up);
-            double v_down = Math.Max(0, -vy);
-            double hTargetError = horizontalVec.magnitude;
-            double vx = Vector3d.Dot(VesselState.surfaceVelocity, horizontalVec.normalized);
-            Vector3d hSurfaceVel = Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
+            // Altitude above terrain (what you usually want for guidance "y")
+            double alt = VesselState.altitudeTrue - targetOffset;
 
-            // Check if we should start the burn
-            if (!ShouldStartBurn(y, vy, hTargetError))
+            // True radius from body center to bottom of vessel
+            double r_bottom = Vessel.mainBody.Radius
+                            + Vessel.mainBody.TerrainAltitude(Vessel.latitude, Vessel.longitude)
+                            + alt;
+
+            // Current position vector from body center
+            Vector3d pos = (VesselState.CoM - Vessel.mainBody.position).normalized * (r_bottom);
+
+            // Target position vector on surface
+            Vector3d targetPos = Core.Target.GetPositionTargetPosition();
+
+            // Vector from current position to target
+            Vector3d posError = targetPos - pos;
+
+            // Slant range (distance to target)
+            double slantRange = posError.magnitude;
+
+            if (slantRange <= 0.1)
             {
-                Core.Attitude.attitudeTo(-VesselState.surfaceVelocity.normalized, AttitudeReference.INERTIAL, this);
+                Core.Thrust.RequestActiveThrottle(0);
                 return recover;
             }
 
-            double g_mag = VesselState.gravityForce.magnitude/ Core.Landing.debug5;
-            double a_brake_net = VesselState.limitedMaxThrustAccel - g_mag;
-            double r_mag = Math.Sqrt(y * y + hTargetError * hTargetError);
-            double v_mag = VesselState.surfaceVelocity.magnitude;
-            double disc = v_mag * v_mag + 2 * a_brake_net * r_mag;
-            double t_go = Math.Max(0,(disc >= 0) ? (v_down + Math.Sqrt(disc)) / a_brake_net : 9999);
-            double gain_scale_x = 1;
-            double gain_scale_y = (t_go > 25) ? 0.4 + 0.6 * Mathf.Clamp((float)((30 - t_go) / 30), 0, 1) : 1.0;
-            gain_scale_y = Mathf.Clamp((float)gain_scale_y, (float)Core.Landing.debug4, (float)Core.Landing.debug7);
-            double zem_x = -hTargetError + vx * t_go;
-            double zem_y = -y - vy * t_go + 0.5 * (-g_mag) * t_go * t_go;
-            double zev_x = vx;
-            double zev_y = -vy -g_mag * t_go;
-            double a_cmd_x = gain_scale_x * ((6 / (t_go * t_go)) * zem_x + (4 / t_go) * zev_x);
-            double a_cmd_y = gain_scale_y * Math.Max(0,(6 / (t_go * t_go)) * zem_y + (4 / t_go) * zev_y + g_mag + (-Core.Landing.TouchdownSpeed - vy)* Core.Landing.debug1 / t_go);
+            // Surface-relative velocity vector
+            Vector3d vel = VesselState.surfaceVelocity;
 
-            // When close to ground, prioritize vertical control to avoid lateral oscillations that can cause instability and excessive horizontal acceleration demands.
-            if (y < Core.Landing.debug3)
+            // Get range vectors for target direction
+            Vector3d downrangeVec, crossrangeVec, horizontalVec;
+            Core.Landing.GetRangeVectorsToSurfaceTarget(Vessel, VesselState, targetPos, VesselState.time,
+                out downrangeVec, out crossrangeVec, out horizontalVec);
+
+            // Check if burn should be active
+            //if (!ShouldStartBurn(slantRange, vy, horizontalVec))
+            //if (!
+            ShouldStartBurn(ref posError, ref vel); //)
+            //{
+                //Core.Attitude.attitudeTo(-VesselState.surfaceVelocity.normalized, AttitudeReference.INERTIAL, this);
+                //return recover;
+            //}
+
+            // Local gravity magnitude
+            Vector3d g = VesselState.gravityForce;
+
+            // Net upward braking acceleration available
+            double a_brake_net = VesselState.limitedMaxThrustAccel - g.magnitude;
+
+            // Vertical velocity component (positive up)
+            double vy = Vector3d.Dot(vel, Vessel.up);
+
+            // Downward velocity magnitude
+            double v_down = Math.Max(0, -vy);
+
+            // Discriminant for vertical suicide-burn time
+            double disc = v_down * v_down + 2 * a_brake_net * slantRange;
+
+            // Combined t_go (max of vertical and horizontal)
+            // double t_go = Math.Max(1, (disc >= 0) ? (v_down + Math.Sqrt(disc)) / a_brake_net : 9999);
+            // =IF(C3>0,IF($AC$5>0,(-E3 + Sqrt(M3)) / ($AB$2-G3),min(N2-$A$3/5,2*K3/(L3))),0)
+            double t_go = (Core.Landing.ZevH<0) ? 2 * slantRange / vel.magnitude : (v_down + Math.Sqrt(disc)) / a_brake_net;
+            if (prev_t_go > 0 )
             {
-                if (Math.Abs(a_cmd_x) >= Math.Abs(Core.Landing.debug2 * a_cmd_y))
-                {
-                    a_cmd_x = (y / Core.Landing.debug3) * Math.Sign(a_cmd_x) * Math.Abs(Core.Landing.debug2 * a_cmd_y);
-                }
+                t_go = Math.Max(1, Math.Min(prev_t_go - VesselState.deltaT / 5.0, t_go));
+            }
+            prev_t_go = t_go;
 
-                // Need to reduce horizontal velocity but this algorithm can't handle it - defer to MoveToTarget 
-                if (Math.Abs(vx) > Core.Landing.debug8 *Math.Abs(vy) )
+            // Correct ZEM and ZEV signs (desired - predicted)
+            Vector3d predicted_pos = vel * t_go + 0.5 * VesselState.gravityForce * t_go * t_go;
+            Vector3d zem = posError - (predicted_pos);   // = target - predicted_position   NOTE: pos was canceled out
+            Vector3d zem_x = Vector3d.Exclude(Vessel.up, zem);
+            Vector3d zev_x = -VesselState.horizontalSurface;
+            Vector3d zem_y = Vector3d.Exclude(zem_x, zem);
+            Vector3d zev_y = -(vy*Vessel.up + VesselState.gravityForce * t_go); // = 0 - predicted_velocity
+
+            // If Vertical ZEV gain and vertical velocity is negative, only apply it when vertical velocity is below a specified vertical velocity threshold.
+            double ZevV = Core.Landing.ZevV;
+            float downrange = (float)downrangeVec.magnitude;
+            if ( ZevV < 0 ) 
+            {
+                if (downrange <= DOWNRANGE_THRESHOLD_CONSTANT || minDownRange < DOWNRANGE_THRESHOLD_CONSTANT)
                 {
-                    recover = true;
+                    minDownRange = Math.Min(minDownRange, downrange);
+                    ZevV *= Mathf.Clamp((DOWNRANGE_THRESHOLD_CONSTANT - minDownRange) / (DOWNRANGE_THRESHOLD_CONSTANT - 10.0f), 0, 1);
                 }
                 else
                 {
-                    // Boost vertical command to bleed off horizontal velocity when close to ground, since we won't have time to correct later and we want to avoid oscillations.
-                    // This also helps ensure touchdown speed is achieved even if we have some unmodeled horizontal drag or other effects.
-                    if ( y < 5 )
-                    {
-                        a_cmd_x *= 0.20; // reduce lateral command to avoid instability
-                        a_cmd_y += 2 * ((-Core.Landing.TouchdownSpeed - vy) * Core.Landing.debug1 / t_go); 
-                    }
+                    ZevV = 0;
                 }
             }
 
-            Vector3d desired_accel = -a_cmd_x * horizontalVec.normalized + Math.Max(0,a_cmd_y) * up.normalized;
+            // Commanded acceleration (ZEM/ZEV formula)
+            Vector3d a_cmd = (Core.Landing.ZemH / (t_go * t_go)) * zem_x + (Core.Landing.ZevH / t_go) * zev_x +
+                             (Core.Landing.ZemV / (t_go * t_go)) * zem_y + (ZevV / t_go) * zev_y;
 
-            // Cancel Lateral velocity
-            Vector3d parallelDir = horizontalVec.normalized;
-            Vector3d velParallel = Vector3d.Project(hSurfaceVel, parallelDir);
-            Vector3d velLateral = hSurfaceVel - velParallel;
-            double lateralGain = Core.Landing.debug6;
-            Vector3d lateralCorrection = -lateralGain * Math.Min(a_cmd_x, velLateral.magnitude) * velLateral.normalized;
-            desired_accel += lateralCorrection;
+            // below this altitude, switch to recovery mode if not on target (prevents hard landings from guidance errors or bad tuning)
+            // Or, if the downrange to altitude ratio is close to minRatio, switch to recovery mode - The final landing is based on tracking vertical and horizontal velocity as we zero in to target.
+            if ( ((downrange/alt) <= (1.1*Core.Landing.minRatio)) || (alt < Core.Landing.LandWithMoverAlt) || (downrange < Core.Landing.LandWithMoverOffset) )
+            {
+                recover = true;
+            }
 
-            float desired_mag = (float)desired_accel.magnitude;
-            if (Core.Attitude.attitudeAngleFromTarget() < 30)
+            // Apply terminal velocity bias (encourages stronger vertical braking near ground to hit target speed)
+            // Final-phase boost (stronger control near ground)
+            if ( (alt < 20.0) || (targetOffset==0) )
             {
-                Core.Thrust.RequestActiveThrottle(Mathf.Clamp01(desired_mag / (float)VesselState.limitedMaxThrustAccel));
+                targetOffset = 0; // Remove target offset once reached to provide more safety margin for final touchdown
+                lateralGain = 0.1;// 0.01; // Reduce lateral gain near ground to prevent overshoot from aggressive vertical braking
+
+                a_cmd = a_cmd - Vector3d.Project(a_cmd, Vessel.up); // Remove vertical component to prevent interference with vertical braking
+
+                // Terminal vertical velocity bias: add extra vertical braking if descending faster than target speed near ground
+                a_cmd += (-Math.Abs(Core.Landing.TouchdownSpeed) - vy) * Vessel.up * (6.0 / t_go);
             }
-            else
+
+            // Early-phase gain reduction (less aggressive when far away)
+            double gain_scale = 0.4 + 0.6 * Mathf.Clamp((float)((60 - t_go) / 30), 0, 1);
+
+            // Apply gain scale
+            a_cmd *= gain_scale;
+
+            // Desired acceleration vector
+            Vector3d desired_accel = a_cmd;
+
+            // Lateral damping: only horizontal plane perpendicular to target
+            if ( lateralGain> 0 )
             {
-                Core.Thrust.RequestActiveThrottle(0);
+                Vector3d parallelHorizontal = horizontalVec.normalized;
+                Vector3d velParallelH = Vector3d.Project(VesselState.horizontalSurface, parallelHorizontal);
+                Vector3d velLateralH = VesselState.horizontalSurface - velParallelH;
+                desired_accel -= lateralGain * velLateralH;
             }
-            Core.Attitude.attitudeTo(desired_accel.normalized, AttitudeReference.INERTIAL, this);
-            if (--debugCounter <= 0)
+
+            // Clamp magnitude to max available thrust acceleration
+            double desired_mag = desired_accel.magnitude;
+            if (desired_mag > VesselState.limitedMaxThrustAccel + 0.01)
+                desired_accel = desired_accel.normalized * VesselState.limitedMaxThrustAccel;
+
+            if ( shouldBurnStarted == true )
             {
-                Debug.Log($"[LandingBurn] t_go={t_go:F0}, x={hTargetError:F0}, y={y:F0}, vy={vy:F1}, a_cmd_y={a_cmd_y:F1} throttle ={desired_mag / VesselState.limitedMaxThrustAccel:F3}");
-                debugCounter = 50;
+                // Set throttle (0–1)
+                float throttle = (float)(desired_mag / VesselState.limitedMaxThrustAccel);
+
+                if (Core.Attitude.attitudeAngleFromTarget() < 30)
+                {
+                    Core.Thrust.RequestActiveThrottle(throttle);
+                }
+                else
+                {
+                    Core.Thrust.RequestActiveThrottle(0);
+                }
+
+                if (--debugCounter <= 0)
+                {
+                    // Diagnostic log for debugging burn trigger
+                    Debug.Log($"[burn] t_go={t_go:F1} alt={alt:F1} vel={Vessel.horizontalSrfSpeed:F1},{vy:F1} t={throttle:F2} {densityAtBurnStart:F3} ");
+                    debugCounter = 1;
+                }
             }
+
+            // Set attitude to point thrust along desired_accel
+            Quaternion targetRot = Quaternion.LookRotation(desired_accel.normalized, Vessel.up)
+                                 * Quaternion.Euler(0, 0, (float)Core.Landing.vesselAngle);
+            Core.Attitude.attitudeTo(targetRot, AttitudeReference.INERTIAL, this);
+
             return recover;
         }
     }

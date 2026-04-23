@@ -89,7 +89,7 @@ namespace MuMech
                     if (Core.Landing.getHDistanceToTarget() < checkDistance)
                     {
                         if (!MuUtils.PhysicsRunning()) Core.Warp.MinimumWarp(true);
-                        return new DecelerationBurn(Core);
+                        return new MoveToTarget(Core);
                     }
                 }
 

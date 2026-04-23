@@ -33,8 +33,14 @@ namespace MuMech
                 if (Orbit.ApA < MainBody.RealMaxAtmosphereAltitude())
                 {
                     Core.Thrust.ThrustOff();
-                    return new OrbitalTargeting(Core);
-                    //return new CourseCorrection(Core);
+                    if (Core.Landing.LandingType == 1)
+                    {
+                        return new TargetSubOrbit(Core);
+                    }
+                    else
+                    {
+                        return new CourseCorrection(Core);
+                    }
                 }
 
                 //We aim for a trajectory that
@@ -90,19 +96,25 @@ namespace MuMech
                     || (targetAheadAngle < 90 && targetAheadAngle > 60 && planeChangeAngle < 90))
                 {
                     _deorbitBurnTriggered = true;
-                    return new OrbitalTargeting(Core);
                 }
 
                 if (_deorbitBurnTriggered)
                 {
                     if (!MuUtils.PhysicsRunning()) { Core.Warp.MinimumWarp(); } //get out of warp
 
-                    Vector3d deltaV = finalHorizontalVelocity - currentHorizontalVelocity;
-                    Core.Attitude.attitudeTo(deltaV.normalized, AttitudeReference.INERTIAL, Core.Landing);
-
-                    if (deltaV.magnitude < 2.0)
+                    if (Core.Landing.LandingType == 1)
                     {
-                        return new CourseCorrection(Core);
+                        return new TargetSubOrbit(Core);
+                    }
+                    else
+                    {
+                        Vector3d deltaV = finalHorizontalVelocity - currentHorizontalVelocity;
+                        Core.Attitude.attitudeTo(deltaV.normalized, AttitudeReference.INERTIAL, Core.Landing);
+
+                        if (deltaV.magnitude < 2.0)
+                        {
+                            return new CourseCorrection(Core);
+                        }
                     }
 
                     Status = Localizer.Format("#MechJeb_LandingGuidance_Status7"); //"Doing high deorbit burn"
