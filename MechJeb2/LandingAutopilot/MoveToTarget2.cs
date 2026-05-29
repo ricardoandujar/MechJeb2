@@ -1,14 +1,17 @@
 ﻿using System;
 using System.Linq;
 using KSP.Localization;
+using Steamworks;
 using UnityEngine;
 using static alglib;
+using static SoftMasking.SoftMask;
+using static UnityEngine.TouchScreenKeyboard;
 
 namespace MuMech
 {
     namespace Landing
     {
-        public class MoveToTarget : AutopilotStep
+        public class MoveToTarget2 : AutopilotStep
         {
             enum Ascend2Target
             {
@@ -35,25 +38,21 @@ namespace MuMech
             private const float SAFE_ALT_SPEED_SLOW_CONSTANT = 23000;//13000;//12000;//15000(works-short);
             private const float ALT_SPEED_SLOW_CONSTANT = 18000;//17000;//17000;//13000;//12000;//15000(works-short);  Under this Altitude scale down the vertical speed to landing. 
             private const float ALT_MIN_WARP_CONSTANT = 19000; // 19000 <= 50000 Do not warp below this altitude
-            private const float H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT = 245000;  // if target horizontal distance is less than this & reached target ratio, switch to SetPathToTarget
+            private const float H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT = 10000;  // When above this horizontal distance to target and below the altitude threshold, use suborbital targetting to approach target, otherwise use normal targetting. This allows more aggressive approach when far from target and more precise control when close to target.
             private const float H_SUBORBITAL_ALTITUDE_THRESHOLD_CONSTANT = 1000;   // For High gravity use suborbital when above this alt, otherwise use normal targetting
 
             private const float H_CORRECTION_ANGLE_CONSTANT = 0.4f; // Used to determine horizontal correction angle 
             private const float LANDING_GEAR_ALT_CONSTANT = 200.0F; // Drop landing gear below this altitude
             private const float SAFE_FINAL_SPEED_FACTOR_CONSTANT = 0.8F; // To avoid crashing in terrain in final descent
             private const double OVERSHOOT_ANGLE_FRACTION = 0.9; // Small margin to avoid losing vertical control
-            private const double LIMITED_MAX_THRUST_G_RATIO = 3.125; // this is multiplied with Mainbody g
+            public const double LIMITED_MAX_THRUST_G_RATIO = 5.0; // 10<=5.0 <=4 <= 3.125 this is multiplied with Mainbody g
             private const double LIMITED_SLOW_THRUST_G_RATIO = 1.25; // this is multiplied with Mainbody g
-            private const double TWR_REFERENCE = 1.5; // used by SetPathToTarget() to calculate thrust
             private const double LOW_GRAVITY_THRUST_MAX = 10;// 10 <= (bad)100.0; // 10.0
             private const int LAND_STABILIZE_COUNT = 500; // controls how long to stabilize landing.
             private const int IGNORE_LANDING_COUNT = 100; // controls how long to ignore landing check.
-            private const int H_THRUST_INTEGRATE_COUNT = 20; // Integration count before allowing horizontal thrust control
             private const int IGNORE_ERR_INTEGRATE_COUNT = 40;  // Initial ignore count when ascending in a hop
             private const int DECREASE_ERR_INTEGRATE_COUNT = 6; // Integration count to determine when closest approach reached
             private const int INCREASE_ERR_INTEGRATE_COUNT = 6; // Integration count to determine when cannot improve approach
-            private const double RETROBURN_RESET_THROTTLE_THRESH = 0.001;  // 0.001 <= 0.01 If thrust above this level reset the throttle count
-            private const int RETROBURN_THROTTLE_COUNT = 1000;  // Integration count to maintain minimal thrust in retro burn
             private const float EMERGENCY_ALTITUDE   = 400.0f;  // below this altitude activate emergency ascent
             private const float EMERGENCY_H_DISTANCE = 500.0f;  // beyond this distance activeate emergency ascent
             private const double ASCENT_H_DISTANCE_DIVISOR = 2000.0; // used to calculate desired vertical speed
@@ -67,44 +66,43 @@ namespace MuMech
             private int _deployedGears = 1;     // 0->1->2  - deploy gears twice   2->1->0 store gears twice
             private double hFarCorrectionAngle;             // far horizontal distance overshoot angle
             private double hMidCorrectionAngle;             // mid horizontal distance overshoot angle
-            private double velaccum = 0;                    // Integral velocity error accumulator for PI Controller
+            private Vector3d velaccum_h = Vector3d.zero;    // Integral velocity error accumulator for Horizontal PI Controller
+            private double velaccum_h2 = 0;                 // Integral velocity error accumulator for Horizontal PI Controller
+            private double velaccum_v = 0;                  // Integral velocity error accumulator for Vertical PI Controller
             private double limitedMaxThrustAccel = 0;       // Limited thrust acceleration used to calculate TWR and overshoot angle + scale max speed
             private double actualLimitedMaxThrustAccel = 0; // Calculate actual limited max thrust used at this time.
             private IDescentSpeedPolicy _aggressivePolicy;  // Used to calculate max speed when not flying safe - more aggressive
-            private uint ThrottleCount = 0;                 // Used in retroburn to maintain minimal thrust for a period of time when thrust not needed.
             private float altSpeedSlow;                     // Under this terrain altitude the vertical velocity will be scaled down a bit.
             private float altLandThreshold;                 // Under this terrain altitude the vertical velocity will be linearly scaled down to zero ( + clamp to landing speed )
             private float speedFactor = 1.0F;               // Used to store the Landing Margin Factor applied to target speed, slows down faster the larger the margin.
-            private double vCorrectionAngle = 0.0;  // range is -1.0 to +1.0
-            private double hAngleFactor = 1.0;      // range is 0.0 to +1.0
+            //private double vCorrectionAngle = 0.0;  // range is -1.0 to +1.0
             private int landStabilizeCounter = 0;   // Used to Control how long to stabilize landing.
             private int ignoreLandingCounter = 0;   // Used to Control how long to ignore landing check
-            private int hControlCounter;            // Allows horizontal pid after integration if vertical control is not operating.
-            private int hThrustIntegrateCount = 200;// Initial count to ignore when starting up.
+            //private int verticalCounter = 0;   // Used to Control how long to ignore landing check
+            private double verticalSign = 1;   // Used to control the sign of vertical thrust in low gravity - when upright verticalSign is positive, when pitched forward to speed up it is negative, when pitched back to slow down it is positive. This allows the PID controller to continue to operate even when pitched forward or backward by not allowing the vertical thrust to be negative when pitched forward and not allowing the vertical thrust to be positive when pitched back.
+            private double horizontalSign = 1; // Used to control the sign of horizontal thrust - when facing target horizontalSign is positive, when facing away from target horizontalSign is negative. This allows the PID controller to continue to operate even when facing away from target by not allowing the horizontal thrust to be positive when facing away from target and not allowing the horizontal thrust to be negative when facing towards target.
             private int skipCounter = 0;
-            double hCurrentError = 0;
-            double prevError = 0;
-            double startTiltAlt = 0;
-            double hMinCAngle = 0;
-            double hMinAngle = 0;
-            double tiltDelta = 0;
-            double subOrbitalApA;
-            double hCloseLimit = 50;   // 50 <=(baseline)20
-            double hMidLimit = 1500; // 1500<=1000(baseline)<=500<=100
-            double hFarLimit = 10000;  // (baseline)10000
-            double divClose;
-            double divMid;
-            double divFar;
-
+            private double hCurrentError = 0;
+            private double prevError = 0;
+            private double startTiltAlt = 0;
+            private double tiltDelta = 0;
+            private double subOrbitalApA; // When performing suborbital targetting this is the target ApA to aim for to approach the target - it is set based on the body and atmosphere to give good results.
+            private double _subOrbitalApA = 0; // Set the Target Orbital ApA based on groundtrack result
+            private double hCloseLimit = 50;   // 50 <=(baseline)20
+            private double hMidLimit = 1500; // 1500<=1000(baseline)<=500<=100
+            private double hFarLimit = 10000;  // (baseline)10000
+            private double divClose;
+            private double divMid;
+            private double divFar;
             double baseGain; // Calibrated gain for horizontal angle and to correct movement that would diverge from target.
 
             // The steepness controls the ratio curvature - When horizontal distance to target is small we
             // dont want to modify the desired vertical velocity.
             // When horizontally far from target we want to maintain altitude, but slower allow vertical drop
             // as approach target.
-            float steepness;// Defines the steepness to final descent ratio curvature to target.
-            float maxRatio; // Desired Vertical speed is zero at this or larger ratios 
-            float minRatio; // Desired Vertical speed is unmodified at this or smaller ratios
+            private float steepness;// Defines the steepness to final descent ratio curvature to target.
+            private float maxRatio; // Desired Vertical speed is zero at this or larger ratios 
+            private float minRatio; // Desired Vertical speed is unmodified at this or smaller ratios
 
             // Try with course correction.
             private Ascend2Target    errStep = Ascend2Target.Disabled;
@@ -114,16 +112,17 @@ namespace MuMech
             private int increaseCount = INCREASE_ERR_INTEGRATE_COUNT;
 
             private double throttleAngle;
-            private double prevDeltaverror = 0;
-            private float lastHorizontalThrust = 0.0f;
+            private double attitudeAngleFromThrust;
             private string trace;
 
             private Vector3d lastDesiredThrustVector;
             private double override_ratio = 0.75;
             private Vector3 pitchYawVector = new Vector3(1f, 0f, 1f);
+            private double hFrac = 1;
+            private double vFrac = 1;
 
 
-            public MoveToTarget(MechJebCore core) : base(core)
+            public MoveToTarget2(MechJebCore core) : base(core)
             {
                 lastDesiredThrustVector = Vector3d.zero;
                 double tempFactor = (Core.Landing.FlySafe == false) ? 20.0 : 10.0; // 10(baseline)<=100<=1000 Allow large angles - if angles are too small there will not be enough horizontal thrust
@@ -139,7 +138,6 @@ namespace MuMech
                 // Ratio ranges
                 maxRatio = (float)Core.Landing.maxRatio; // Desired Vertical speed is zero at this or larger ratios 
                 minRatio = (float)Core.Landing.minRatio; // Desired Vertical speed is unmodified at this or smaller ratios
-                double hTargetError = Core.Landing.getHDistanceToTarget();
 
                 _deployedGears = 1; // This will trigger both store and deploy gears
 
@@ -158,7 +156,7 @@ namespace MuMech
                 startTiltAlt = 0; // Initialize to zero so it gets set when tilting towards target within the atmosphere
                 if (Core.Landing.g < Core.Landing.LOW_GRAVITY)
                 {
-                    throttleAngle = 5.0; // Allow throttling if within 5 degrees - in final landing angle will be wider.
+                    throttleAngle = 30.0; // Allow throttling if within 5 degrees - in final landing angle will be wider.
                 }
                 else
                 {
@@ -167,21 +165,13 @@ namespace MuMech
                 suppressThrottle = 0; // initialize throttle suppression - start by not suppressing
                 landStabilizeCounter = 0;
 
-
-                if (MainBody.Radius > 700000)
-                {
-                    hMinCAngle = Math.Min(MIN_ASCENT_ANGLE, Math.Abs(1.0 / Math.Tan(Math.PI - Math.Asin(1*Core.Landing.g/VesselState.limitedMaxThrustAccel) ) ));
-                }
-
                 if ( MainBody.atmosphere == true )
                 {
                     subOrbitalApA = 1.2 * MainBody.atmosphereDepth; // 1.2 <= 1.15(still in atmosphere) <= 1.1
-                    hMinAngle = 0.15;// 0.15 <= 0.1(works-shallower) < = 0.2(works);
                 }
                 else
                 {
-                    subOrbitalApA = Math.Max(24000.0,0.2 * MainBody.Radius);
-                    hMinAngle = Math.Min(MIN_ASCENT_ANGLE, Math.Abs(1.0 / Math.Tan(Math.PI - Math.Asin(1 * Core.Landing.g / VesselState.limitedMaxThrustAccel))));
+                    subOrbitalApA = Math.Max(24000.0,0.08 * MainBody.Radius);
                 }
 
                 checkWarp = false; // bypassing retroburn to move to target
@@ -275,13 +265,42 @@ namespace MuMech
                 return (float)Math.Min(-Core.Landing.TouchdownSpeed, -Math.Abs(maxSpeed));
             }
 
-            public void pidVelocity(double desiredSpeed, double currentSpeed, bool down = false)
+            public Vector3d pidVelocity_h(Vector3d herror)
             {
                 const double PID_ACCUM_MAX = 60;// 50; // 50<=30 <= 20
                 // Increase PI Gains in higher gravity worlds - to track desired vertical speed
-                double PID_KP = 0.5 * Math.Max(20, Math.Min(50, 20 + (50 - 20) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 50(highg);// 40; // 40<=30 <= 20
-                double PID_KI = Math.Max(0.05, Math.Min(0.17, 0.05 + (0.17 - 0.05) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 0.05(lowg) 0.175(highg);// 0.35;// 0.25;// 0.15;// 0.2;// 0.1;
-                double verror = (desiredSpeed - currentSpeed);
+                double PID_KP = hFrac*Core.Landing.debug1h * Math.Max(20, Math.Min(50, 20 + (50 - 20) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 50(highg);// 40; // 40<=30 <= 20
+                double PID_KI = hFrac*Core.Landing.debug2h * Math.Max(0.05, Math.Min(0.17, 0.05 + (0.17 - 0.05) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 0.05(lowg) 0.175(highg);// 0.35;// 0.25;// 0.15;// 0.2;// 0.1;
+                double _limitedMaxThrustAccel = actualLimitedMaxThrustAccel;
+
+                if (_limitedMaxThrustAccel < VesselState.limitedMaxThrustAccel)
+                {
+                    _limitedMaxThrustAccel = actualLimitedMaxThrustAccel + (VesselState.limitedMaxThrustAccel - actualLimitedMaxThrustAccel)
+                        * (Core.Landing.g - 0.05) / (23 - 0.05);
+                }
+                herror /= _limitedMaxThrustAccel;
+                velaccum_h += herror;
+                velaccum_h = velaccum_h.normalized*Math.Max(0, Math.Min(PID_ACCUM_MAX, velaccum_h.magnitude));
+                if (herror.magnitude > Core.Landing.debug92) velaccum_h = Vector3d.zero;
+                double gain;
+                double herror_ = herror.magnitude;
+                if (herror_ < Core.Landing.debug3h) gain = Core.Landing.debug4h;
+                else if (herror_ < Core.Landing.debug5h) gain = Core.Landing.debug4h + Core.Landing.debug6h * Mathf.Clamp01((float)((herror_ - Core.Landing.debug3h) / (Core.Landing.debug5h - Core.Landing.debug3h)));
+                else gain = Core.Landing.debug4h + Core.Landing.debug6h + Core.Landing.debug8h * Mathf.Clamp01((float)((herror_ - Core.Landing.debug5h) / (Core.Landing.debug7h - Core.Landing.debug5h)));
+
+                //Debug.Log("pidh accum:" + velaccum_h.magnitude.ToString("F4") + " gain:" + gain.ToString("F4"));
+
+                Vector3d rc = gain*(PID_KP * ((PID_KI * velaccum_h) + herror)) / VesselState.maxThrustAccel;
+                double rcM = Math.Min(_limitedMaxThrustAccel, rc.magnitude);
+                return rcM * rc.normalized;
+            }
+
+            public double pidVelocity_h(double herror)
+            {
+                const double PID_ACCUM_MAX = 60;// 50; // 50<=30 <= 20
+                // Increase PI Gains in higher gravity worlds - to track desired vertical speed
+                double PID_KP = hFrac*Core.Landing.debug1h * Math.Max(20, Math.Min(50, 20 + (50 - 20) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 50(highg);// 40; // 40<=30 <= 20
+                double PID_KI = hFrac*Core.Landing.debug2h * Math.Max(0.05, Math.Min(0.17, 0.05 + (0.17 - 0.05) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 0.05(lowg) 0.175(highg);// 0.35;// 0.25;// 0.15;// 0.2;// 0.1;
                 double _limitedMaxThrustAccel = actualLimitedMaxThrustAccel;
 
                 if (_limitedMaxThrustAccel < VesselState.limitedMaxThrustAccel)
@@ -290,83 +309,181 @@ namespace MuMech
                         * (Core.Landing.g - 0.05) / (23 - 0.05);
                 }
 
-                verror /= _limitedMaxThrustAccel;
+                herror = herror / _limitedMaxThrustAccel;
+                double verrorAbs = Math.Abs(herror);
+                velaccum_h2 += herror;
+                velaccum_h2 = Math.Max(-PID_ACCUM_MAX, Math.Min(PID_ACCUM_MAX, velaccum_h2));
+                if (Math.Abs(herror) > Core.Landing.debug92) velaccum_h2 = 0;
+                double gain;
+                if (verrorAbs < Core.Landing.debug3h) gain = Core.Landing.debug4h;
+                else if (verrorAbs < Core.Landing.debug5h) gain = Core.Landing.debug4h + Core.Landing.debug6h * Mathf.Clamp01((float)((verrorAbs - Core.Landing.debug3h) / (Core.Landing.debug5h - Core.Landing.debug3h)));
+                else gain = Core.Landing.debug4h + Core.Landing.debug6h + Core.Landing.debug8h * Mathf.Clamp01((float)((verrorAbs - Core.Landing.debug5h) / (Core.Landing.debug7h - Core.Landing.debug5h)));
 
-                velaccum += verror;
-                double gComp = (down == true) ? VesselState.localg : 0;
-                //PID_KI *= Core.Landing.debug4;
-                //PID_KP *= Core.Landing.debug5;
-                velaccum = Math.Max(0, Math.Min(PID_ACCUM_MAX, velaccum));
-                Core.Thrust.Tmode = MechJebModuleThrustController.TMode.OFF;
-                Core.Thrust.TransKillH = false;
+                //Debug.Log("pidh accum:" + velaccum_h2.ToString("F4") + " gain:" + gain.ToString("F4"));
 
-
-                Vessel.ctrlState.mainThrottle = Core.Thrust.TargetThrottle = (float)
-                    (Math.Max(0, Math.Min(_limitedMaxThrustAccel, (gComp + PID_KP * (PID_KI * velaccum + verror))) / VesselState.maxThrustAccel));
+                return (Math.Max(-_limitedMaxThrustAccel, Math.Min(_limitedMaxThrustAccel, gain * (PID_KP * (PID_KI * velaccum_h2 + verrorAbs))) / VesselState.maxThrustAccel));
             }
 
-            public void setThrustVector(ref Vector3d desiredThrustVector, Vector3d hError, double hCorrectionAngle, double desiredVerticalSpeed, double verror)
+            public double pidVelocity_v(double verror)
             {
-                // Landing with high TWR and large vertical error will cause ship to oscillate when close to target horizontall but at higher altitude.
-                // During this situation the thrust will be maxed out so large horizontal displacement will amplify the oscillation.
-                // this attempts to minimize this if within 5 km range to target.
-                if ((Core.Landing.increaseVertical==false) && (hError.magnitude<5000) && (desiredVerticalSpeed < 0) && (verror > 10) )
-                {
-                    hAngleFactor = 0.2;     // 0.2 <= 0.1 Reduce the horizontal component magnitude
-                    vCorrectionAngle = 0.5; // Gives more weight to pointing up
-                }
+                const double PID_ACCUM_MAX = 60;// 50; // 50<=30 <= 20
+                // Increase PI Gains in higher gravity worlds - to track desired vertical speed
+                double PID_KP = vFrac*Core.Landing.debug1 * Math.Max(20, Math.Min(50, 20 + (50 - 20) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 50(highg);// 40; // 40<=30 <= 20
+                double PID_KI = vFrac*Core.Landing.debug2 * Math.Max(0.05, Math.Min(0.17, 0.05 + (0.17 - 0.05) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 0.05(lowg) 0.175(highg);// 0.35;// 0.25;// 0.15;// 0.2;// 0.1;
+                double _limitedMaxThrustAccel = actualLimitedMaxThrustAccel;
 
-                // Either we are close to the ground and need to close the vertical error gap or in ascent phase and cant increase vertical speed
-                // Reduce the horizontal angle.
-                else if (vCorrectionAngle != 0 && ((VesselState.altitudeTrue < 250) || (Core.Landing.increaseVertical)))
+                if (_limitedMaxThrustAccel < VesselState.limitedMaxThrustAccel)
                 {
-                    // The following ensures that the vertical herror is not too large by adjusting the horizontal angle.
-                    if (desiredVerticalSpeed < 10)
+                    _limitedMaxThrustAccel = actualLimitedMaxThrustAccel + (VesselState.limitedMaxThrustAccel - actualLimitedMaxThrustAccel)
+                        * (Core.Landing.g - 0.05) / (23 - 0.05);
+                }
+                double gComp = VesselState.localg;
+                
+                verror = verror/_limitedMaxThrustAccel;
+                double verrorAbs = Math.Abs(verror);
+                velaccum_v += verror;
+                velaccum_v = Math.Max(-PID_ACCUM_MAX, Math.Min(PID_ACCUM_MAX, velaccum_v));
+                if (Math.Abs(verror) > Core.Landing.debug91) velaccum_v = 0;
+                double gain;
+                if (verrorAbs < Core.Landing.debug3)      gain = Core.Landing.debug4;
+                else if (verrorAbs < Core.Landing.debug5) gain = Core.Landing.debug4                     + Core.Landing.debug6*Mathf.Clamp01((float)((verrorAbs - Core.Landing.debug3)/(Core.Landing.debug5-Core.Landing.debug3)));
+                else                                      gain = Core.Landing.debug4+Core.Landing.debug6 + Core.Landing.debug8*Mathf.Clamp01((float)((verrorAbs - Core.Landing.debug5)/(Core.Landing.debug7-Core.Landing.debug5)));
+
+                //Debug.Log("pidv accum:" + velaccum_v.ToString("F4") + " gain:" + gain.ToString("F4"));
+
+                return (Math.Max(-_limitedMaxThrustAccel, Math.Min(_limitedMaxThrustAccel, gComp + gain * (PID_KP * (PID_KI * velaccum_v + verror))) / VesselState.maxThrustAccel));
+            }
+
+            // Build the vertical and horizontal thrust vectors independently, then put it together.
+            public void setThrustVector(ref double hTargetError, ref Vector3d desiredThrustVector, ref Vector3d desiredHorizontalVel, Vector3d hError, double hCorrectionAngle, ref double desiredVerticalSpeed, double vError)
+            {
+                if (hTargetError < hFarLimit)
+                {
+                    hFrac = vFrac = 1;
+                }
+                else
+                {
+                    hFrac = vFrac = Core.Landing.debug94;
+                }
+                bool     upright = false;
+                double   vStepAngle = 0.02;
+                //double   hStepAngle = Core.Landing.debug95;
+                double   vMinAngle = 0;
+                double   vMaxAngle = 1;
+                double   vZeroThrustAngle = 0;
+                double   verticalThrust = pidVelocity_v(vError);
+                double   verticalThrust_;
+                double   hsign = (Vector3.Angle(desiredHorizontalVel,hError) <= 90) ? 1.0 : -1.0;
+                double   horizontalThrust = pidVelocity_h(hsign*hError.magnitude);
+                double   horizontalThrust_ = horizontalThrust;
+                //horizontalSign = System.Math.Min(Math.Abs(horizontalThrust), System.Math.Max(-Math.Abs(horizontalThrust), horizontalSign + hStepAngle * horizontalThrust));
+
+                Vector3d horizontal = hCorrectionAngle * hError;
+
+                // High Gravity
+                if (Core.Landing.g > Core.Landing.LOW_GRAVITY)
+                {
+                    upright = true;
+                    throttleAngle = 30;
+                    if ((desiredVerticalSpeed > 10) && (VesselState.altitudeTrue >= 100))
                     {
-                        if (verror > (0.45 + Math.Min(10, VesselState.altitudeTrue / 100)))
-                        {
-                            hAngleFactor = Math.Max(0.15, hAngleFactor * 0.7);
-                        }
-                        else if (verror < (0.35 + Math.Min(10, VesselState.altitudeTrue / 100)))
-                        {
-                            hAngleFactor = Math.Min(1, Math.Max(0.15, hAngleFactor * 1.1));
-                        }
+                        upright = false;
+                        //                        horizontal = horizontalSign*Math.Abs(horizontalThrust_)*hError.normalized;
+//                        horizontal = (horizontalSign * desiredHorizontalVel).normalized + Core.Landing.debug96 * Math.Abs(horizontalThrust_) * hError.normalized;
+                        horizontal = desiredHorizontalVel.normalized + Core.Landing.debug96 * Math.Abs(horizontalThrust_) * hError.normalized;
+                        vMinAngle = -0.2*Math.Abs(verticalThrust);
+                        vMaxAngle = +Math.Abs(verticalThrust);
+                    }
+                    else if (VesselState.altitudeTrue < 1000)
+                    {
+                        vMinAngle = 0.05;
+                        vMaxAngle = 0.15; // 0.15 <= 2
+                        vZeroThrustAngle = 1.3;
                     }
                     else
                     {
-                        if (VesselState.speedVertical <= 20)
-                        {
-                            hAngleFactor = Math.Max(0.15, hAngleFactor * 0.999);
-                        }
-                        else
-                        {
-                            hAngleFactor = Math.Min(1, Math.Max(0.15, hAngleFactor * 1.001));
-                        }
+                        vMinAngle = 0.0;
+                        vMaxAngle = 0.2;
+                        vZeroThrustAngle = 0;
                     }
                 }
 
-                //  Normal case - set full horizontal angle
+                // Low Gravity
                 else
                 {
-                    hAngleFactor = 1.0;
-                }
-
-                // NOTES:
-                // At Gilly need hCorrectionAngle gain at 4.0, but at Pol we need 1.0
-                // At Gilly gainCancelHVelocity works with 4.0, but at Pol appears to be overgained. TODO: Try 1.0 at Pol.
-                // Pattern: Gilly=4  Pol=1    ratio=GillyGravity/Gravity where Gilly/Gilly = 4.0*1.0, Pol = 4.0*(0.049/0.373) = 0.525
-                //  or gain = 0.196/gravity
-                // Calculate desired thrust vector.
-                desiredThrustVector = (vCorrectionAngle * VesselState.up + hAngleFactor * hCorrectionAngle * hError.normalized).normalized;  // herror was not normalized before
-
-                // At low altitude we want to ensure that the vessel does not drop to the ground when attitude change is large - a problem with high gravity worlds
-                if (Core.Landing.g > Core.Landing.LOW_GRAVITY)
-                {
-                    if (vCorrectionAngle != 0 && (Core.Landing.increaseVertical == false) && (VesselState.altitudeTrue < 1000))
+                    if (VesselState.altitudeTrue < 25)
                     {
-                        throttleAngle = Math.Max(30, Core.Attitude.attitudeAngleFromTarget() + 0.1);
+                        upright = true;
+                        vMinAngle = 0.0;
+                        vMaxAngle = 0.2;
+                        vZeroThrustAngle = 1.0;
+                        throttleAngle = 5;
+                    }
+                    else
+                    {
+                        throttleAngle = 30;
+                        vMinAngle = -Math.Abs(verticalThrust);
+                        vMaxAngle = +Math.Abs(verticalThrust);
                     }
                 }
+
+
+                // Both High Gravity and Low Gravity use this at lower altitudes
+                Vector3d vertical;
+                if (upright == true)
+                {
+                    verticalThrust_ = System.Math.Max(0, verticalThrust);
+                    if (verticalThrust_ == 0)
+                    {
+                        verticalSign = vZeroThrustAngle * horizontal.magnitude;
+                    }
+                    else
+                    {
+                        verticalSign = System.Math.Min(vMaxAngle, System.Math.Max(vMinAngle, verticalSign + vStepAngle * Math.Abs(verticalThrust)));
+                        double horizontal_ = Core.Landing.debug93*Math.Min(hCorrectionAngle*verticalSign, horizontal.magnitude);
+                        horizontal *= horizontal_ / horizontal.magnitude;
+                        horizontalThrust_ *= horizontal_ / horizontal.magnitude;
+                    }
+
+                    if ((desiredVerticalSpeed > 0.01) && (VesselState.altitudeTrue < 100))
+                    {
+                        horizontal = Vector3d.zero;
+                        horizontalThrust_ = 0;
+                    }
+                    vertical = verticalSign * Vessel.up;
+
+                    //Debug.Log("1-sign:" + verticalSign.ToString("F4") + "," + horizontalSign.ToString("F4") +
+                    //    " err:" + hError.magnitude.ToString("F4") + "," + vError.ToString("F4") + horizontalThrust_.ToString("F4") + " " + horizontalThrust.ToString("F4") + " " + " " + verticalThrust_.ToString("F4") + " " + verticalThrust.ToString("F4") +
+                    //    " hcorr:" + hCorrectionAngle.ToString("F4"));
+                }
+
+                // Only Low Gravity uses this at high altitude
+                else
+                {
+                   // verticalSign = System.Math.Min(vMaxAngle, System.Math.Max(vMinAngle, verticalSign + vStepAngle * verticalThrust));
+                    verticalSign = System.Math.Min(vMaxAngle, System.Math.Max(vMinAngle, System.Math.Sign(verticalThrust) + Core.Landing.debug95 * vError));
+                    vertical = System.Math.Abs(verticalThrust) *Vessel.up*verticalSign;
+
+                    // do not allow vertical thrust to be opposite of the sign - this causes instability in low gravity when trying to maintain altitude.
+                    verticalThrust_ = (verticalSign * verticalThrust < 0) ? 0 : verticalThrust;
+
+                    //Debug.Log("2-sign:" + verticalSign.ToString("F4") + "," + horizontalSign.ToString("F4") +
+                    //    " err:" + hError.magnitude.ToString("F4") + "," + vError.ToString("F4") + horizontalThrust_.ToString("F4") + " " + horizontalThrust.ToString("F4") + " " + " " + verticalThrust_.ToString("F4") + " " + verticalThrust.ToString("F4") +
+                    //    " hcorr:" + hCorrectionAngle.ToString("F4"));
+                }
+
+                // Set Vertical Vector
+                //Vector3d vertical = verticalSign * Vessel.up;
+
+                // Set desired thrust vector based on horizontal and vertical errors.
+                desiredThrustVector = horizontal + vertical;
+
+                Core.Thrust.Tmode = MechJebModuleThrustController.TMode.OFF;
+                Core.Thrust.TransKillH = false;
+                attitudeAngleFromThrust = Core.Attitude.attitudeAngleFromTarget();
+                // float adjThrust = Mathf.Clamp01(1f - (float)attitudeAngleFromThrust/60f);
+                float adjThrust = Mathf.Clamp01(1.75f - (float)attitudeAngleFromThrust*0.05f); // y = 1.75 - 0.05x
+                Core.Thrust.RequestActiveThrottle(adjThrust*(float)Math.Sqrt(Math.Pow(verticalThrust_, 2) + Math.Pow(horizontalThrust_, 2)));
             }
 
             // move 
@@ -387,15 +504,15 @@ namespace MuMech
                 // Adjust a negative desiredVerticalSpeed for Low Gravity worlds to avoid limiting it to a very small number when far away vertically.
                 if ((Core.Landing.g < Core.Landing.LOW_GRAVITY) && (Core.Landing.increaseVertical == false) && desiredVerticalSpeed < 0 && VesselState.altitudeTrue >= 25)
                 {
-                    desiredVerticalSpeed = Math.Min(desiredVerticalSpeed, -75.0*Mathf.Clamp01((float)(VesselState.altitudeTrue-25.0)/1500.0f));
+                    desiredVerticalSpeed = Math.Min(desiredVerticalSpeed, -175.0*Mathf.Clamp01((float)(VesselState.altitudeTrue-25.0)/1500.0f));
                 }
 
                 // Get the Horizontal distance to target. This will be used to calculate the horizontal speed.
-                double hTargetError = Core.Landing.getHDistanceToTarget();
+                double hTargetError = Core.Landing.targetingResult.hTargetError;
 
                 // Get Horizontal direction vector towards the target. This will be combined later with
                 // the vertical vector to get the thrust direction.
-                Vector3d courseCorrection = Core.Landing.getHDirectionToTarget();
+                Vector3d courseCorrection = Core.Landing.targetingResult.horizontalVec.normalized;
 
                 // Using the current horizontal velocity and desired horizontal velocity calculate the desired
                 // horizontal thrust vector.  An velocity herror vector will be calculated.
@@ -407,23 +524,21 @@ namespace MuMech
 
                 // Set the desired vertical speed - it can be overriden to achieve suborbital flight
                 setVerticalSpeed(ref desiredVerticalSpeed, ref hTargetError, ref ratio, ref minverror, ref maxverror);
+                double vError = desiredVerticalSpeed - VesselState.speedVertical;
 
                 // Set the desired Horizontal Velocity to reach target. Error to subtract the vessels current horizontal velocity.
                 double hCorrectionAngle = setHorizontalSpeed(out Vector3d desiredHorizontalVel, out Vector3d herror, ref hTargetError, ref ratio, ref courseCorrection);
 
-                // Set the thrust based on primarily vertical herror, with horizontal as an alternate for thrust calculation when vertical is not needed.
-                vCorrectionAngle = setThrustAndVerticalAngle(out double verror, ref desiredVerticalSpeed, ref herror, ref desiredHorizontalVel, ref hTargetError, ref minverror, ref maxverror);
-
                 // Set horizontal vector based on positive vertical vector: can be suborbital or local vertical increase
                 if (Core.Landing.increaseVertical == true)
                 {
-                    setSubOrbitalHorizontal(ref herror, ref hCorrectionAngle);
+                    setSubOrbitalHorizontal(ref desiredHorizontalVel, ref herror);
                 }
 
                 // Set thrust vector based on vertical and horizontal inputs
-                setThrustVector(ref desiredThrustVector, herror, hCorrectionAngle, desiredVerticalSpeed, verror);
+                setThrustVector(ref hTargetError, ref desiredThrustVector, ref desiredHorizontalVel, herror, hCorrectionAngle, ref desiredVerticalSpeed, vError);
 
-                // This is a long distance target requireing sub orbital targeting
+                // This is a long distance target requiring sub orbital targeting
                 if ((hCurrentError > 0) && (errStep > Ascend2Target.Disabled) && (errStep < Ascend2Target.Completed))
                 {
                     TargetSubOrbital(ref desiredThrustVector);
@@ -434,11 +549,14 @@ namespace MuMech
                 {
                     stopIncrease = false;
                     Core.Landing.increaseVertical = false; // max ratio is less than max ratio  - no need to increase altitude.
+                    Debug.Log("stopIncrease: " + hCurrentError.ToString("F1") + ", " + ratio.ToString("F2"));
 
                     // If in range of suborbital target then do retro burn.
-                    if ((Core.Landing.g > Core.Landing.LOW_GRAVITY) && (((hCurrentError > 0) && (hCurrentError < (Core.Landing.POST_TARGET_THRESHOLD*4)))
-                        || (VesselState.orbitPeA >= 9000)) )
+                    if (((Core.Landing.g > Core.Landing.LOW_GRAVITY) && (hTargetError > Core.Landing.POST_TARGET_THRESHOLD))
+                        || (VesselState.orbitPeA >= 9000) )
                     {
+                        trace += 'f';
+                        errStep = Ascend2Target.FineTune;
                     }
 
                     // Otherwise use move to target to get there.
@@ -475,11 +593,19 @@ namespace MuMech
                 {
                     if (ratio > maxRatio)
                     {
-                        desiredVerticalSpeed = Math.Max(2.0, (ratio - maxRatio) * (1 + hTargetError / ASCENT_H_DISTANCE_DIVISOR));
-                        if ((Math.Abs(VesselState.orbitApA) > subOrbitalApA) && (VesselState.altitudeTrue> ASCENT_AOA_MIN_ALT)) desiredVerticalSpeed = 0;
+                        double vFrac = (MainBody.atmosphere == true )? 1.0:0.2;
+                        desiredVerticalSpeed = Math.Min(vFrac * Core.Landing.GetCircularOrbitSpeed(VesselState.altitudeTrue, MainBody), Math.Max(2.0, (ratio - maxRatio) * (1 + hTargetError / ASCENT_H_DISTANCE_DIVISOR)));
+                        if ((Math.Abs(VesselState.orbitApA - Vessel.terrainAltitude) > Math.Min(1.2 * hTargetError, subOrbitalApA)) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
+                        {
+                            desiredVerticalSpeed = 0;
+                        }
                         ignoreLandingCounter = 0; // reset ignore landing count to allow start from a landing
                     }
-                    else stopIncrease = true; // Trigger STOP vertical increase
+                    else
+                    {
+                        desiredVerticalSpeed = 2.0; // give it a little boost to get going and avoid stalling at low altitude with low vertical speed.
+                        if (VesselState.altitudeTrue > 10) stopIncrease = true; // Trigger STOP vertical increase
+                    }
                 }
                 else
                 {
@@ -538,30 +664,44 @@ namespace MuMech
                 // If target within reach then avoid changing the horizontal velocity.
                 Vector3d hSurfaceVelocity = Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
                 if ((Core.Landing.g > Core.Landing.LOW_GRAVITY) && (VesselState.altitudeTrue > H_SUBORBITAL_ALTITUDE_THRESHOLD_CONSTANT) && 
-                    (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT) && (ratio > maxRatio))
+                    (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT) && (ratio > 0.5*maxRatio))
                 {
-                    if (Core.Landing.PredictionReady)
+                    // Set horizontal velocity to reach predicted target
+                    // Use max expected velocity and scale it based on  
+                    double maxHorizontalSpeed;
+
+                    hCurrentError = Core.Landing.targetingResult.distanceToTarget;
+                    if (errStep == Ascend2Target.Disabled)
                     {
-                        double _hCurrentError = Vector3d.Distance(Core.Target.GetPositionTargetPosition(), Core.Landing.LandingSite);
-                        if (Double.IsNaN(_hCurrentError) || Double.IsInfinity(_hCurrentError) || _hCurrentError < 4)
+                        maxHorizontalSpeed = Math.Min(hCurrentError * Core.Landing.g / 70.0, Math.Sqrt(hTargetError * 2 * maxHThrust));
+                        errStep++; trace += ((int)errStep).ToString(); // Will execute fine tune to far target 
+                    }
+                    else if (errStep == Ascend2Target.InitialBurn)
+                    {
+                        maxHorizontalSpeed = Core.Landing.GetCircularOrbitSpeed(VesselState.altitudeTrue, MainBody);
+
+                        if (hCurrentError < 0.1 * hTargetError)
                         {
-                            // don't set it.
+                            if (_subOrbitalApA == 0)
+                            {
+                                _subOrbitalApA = VesselState.orbitApA;
+                            }
                         }
                         else
                         {
-                            hCurrentError = _hCurrentError;
-                            if (errStep == Ascend2Target.Disabled)
-                            {
-                                errStep++; trace += ((int)errStep).ToString(); // Will execute fine tune to far target 
-                            }
+                            _subOrbitalApA = 0;
                         }
                     }
+                    else
+                    {
+                        maxHorizontalSpeed = Math.Min(hCurrentError * Core.Landing.g / 70.0, Math.Sqrt(hTargetError * 2 * maxHThrust));
+                    }
 
-                    // Set horizontal velocity to reach predicted target
-                    // Use max expected velocity and scale it based on  
-                    double maxHorizontalSpeed = Math.Min(hCurrentError * Core.Landing.g / 70.0, Math.Sqrt(hTargetError * 2 * maxHThrust));
 
-                    if (Core.Landing.increaseVertical == true) _hCorrectionUpAngle = 0.005;
+                    if (Core.Landing.increaseVertical == true)
+                    {
+                        _hCorrectionUpAngle = (MainBody.atmosphere == true) ? 0.005 : 0.05;
+                    }
                     else
                     {
                         // If ratio is large at high altitude going fast then check to see if we need to slow down
@@ -569,7 +709,7 @@ namespace MuMech
                         {
                             double pitchAngle = 30;//90.0 - Vector3d.Angle(VesselState.surfaceVelocity, VesselState.up);
                             double stoppingDistance = Math.Pow(VesselState.speedSurfaceHorizontal, 2) / (2 * VesselState.limitedMaxThrustAccel * Math.Abs(Math.Cos(pitchAngle * UtilMath.Deg2Rad)));
-                            double rangeToTarget = Core.Landing.getHDistanceToTarget();
+                            double rangeToTarget = Core.Landing.targetingResult.hTargetError;
 
                             if (stoppingDistance < rangeToTarget)
                             {
@@ -583,7 +723,7 @@ namespace MuMech
                     }
 
                     desiredHorizontalVel = maxHorizontalSpeed * courseCorrection.normalized;
-                    herror = desiredHorizontalVel - Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
+                    herror = desiredHorizontalVel - hSurfaceVelocity;
                 }
 
                 // Use default method to calculate horizontal velocity
@@ -614,7 +754,7 @@ namespace MuMech
                         {
                             double pitchAngle = 90.0 - Vector3d.Angle(VesselState.surfaceVelocity, VesselState.up);
                             double stoppingDistance = System.Math.Pow(VesselState.speedSurfaceHorizontal, 2) / (2 * VesselState.limitedMaxThrustAccel * Math.Abs(Math.Cos(pitchAngle * UtilMath.Deg2Rad)));
-                            double rangeToTarget = Core.Landing.getHDistanceToTarget();
+                            double rangeToTarget = Core.Landing.targetingResult.hTargetError;
 
                             // If stopping distance is less than range to target then make sure thrust is maxed out reducing
                             // the max allowed thrust, otherwise allow to operate normally.
@@ -643,27 +783,50 @@ namespace MuMech
                 return Math.Max(0, Math.Min(_hCorrectionUpAngle, baseGain * H_CORRECTION_ANGLE_CONSTANT * herror.magnitude ));
             }
 
-            public void setSubOrbitalHorizontal(ref Vector3d herror, ref double hCorrectionAngle)
+            public void setSubOrbitalHorizontal(ref Vector3d desiredHorizontalVel, ref Vector3d herror)
             {
+                Vector3d hSurfaceVelocity = Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
+
                 // If vertical increase is enabled then disable horizontal angle at small altitude.
-                if (VesselState.altitudeTrue < 25.0 || emergency == true) // TODO - account for bottom of craft
+                if (VesselState.altitudeTrue < 35.0 || emergency == true) 
                 {
-                    hCorrectionAngle = vCorrectionAngle * 0.1;
+                    herror *= 0.1;
+                    desiredHorizontalVel = herror + hSurfaceVelocity;
                 }
 
                 else if (((errStep == Ascend2Target.Disabled) || (hCurrentError > 0)))
                 {
-                    hCorrectionAngle = hMinAngle; // Always have some angle towards toward
-
                     // Eve      35k alt   atmos density = 125 g/m^3   drag = 30 m/s^2   - FAIL
                     // kerbin   35k alt   atmos density = 2.2 g/m^3   drag = 1.3 m/s^2  - PASS
                     // kerbin 17.5k alt   atmos density =  66 g/m^3 - start of tilt.
                     // kerbin    0k alt   atmos density = 1.2 kg/m^3
                     // for atmospheric planets we taper starting at a specific altitude and increase tilt at higher altitudes
                     // Also qualify it with a minimum vertical velocity before we start tilting.
-                    if (MainBody.atmosphere == true && VesselState.atmosphericDensityGrams < 76.0) // 76 <= 66
+                    if (MainBody.atmosphere == true)
                     {
-                        if (tiltDelta < 0.1) tiltDelta = MainBody.atmosphereDepth - VesselState.altitudeASL;
+                        double orig_hvel = desiredHorizontalVel.magnitude - 2.0;
+                        desiredHorizontalVel = desiredHorizontalVel.normalized * 2.0; // 2 ft/sec is the minimum horizontal speed moving towards target.
+
+                        if (VesselState.atmosphericDensityGrams < 76.0)  // 76 <= 66
+                        {
+                            if (tiltDelta < 0.1) tiltDelta = MainBody.atmosphereDepth - VesselState.altitudeASL;
+                            else if (VesselState.speedVertical > Core.Landing.g * 2 * 28)   // 28<=30<=20(too shallow)<=30
+                            {
+                                if (startTiltAlt < 0.1) startTiltAlt = VesselState.altitudeASL;
+                            }
+
+                            if ((startTiltAlt >= 0.1) && (VesselState.altitudeASL > startTiltAlt))
+                            {
+                                desiredHorizontalVel = desiredHorizontalVel.normalized * (2.0 + orig_hvel * Mathf.Clamp01((float)((VesselState.altitudeASL - startTiltAlt) / tiltDelta)));
+                            } // else - dont add any tilt
+                        }
+                    }
+                    else
+                    {
+                        double orig_hvel = desiredHorizontalVel.magnitude;
+                        desiredHorizontalVel = 0.2*desiredHorizontalVel; // 20% is the minimum horizontal speed moving towards target in space - allows to get out of vertical limit cycle and move towards target.
+
+                        if (tiltDelta < 0.1) tiltDelta = Math.Max(500, Math.Abs(Core.Landing.TargetAltitude - VesselState.altitudeASL));
                         else if (VesselState.speedVertical > Core.Landing.g * 2 * 28)   // 28<=30<=20(too shallow)<=30
                         {
                             if (startTiltAlt < 0.1) startTiltAlt = VesselState.altitudeASL;
@@ -671,11 +834,11 @@ namespace MuMech
 
                         if ((startTiltAlt >= 0.1) && (VesselState.altitudeASL > startTiltAlt))
                         {
-                            hCorrectionAngle = Math.Min(hMinCAngle, hCorrectionAngle + 10 * Mathf.Clamp01((float)((VesselState.altitudeASL - startTiltAlt) / tiltDelta)));
+                            desiredHorizontalVel = orig_hvel*desiredHorizontalVel.normalized * (0.2 + 0.8*Mathf.Clamp01((float)((VesselState.altitudeASL - startTiltAlt) / tiltDelta)));
                         } // else - dont add any tilt
                     }
 
-                    herror = herror.normalized; // normalizing allows control override
+                    herror = desiredHorizontalVel - hSurfaceVelocity;
                 } // else - no atmosphere - leave horizontal vector unmodified.
             }
 
@@ -737,8 +900,10 @@ namespace MuMech
                 // Once stopped a secondary burn will be performed to reach target
                 if (suppressThrottle == 0)
                 {
-                    if (Math.Abs(VesselState.orbitApA) >= subOrbitalApA)
+                    double checkApa = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
+                    if (Math.Abs(VesselState.orbitApA) >= checkApa)
                     {
+                        Debug.Log("checkApa: " + checkApa.ToString("F1"));
                         overrideAttitude = true; // with atmosphere
                         if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
                         {
@@ -754,8 +919,7 @@ namespace MuMech
                     // Hold on until we get to point where we can burn to target.
                     if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
                     {
-                        bool warpReady = ((Vector3.Scale(Core.vessel.angularVelocity, pitchYawVector).magnitude < 0.001) && (Core.Attitude.attitudeAngleFromTarget() < 5));
-                        if (warpReady && Core.Node.Autowarp && (decelerationStartTime > 0))
+                        if (Core.Node.Autowarp && (decelerationStartTime > 0))
                         {
                             Core.Warp.WarpToUT(decelerationStartTime + VesselState.time);
                         }
@@ -783,13 +947,6 @@ namespace MuMech
                     }
                 }
 
-                // Override throttle based on distance to target - also scale based on limited max thrust acceleration.
-                if (suppressThrottle != 1)
-                {
-                    Vessel.ctrlState.mainThrottle = Core.Thrust.TargetThrottle
-                        = Mathf.Max(0.01f, Mathf.Clamp01((float)_hCurrentError / 600000.0f) * (float)(VesselState.limitedMaxThrustAccel / VesselState.maxThrustAccel));
-                }
-
                 //If attitude override enabled then set it
                 if (overrideAttitude == true)
                 {
@@ -813,150 +970,6 @@ namespace MuMech
                 {
                     override_ratio = 0.75;
                 }
-            }
-
-            public double setThrustAndVerticalAngle(out double verror, ref double desiredVerticalSpeed, ref Vector3d herror, ref Vector3d desiredHorizontalVel, ref double hTargetError, ref float minverror, ref float maxverror)
-            {
-                verror = desiredVerticalSpeed - VesselState.speedVertical;
-                double deltaverror = verror - prevDeltaverror;
-                prevDeltaverror = verror;
-
-                // If in initial horizontal descent mode force horizontal control
-                if ( decStep == DecelerateSteps.IHorizontalDec )
-                {
-                    if ( herror.magnitude < 10 )
-                    {
-                        // Transition to initial vertical mode
-                        decStep = DecelerateSteps.IVerticalDec;
-                        hThrustIntegrateCount = H_THRUST_INTEGRATE_COUNT;
-                        hControlCounter = hThrustIntegrateCount;
-                    }
-                    else if (hControlCounter < hThrustIntegrateCount)
-                    {
-                        herror *= 1000 / herror.magnitude;
-                        hControlCounter = 2*H_THRUST_INTEGRATE_COUNT;
-                        hThrustIntegrateCount = H_THRUST_INTEGRATE_COUNT;
-                        velaccum = 0;
-                        vCorrectionAngle = 0; // while horizontal is being corrected disable vertical angle
-                        Vessel.ctrlState.mainThrottle = Core.Thrust.TargetThrottle = lastHorizontalThrust; // reuse last horizontal thrust
-                        lastHorizontalThrust = 0;
-                    }
-                    else if (hControlCounter == hThrustIntegrateCount)
-                    {
-                        herror *= 1000 / herror.magnitude;
-                        hControlCounter = 2 * H_THRUST_INTEGRATE_COUNT;
-                        hThrustIntegrateCount = H_THRUST_INTEGRATE_COUNT;
-                    }
-                    else
-                    {
-                        herror *= 1000 / herror.magnitude;
-                    }
-                }
-
-                // Horizontal Velocity Control is only activated after a integration delay.
-                if (hControlCounter > hThrustIntegrateCount)
-                {
-                    hControlCounter--;
-
-                    // This provides a small amount of vertical control - mainly during descent
-                    // update vertical correct based rate of vertical velocity error. If vertical speed error is growing then increase the vertical
-                    // vector, but only in the negative direction. Once the verror is decreasing than leave it alone.
-                    if ( (verror > 0) && (deltaverror > 0) )
-                    {
-                        vCorrectionAngle = Math.Min(0.2, vCorrectionAngle + deltaverror / 4000.0);
-                    }
-
-                    // Only exclude desired horizontal velocity when vertical velocity is being maintained in orbit - this has the effect of correcting 
-                    // plane to target . Otherwise, allow total horizontal velocity reduction control.
-                    if ((desiredVerticalSpeed >= 0.0) && (VesselState.orbitPeA > 0.9 * VesselState.orbitApA))
-                    {
-                        herror = -Vector3d.Exclude(desiredHorizontalVel, Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity));
-                        pidVelocity(0.0, (herror.magnitude > 4) ? -herror.magnitude : 0); // Only correct if the herror is large.
-                    }
-                    else
-                    {
-                        // only calculate horizontal angle.
-                        double angle = Vector3d.Angle(Vector3d.Exclude(VesselState.up, VesselState.forward), desiredHorizontalVel);
-                        pidVelocity(0.0, ((angle <= 10) || (angle >= 170)) ? -0.5 * herror.magnitude : 0); // Correct horizontal velocity.
-                    }
-                    lastHorizontalThrust = Core.Thrust.TargetThrottle; // preserve thrust when testing for vertical to avoid thrust gap
-                }
-                else
-                {
-                    if ((verror < minverror) || (verror > maxverror)) // hysterisis to minimize changing vertical direction
-                    {
-                        double sign = Math.Sign(vCorrectionAngle);
-                        vCorrectionAngle = Math.Max(-1.0, Math.Min(1.0, vCorrectionAngle + verror / 4000.0));
-                        if (sign != Math.Sign(vCorrectionAngle))
-                        {
-                            vCorrectionAngle -= (Core.Landing.g <= Core.Landing.LOW_GRAVITY) ? 0.2 * sign : 0.1 * sign;
-                        }
-                        velaccum = 0;
-                    }
-
-                    if (Core.Landing.g <= Core.Landing.LOW_GRAVITY)
-                    {
-                        if ((hTargetError < hCloseLimit) && (VesselState.altitudeTrue < 15))
-                        {
-                            vCorrectionAngle = 0.2; // Set vertical component for lander to be upright
-                        }
-                    }
-
-                    // If within the atmosphere or close to the ground in high gravity try to point up to avoid collision issues 
-                    else
-                    {
-                        if ((hTargetError < hCloseLimit))
-                        {
-                            vCorrectionAngle = (VesselState.altitudeTrue < 15) ? 0.1 : 0.2; // point up - making this small allows horizontal angle to have more effect
-                        }
-                        else
-                        {
-                            double vMaxCorrection = 0.1; // 0.1(20241207)<=0.3(20241125)<=0.1 point up - a larger vertical component filters out large horizontal change;
-                            if ((VesselState.altitudeASL < MainBody.RealMaxAtmosphereAltitude()) ||
-                                 ((MainBody.atmosphere == false) && (Core.Landing.g > Core.Landing.EARTH_GRAVITY * 0.4)) ||
-                                 (VesselState.altitudeTrue < 500))
-                            {
-                                vMaxCorrection = 0.5; // point up - a larger vertical component filters out large horizontal change
-                            }
-
-                            if (vCorrectionAngle < vMaxCorrection) vCorrectionAngle = vMaxCorrection;
-                        }
-                    }
-
-                    // Use local PI control - more damped and works over wide range of parameters
-                    if (vCorrectionAngle >= 0)
-                    {
-                        // Only applies thrust if need to increase vertical speed
-                        pidVelocity(desiredVerticalSpeed, VesselState.speedVertical, true);
-                    }
-                    else
-                    {
-                        // Only applies thrust if need to decrease vertical speed
-                        pidVelocity(-desiredVerticalSpeed, -VesselState.speedVertical);
-                    }
-
-                    if ((Core.Thrust.TargetThrottle < 0.001) && (hTargetError > hCloseLimit))
-                    {
-                        vCorrectionAngle = 0; // while horizontal is being corrected disable vertical angle
-                        hControlCounter++; // No vertical control needed - integrate to allow horizontal thrust.
-                        if (hControlCounter > hThrustIntegrateCount)
-                        {
-                            hControlCounter += H_THRUST_INTEGRATE_COUNT;
-                            hThrustIntegrateCount = H_THRUST_INTEGRATE_COUNT;
-                            velaccum = 0;
-                            vCorrectionAngle = 0; // while horizontal is being corrected disable vertical angle
-                            Vessel.ctrlState.mainThrottle = Core.Thrust.TargetThrottle = lastHorizontalThrust; // reuse last horizontal thrust
-                            lastHorizontalThrust = 0;
-                        }
-                    }
-                    else
-                    {
-                        hControlCounter = 0;
-                        if (hThrustIntegrateCount > H_THRUST_INTEGRATE_COUNT) hThrustIntegrateCount--;
-                    }
-                }
-
-                return vCorrectionAngle;
             }
             
             // If there is any reasone why we should not allow disabling thrust due to attitude divergence
@@ -1056,7 +1069,7 @@ namespace MuMech
 
                 // Move to target strategy
                 move(ref desiredSpeed, ref desiredThrustVector);
-                if ( errStep == Ascend2Target.FineTune )
+                if ( (errStep >= Ascend2Target.FineTune) && (errStep < Ascend2Target.Completed))
                 {
                     Core.Thrust.ThrustOff();
                     if (Core.Landing.LandingType == 1)
@@ -1077,6 +1090,10 @@ namespace MuMech
                 // Set Debug Vectors as horizontal and vertical components of desired thrust vector
                 MechJebModuleDebugArrows.debugVector = Vector3d.Dot(lastDesiredThrustVector, Vessel.upAxis) * Vessel.upAxis;
                 MechJebModuleDebugArrows.debugVector2 = lastDesiredThrustVector - MechJebModuleDebugArrows.debugVector;
+                if (MechJebModuleDebugArrows.debugVector.magnitude < 0.01)
+                {
+                    MechJebModuleDebugArrows.debugVector *= 1000;
+                }
                 if (MechJebModuleDebugArrows.debugVector2.magnitude < 0.01)
                 {
                     MechJebModuleDebugArrows.debugVector2 *= 1000;
@@ -1087,36 +1104,27 @@ namespace MuMech
                 if ((suppressThrottle == 1) || (checkWarp == true)) 
                 {
                     Core.Thrust.ThrustOff();
-                    velaccum = 0;
                 }
                 else
                 {
-                    if ( (Core.Attitude.attitudeAngleFromTarget() > throttleAngle) && (allowDisableThrust(desiredSpeed) == true) ) // 30<=40(overcorrect)<=30<=15(jittery)<=30<=5<=15
+                    if ( (attitudeAngleFromThrust > throttleAngle) && (allowDisableThrust(desiredSpeed) == true) )
                     {
                         Core.Thrust.RequestActiveThrottle(0);
-                        velaccum = 0;
-                    }
-
-                    if (Core.Thrust.TargetThrottle > RETROBURN_RESET_THROTTLE_THRESH) ThrottleCount = RETROBURN_THROTTLE_COUNT;
-                    else if (ThrottleCount > 0) ThrottleCount--;
-
-                    if ((ThrottleCount > 0) && (Core.Thrust.TargetThrottle < RETROBURN_RESET_THROTTLE_THRESH))
-                    {
-                        Vessel.ctrlState.mainThrottle = Core.Thrust.TargetThrottle = (float)RETROBURN_RESET_THROTTLE_THRESH;
-                        velaccum = 0;
                     }
                 }
 
-                if (double.IsNaN(desiredSpeed)) return new MoveToTarget(Core);
+                if (double.IsNaN(desiredSpeed)) return new MoveToTarget2(Core);
                 return this;
             }
 
             public override AutopilotStep OnFixedUpdate()
             {
+                Core.Landing.targetingResult.update(); // Update used in OnFixedUpdate and Drive so that it is updated at the right time for both.
+
                 double pitchAngle = 90.0 - Vector3d.Angle(VesselState.surfaceVelocity, VesselState.up);
                 double hStoppingDistance = Math.Pow(VesselState.speedSurfaceHorizontal, 2) / (2 * VesselState.limitedMaxThrustAccel*Math.Abs(Math.Cos(pitchAngle * UtilMath.Deg2Rad)));
                 double vStoppingDistance = (VesselState.speedVertical<0) ? Math.Pow(VesselState.speedVertical, 2) / (2 * (VesselState.limitedMaxThrustAccel * Math.Abs(Math.Sin(pitchAngle * UtilMath.Deg2Rad)) - VesselState.localg) ):0;
-                double hTargetError = Core.Landing.getHDistanceToTarget();
+                double hTargetError = Core.Landing.targetingResult.hTargetError;
                 float ratio = (float)(hTargetError / VesselState.altitudeTrue);
 
                 if ((hTargetError<(1.5*hStoppingDistance) ) ||
@@ -1137,7 +1145,7 @@ namespace MuMech
                     Core.Warp.WarpRegularAtRate((float)Math.Min(VesselState.altitudeASL / (6 * velocityGuess), (Orbit.period / 6)));
                     warpOn = true;
                 }
-                else if ((warpOn == true) || !MuUtils.PhysicsRunning())
+                else if ((warpOn == true) /*|| !MuUtils.PhysicsRunning()*/)
                 {
                     Core.Warp.MinimumWarp();
                     warpOn = false;

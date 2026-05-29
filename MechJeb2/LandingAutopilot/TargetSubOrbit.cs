@@ -2,6 +2,7 @@
 using KSP.Localization;
 using MuMech.LandingAutopilot;
 using UnityEngine;
+using static MuMech.RCSSolver;
 
 namespace MuMech
 {
@@ -15,8 +16,7 @@ namespace MuMech
             private const double OVERSHOOT_ANGLE_FRACTION = 0.9; // Small margin to avoid losing vertical control
             private const double LIMITED_MAX_THRUST_G_RATIO = 3.125; // this is multiplied with Mainbody g
             private const int H_THRUST_INTEGRATE_COUNT = 20; // Integration count before allowing horizontal thrust control
-            private const double MIN_TARGET_ALTITUDE = 3500; // Minimum target altitude to consider when calculating optimal deorbit altitude - this is to avoid very low gate altitudes that can cause issues with the landing guidance.
-            private const double TARGET_FAR_DISTANCE_THRESHOLD = 50000; // Distance to target at which to switch from prograde/retrograde burn to fine lateral control to target before final landing burn. This is used to avoid overshooting the target when doing a prograde or retrograde burn and allow for more precise targeting of the final landing burn.
+            private const double TARGET_FAR_DISTANCE_THRESHOLD = 2.5*50000; // Distance to target at which to switch from prograde/retrograde burn to fine lateral control to target before final landing burn. This is used to avoid overshooting the target when doing a prograde or retrograde burn and allow for more precise targeting of the final landing burn.
             private const double TARGET_DISTANCE_THRESHOLD = 300; // Final Distance to target at which to switch to final landing burn.   
             private const double DELTA_TARGET_ALT_THRESHOLD = 300; // Threshold for switching between prograde and retrograde burn when close to target - if the target altitude is above the current altitude by this amount then we will do a prograde burn, if it's below then we will do a retrograde burn, if it's close then we will do a lateral burn to fine tune the approach to target before the final burn.
             private double hFarCorrectionAngle;             // far horizontal distance overshoot angle
@@ -27,12 +27,12 @@ namespace MuMech
             private Vector3d dvSolution = Vector3d.zero;
             private Vector3d deltaVApplied = Vector3d.zero;
             private Vector3d thrustDir = Vector3d.zero;
-            private bool executingBurn = false;
-            private double dvSolMag = 0;       // Current DV Solution magnitude
-            private double TargetAltitude = 0; // Set in constructor
-            private double MinDeltaV = 0.5;    // Exit once below this deltav.
-            private double radial = 0;
-            private bool thrustApplied = false;
+            //private bool executingBurn = false;
+            //private double dvSolMag = 0;       // Current DV Solution magnitude
+
+            //private double MinDeltaV = 0.5;    // Exit once below this deltav.
+            //private double radial = 0;
+            //private bool thrustApplied = false;
             // The steepness controls the ratio curvature - When horizontal distance to target is small we
             // dont want to modify the desired vertical velocity.
             // When horizontally far from target we want to maintain altitude, but slower allow vertical drop
@@ -54,30 +54,15 @@ namespace MuMech
             private double distanceToTarget;
             private double tUT;
 
+            private bool throttleOn = false;
+            private int throttleCount = 0;
 
             public TargetSubOrbit(MechJebCore core) : base(core)
             {
                 Core.Warp.MinimumWarp();
                 _predictor = Core.GetComputerModule<MechJebModuleLandingPredictions>();
                 Core.Thrust.ThrustOff();
-                radial = Core.Landing.RadialPercent / 100.0;
-                if (MainBody.atmosphere == true)
-                {
-                    TargetAltitude = 0.5 * MainBody.atmosphereDepth;
-                }
-                else
-                {
-                    TargetAltitude = Math.Max(5000.0, 0.023 * MainBody.Radius);
-                }
-
-                if (Core.Landing.TargetAltPercent <= 0)
-                {
-                    Core.Landing.TgtAlt = ComputeOptimalDeorbitAltitude();
-                }
-                else
-                {
-                    Core.Landing.TgtAlt = Core.Landing.TargetAltPercent * TargetAltitude / 100.0;
-                }
+                //radial = Core.Landing.RadialPercent / 100.0;
 
                 double tempFactor = 20.0; // 20<=10(baseline)<=100<=1000 Allow large angles - if angles are too small there will not be enough horizontal thrust
                 double baseGainLo = 0.03136 / (Core.Landing.g); // 0.03136<=0.1568 <= 0.196
@@ -105,9 +90,12 @@ namespace MuMech
                 if (ratio == 0)                    
                 {
                     ratio = Core.Landing.getHDistanceToTarget() / VesselState.altitudeTrue;
-                    if ( (ratio < 0.9 * Core.Landing.maxRatio) && (VesselState.altitudeTrue <= 2 * TargetAltitude) )
+                    if ( ((ratio < 0.4) && (VesselState.altitudeTrue <= 1.1*Core.Landing.TargetAltitude)) ||
+                        (VesselState.altitudeTrue <= 5000) )
                     {
-                        return new DecelerationBurn(Core);
+                        Debug.Log("exit TargetSubOrbit to MoveToTarget2");
+                        Core.Thrust.ThrustOff();
+                        return new MoveToTarget2(Core);
                     }
                 }
 
@@ -116,7 +104,7 @@ namespace MuMech
                     double desiredVerticalSpeed = 0; // for now just set to zero vertical velocity
 
                     // Calculate Thrust Amount and Direction
-                    MoveToTarget(ref desiredVerticalSpeed, ref thrustDir);
+                    SetPathToTarget(ref desiredVerticalSpeed, ref thrustDir);
 
                     // Desired thrust direction in inertial frame
                     Quaternion targetRot = Quaternion.LookRotation(thrustDir.normalized, Vessel.up)
@@ -128,11 +116,24 @@ namespace MuMech
                     {
                         Core.Thrust.RequestActiveThrottle(0);
                         velaccum = 0;
+                        if (throttleOn == true)
+                        {
+                            throttleOn = false;
+                            throttleCount++;
+                            Debug.Log("step:throttleCount:" + step+":" + throttleCount);
+                        }
+                    }
+                    else if ( lastHorizontalThrust > 0)
+                    {
+                        throttleOn = true;
                     }
 
                     return this;
                 }
 
+                Core.Thrust.ThrustOff();
+                return new LandingBurn(Core);
+#if pedro
                 // If thrust was applied in previous period then account for it.
                 if (thrustApplied == true)
                 {
@@ -188,16 +189,16 @@ namespace MuMech
                         Core.Thrust.RequestActiveThrottle(0);
                     }
                 }
-
                 return this;
+#endif
             }
 
-            // MoveToTarget 
+            // SetPathToTarget 
             /// <summary>
             /// </summary>
             /// <param name="desiredVerticalSpeed"></param>
             /// <param name="desiredThrustVector"></param>
-            public void MoveToTarget(ref double desiredVerticalSpeed, ref Vector3d desiredThrustVector)
+            public void SetPathToTarget(ref double desiredVerticalSpeed, ref Vector3d desiredThrustVector)
             {
                 // Get Target position in BODY-FIXED frame
                 Core.Landing.ClosestPointToSurfaceTarget(out Vector3d closestPos, out tUT, out distanceToTarget, out Vector3d surfaceVel);
@@ -273,8 +274,9 @@ namespace MuMech
                         forceHoriz = true; // Force horizontal thrust
                         desiredHorizontalVel = Vector3d.zero;
                         herror =  gainCancelHVelocity * crossrangeVec; // Add Cross range to horizontal error
-                        if (crossrangeVec.magnitude < 500)
+                        if ((throttleCount >= 3)||(crossrangeVec.magnitude < 500))
                         {
+                            throttleCount = 0;
                             if (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD)
                                 step = Step.STATE_RETROGRADE;
                             else if (deltaHeight > DELTA_TARGET_ALT_THRESHOLD)
@@ -301,11 +303,12 @@ namespace MuMech
                             // Reduce the errror as we approach periapsis to avoid over correction
                             herror = 20 * herror * Mathf.Clamp01((float)((0.5 * VesselState.orbitApA - VesselState.orbitPeA) / (0.01 * VesselState.orbitApA))); // stop down range correction at periapsis = 0 and higher
 
-                            Debug.Log(" prograde deltaHeight:" + deltaHeight);
+                            Debug.Log(" prograde deltaHeight:" + deltaHeight + "," + distanceToTarget);
 
                             // Switch to fine lateral control when close to target or if periapsis is above half target altitude
-                            if ((Orbit.PeA > 0.5 * TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD)))
+                            if ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD)))
                             {
+                                throttleCount = 0;
                                 step = Step.STATE_LATERAL_FINE;
                             }
                             // Calculate horizontal correction angle using horizontal herror.
@@ -325,10 +328,12 @@ namespace MuMech
                             Debug.Log("retrograde deltaHeight:" + deltaHeight);
 
                             herror = deltaHeight * downrangeVec.normalized;
-                            Core.Thrust.RequestActiveThrottle((float)dvSolution.magnitude);
+                            lastHorizontalThrust = (float)dvSolution.magnitude;
+                            Core.Thrust.RequestActiveThrottle(lastHorizontalThrust);
                             rc = 100; // we only want horizontal thrust here
-                            if (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD)
+                            if ((throttleCount >= 3) || (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD))
                             {
+                                throttleCount = 0;
                                 // Now will perform final correction step.
                                 step = Step.STATE_LATERAL_FINE;
                             }
@@ -342,8 +347,9 @@ namespace MuMech
                             herror = calculateHerror(ref closestPos, ref targetPos, ref distanceToTarget, ref surfaceVel);
                             Debug.Log("Lateral Fine HError Mag:" + distanceToTarget);
 
-                            if ((distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero) )
+                            if ((throttleCount >= 2) || (distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero) )
                             {
+                                throttleCount = 0;
                                 step = Step.STATE_CORRECT;
                             }
                             rc = 100; // we only want horizontal thrust here
@@ -398,8 +404,8 @@ namespace MuMech
                         herror = -Vector3d.Exclude(desiredHorizontalVel, Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity));
                         thrust = pidVelocity(0.0, (herror.magnitude > 4) ? -herror.magnitude : 0); // Only correct if the herror is large.
                     }
-                    Core.Thrust.RequestActiveThrottle((float)thrust);
-                    lastHorizontalThrust = (float)thrust; // preserve thrust when testing for vertical to avoid thrust gap
+                    lastHorizontalThrust = (float)thrust;
+                    Core.Thrust.RequestActiveThrottle(lastHorizontalThrust);
                 }
 
                 // Vertical Control - we want to blend it based on the horizontal error and vertical error. When herror is large we use max thrust and primarily control
@@ -454,7 +460,8 @@ namespace MuMech
                     }
                     else
                     {
-                        Core.Thrust.RequestActiveThrottle((float)verticalThrust); // set vertical thrust
+                        lastHorizontalThrust = (float)verticalThrust;
+                        Core.Thrust.RequestActiveThrottle(lastHorizontalThrust); // set vertical thrust
                         hControlCounter = 0;
                         if (hThrustIntegrateCount > H_THRUST_INTEGRATE_COUNT) hThrustIntegrateCount--;
                     }
@@ -486,40 +493,6 @@ namespace MuMech
                 Core.Thrust.Tmode = MechJebModuleThrustController.TMode.OFF;
                 Core.Thrust.TransKillH = false;
                 return (Math.Max(0, Math.Min(_limitedMaxThrustAccel, (gComp + PID_KP * (PID_KI * velaccum + verror))) / VesselState.maxThrustAccel));
-            }
-
-            public double ComputeOptimalDeorbitAltitude()
-            {
-                CelestialBody body = Vessel.mainBody;
-                Vector3d targetPos = Core.Target.GetPositionTargetPosition(); // Target position in body fixed frame
-
-                // --- Current orbital radius ---
-                Vector3d vesselPos = VesselState.CoM - body.position;
-                double r = vesselPos.magnitude;
-
-                // --- Circular orbital speed (shallow deorbit assumption) ---
-                double mu = body.gravParameter;
-                double vCirc = Math.Sqrt(mu / r);
-
-                // --- Local gravity at target ---
-                double g = mu / (targetPos.sqrMagnitude);
-
-                // --- Max thrust acceleration (fixed at 20 m/s^2) ---
-                double aMax = VesselState.limitedMaxThrustAccel;
-                double aNet = aMax - g;
-                if (aNet <= 0.0)
-                    return double.PositiveInfinity;
-
-                // --- Suicide-burn altitude (vertical-only model) ---
-                double hVertical = (vCirc * vCirc) / (2.0 * aNet);
-
-                // --- Horizontal scaling factor ---
-                double S = 0.035; // 0.035 <= 0.05
-
-                // --- Final optimal gate altitude ---
-                double hGate = Math.Max(MIN_TARGET_ALTITUDE, hVertical * S);
-
-                return hGate;
             }
         }
     }

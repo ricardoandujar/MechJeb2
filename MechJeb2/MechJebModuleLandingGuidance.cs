@@ -165,6 +165,8 @@ namespace MuMech
                 _predictor.limitChutesStage = Core.Landing.LimitChutesStage;
                 Core.Landing.RCSAdjustment =
                     GUILayout.Toggle(Core.Landing.RCSAdjustment, Localizer.Format("#MechJeb_LandingGuidance_checkbox4")); //Use RCS for small adjustment
+                Core.Landing.FlySafe =
+                    GUILayout.Toggle(Core.Landing.FlySafe, Localizer.Format("#MechJeb_LandingGuidance_checkbox10")); // Safe Descent Speed Policy
                 Core.Thrust.LimiterMinThrottleInfoItem(); //Toggle to prevent full engine shutdowns
 
                 GUIStyle noWrap = new GUIStyle(GUI.skin.label) { wordWrap = false };
@@ -196,13 +198,13 @@ namespace MuMech
                 }
                 if (Core.Landing.ZemH == 0)
                 {
-                    Core.Landing.ZemH = 8.5;
-                    Core.Landing.ZevH = -1.0;
+                    Core.Landing.ZemH = 8.0;
+                    Core.Landing.ZevH = -1.2;
                 }
                 if (Core.Landing.ZemV == 0)
                 {
-                    Core.Landing.ZemV = 6.0;
-                    Core.Landing.ZevV = -1.3;
+                    Core.Landing.ZemV = 5.0;
+                    Core.Landing.ZevV = -1.4;
                 }
 
                 // The following parameters are only for Ground Track Landing
@@ -249,6 +251,65 @@ namespace MuMech
                     Core.Landing.ZevV.Text = GUILayout.TextField(Core.Landing.ZevV.Text, GUILayout.Width(35));
                     GUILayout.EndHorizontal();
                 }
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("v 1:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug1.Text = GUILayout.TextField(Core.Landing.debug1.Text, GUILayout.Width(35));
+                GUILayout.Label(" 2:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug2.Text = GUILayout.TextField(Core.Landing.debug2.Text, GUILayout.Width(35));
+                GUILayout.Label(" 3:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug3.Text = GUILayout.TextField(Core.Landing.debug3.Text, GUILayout.Width(35));
+                GUILayout.Label(" 4:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug4.Text = GUILayout.TextField(Core.Landing.debug4.Text, GUILayout.Width(35));
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("v 5:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug5.Text = GUILayout.TextField(Core.Landing.debug5.Text, GUILayout.Width(35));
+                GUILayout.Label(" 6:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug6.Text = GUILayout.TextField(Core.Landing.debug6.Text, GUILayout.Width(35));
+                GUILayout.Label(" 7:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug7.Text = GUILayout.TextField(Core.Landing.debug7.Text, GUILayout.Width(35));
+                GUILayout.Label(" 8:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug8.Text = GUILayout.TextField(Core.Landing.debug8.Text, GUILayout.Width(35));
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("v 91:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug91.Text = GUILayout.TextField(Core.Landing.debug91.Text, GUILayout.Width(35));
+                GUILayout.Label(" 92:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug92.Text = GUILayout.TextField(Core.Landing.debug92.Text, GUILayout.Width(35));
+                GUILayout.Label(" 93:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug93.Text = GUILayout.TextField(Core.Landing.debug93.Text, GUILayout.Width(35));
+                GUILayout.Label(" 94:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug94.Text = GUILayout.TextField(Core.Landing.debug94.Text, GUILayout.Width(35));
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("v 95:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug95.Text = GUILayout.TextField(Core.Landing.debug95.Text, GUILayout.Width(35));
+                GUILayout.Label("v 96:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug96.Text = GUILayout.TextField(Core.Landing.debug96.Text, GUILayout.Width(35));
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("h 1:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug1h.Text = GUILayout.TextField(Core.Landing.debug1h.Text, GUILayout.Width(35));
+                GUILayout.Label(" 2:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug2h.Text = GUILayout.TextField(Core.Landing.debug2h.Text, GUILayout.Width(35));
+                GUILayout.Label(" 3:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug3h.Text = GUILayout.TextField(Core.Landing.debug3h.Text, GUILayout.Width(35));
+                GUILayout.Label(" 4:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug4h.Text = GUILayout.TextField(Core.Landing.debug4h.Text, GUILayout.Width(35));
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("h 5:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug5h.Text = GUILayout.TextField(Core.Landing.debug5h.Text, GUILayout.Width(35));
+                GUILayout.Label(" 6:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug6h.Text = GUILayout.TextField(Core.Landing.debug6h.Text, GUILayout.Width(35));
+                GUILayout.Label(" 7:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug7h.Text = GUILayout.TextField(Core.Landing.debug7h.Text, GUILayout.Width(35));
+                GUILayout.Label(" 8:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug8h.Text = GUILayout.TextField(Core.Landing.debug8h.Text, GUILayout.Width(35));
+                GUILayout.EndHorizontal();
 
                 //GuiUtils.SimpleTextBox("debug2", Core.Landing.debug2, "", 35);
                 //GuiUtils.SimpleTextBox("debug3", Core.Landing.debug3, "", 35);

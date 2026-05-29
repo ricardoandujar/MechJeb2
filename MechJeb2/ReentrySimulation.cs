@@ -934,7 +934,7 @@ namespace MuMech
     //you must be sure not to modify the IDescentSpeedPolicy object itself after passing it to the simulation.
     public interface IDescentSpeedPolicy
     {
-        double MaxAllowedSpeed(Vector3d pos, Vector3d surfaceVel);
+        double MaxAllowedSpeed(Vector3d pos, Vector3d surfaceVel, double terrainRadius = 0); // Update objects terrain radius if supplied
     }
 
     //Why do AbsoluteVector and ReferenceFrame exist? What problem are they trying to solve? Here is the problem.

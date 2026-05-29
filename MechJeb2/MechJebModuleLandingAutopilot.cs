@@ -22,20 +22,67 @@ namespace MuMech
     // -
     public class MechJebModuleLandingAutopilot : AutopilotModule
     {
+        public struct TargetingResult
+        {
+            public readonly MechJebCore Core;
+
+            public double tUT;
+            public double distanceToTarget;
+            public Vector3d closestPos;
+            public Vector3d surfaceVel;
+            public Vector3d targetPos;
+            public Vector3d downrangeVec;
+            public Vector3d crossrangeVec;
+            public Vector3d horizontalVec;
+            public double hTargetError;
+
+            public TargetingResult(MechJebCore core)
+            {
+                Core = core;
+
+                tUT = 0;
+                distanceToTarget = 0;
+                closestPos = Vector3d.zero;
+                surfaceVel = Vector3d.zero;
+                targetPos = Vector3d.zero;
+                downrangeVec = Vector3d.zero;
+                crossrangeVec = Vector3d.zero;
+                horizontalVec = Vector3d.zero;
+                hTargetError = 0;
+            }
+
+            public void update()
+            {
+                // Get Target position in BODY-FIXED frame
+                Core.Landing.ClosestPointToSurfaceTarget(out closestPos, out tUT, out distanceToTarget, out surfaceVel);
+                targetPos = Core.Target.GetPositionTargetPosition();
+                Core.Landing.GetRangeVectorsToSurfaceTarget(Core.part.vessel, Core.VesselState, targetPos, tUT, out downrangeVec, out crossrangeVec, out horizontalVec);
+                hTargetError = horizontalVec.magnitude;
+
+                Core.Landing._predictor.debug1MarkerRadius = 10; // GREEN
+                Core.Landing._predictor.debug1Lat = Core.vessel.mainBody.GetLatitude(closestPos);
+                Core.Landing._predictor.debug1Lon = Core.vessel.mainBody.GetLongitude(closestPos);
+                closestPos = closestPos - Core.vessel.mainBody.position; // Convert to body fixed frame for calculations
+            }
+        }
+
         public readonly double LOW_GRAVITY = 1.0;       // Any gravity lower than this is considered low gravity for landing purposes
         public readonly double EARTH_GRAVITY = 9.81;    // Standard Earth gravity in m/sec^2
         public readonly float BASE_STEEPNESS = 1400.0f;  // Base steepness value for the descent profile
         public static readonly float DEFAULT_BASE_SLOPE    = 0.6f;   // Default base slope for the descent profile
         public static readonly float DEFAULT_BASE_MINRATIO = 0.05f;  // Default base min ratio for the descent profile
-        public static readonly float DEFAULT_BASE_MAXRATIO = 1.55f;  // Default base max ratio for the descent profile
+        public static readonly float DEFAULT_BASE_MAXRATIO = 3.0f;   // Default base max ratio for the descent profile
         public static readonly float DEFAULT_DEORBIT_BURN_ANGLE = 90.0f; // Default angle of the deorbit burn
-        public readonly float POST_TARGET_THRESHOLD = 25000.0f;  // 25 km beyond target we switch to move to target
+        public readonly float POST_TARGET_THRESHOLD = 10000.0f;  // 10 km beyond target we switch to move to target
+        private const double MIN_TARGET_ALTITUDE = 3500; // Minimum target altitude to consider when calculating optimal deorbit altitude - this is to avoid very low gate altitudes that can cause issues with the landing guidance.
         private bool _deployedGears;  // Have we already deployed the landing gears?
         public  bool LandAtTarget;  // Are we landing at a position target?
         public bool UseOnlyMoveToTarget = false;  // If true we will not do a retro burn first, just go straight to move to target.
         public double g;  // Gravity of body at sea level
         public bool hop = false;  // Is this a hop landing? hop = true means we will be increasing vertical speed first.
         public bool increaseVertical = false;  // Are we currently increasing vertical speed?
+        public double TargetAltitude = 0; // Set in constructor
+        public TargetingResult targetingResult;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public readonly EditableDouble TouchdownSpeed = 0.5;
@@ -99,16 +146,63 @@ namespace MuMech
         public EditableDouble LandWithMoverOffset = 20.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble ZemH = 8.5;
+        public EditableDouble ZemH = 8.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble ZevH = -1.0;
+        public EditableDouble ZevH = -1.2;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble ZemV = 6.0;
+        public EditableDouble ZemV = 5.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
-        public EditableDouble ZevV = -1.3;
+        public EditableDouble ZevV = -1.4;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug1 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug2 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug3 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug4 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug5 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug6 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug7 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug8 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug91 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug92 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug93 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug94 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug95 = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug96 = 1.0;
+
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug1h = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug2h = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug3h = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug4h = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug5h = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug6h = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug7h = 1.0;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble debug8h = 1.0;
+
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble debug10 = 1.0;
@@ -131,7 +225,7 @@ namespace MuMech
         private ParachutePlan _parachutePlan;
 
         //Landing prediction data:
-        private MechJebModuleLandingPredictions _predictor;
+        internal MechJebModuleLandingPredictions _predictor;
         public  ReentrySimulation.Result        Prediction => _predictor.Result;
 
         private ReentrySimulation.Result _errorPrediction => _predictor.GetErrorResult();
@@ -196,6 +290,7 @@ namespace MuMech
         public MechJebModuleLandingAutopilot(MechJebCore core)
             : base(core)
         {
+            targetingResult = new TargetingResult(core);
         }
 
         public override void OnStart(PartModule.StartState state) => _predictor = Core.GetComputerModule<MechJebModuleLandingPredictions>();
@@ -204,6 +299,7 @@ namespace MuMech
         public void LandAtPositionTarget(object controller)
         {
             LandAtTarget = true;
+            setTargetAltitude();
 
             // Hop to new target activated - we will increase vertical speed for a while to get a higher landing angle and thus more room for course correction.
             if (hop == true)
@@ -228,7 +324,7 @@ namespace MuMech
             g = MainBody.GeeASL * EARTH_GRAVITY; // in m/sec^2
 
             // For low gravity only use move to target - it appears to work much better than normal landing algos
-            if (g <= LOW_GRAVITY)
+            if ( (Core.Landing.LandingType == 1) && (g <= LOW_GRAVITY) )
             {
                 UseOnlyMoveToTarget = true;
             }
@@ -241,7 +337,7 @@ namespace MuMech
             {
                 if (UseOnlyMoveToTarget == true)
                 {
-                    SetStep(new MoveToTarget(Core));
+                    SetStep(new MoveToTarget2(Core));
                 }
                 else if (Core.Landing.LandingType == 1)
                 {
@@ -379,7 +475,6 @@ namespace MuMech
             // convertOrbitToActual is a rotation that rotates orbitLandingPosition on actualLandingPosition
             var convertOrbitToActual = Quaternion.FromToRotation(orbitLandingPosition, actualLandingPosition);
 
-
             // Consider the effect small changes in the velocity in each of these three directions
             Vector3d[] perturbationDirections =
             {
@@ -403,11 +498,10 @@ namespace MuMech
                 }
 
                 //warning: hard experience shows that setting this too low leads to bewildering bugs due to finite precision of Orbit functions
-                // use perturbDeltaV instead
-                double perturbDeltaV = Mathf.Max(1.0f, Mathf.Clamp01((float)MainBody.Radius / 6371000.0f) * 10);
+                const double PERTURBATION_DELTA_V = 1;
 
                 Orbit perturbedOrbit =
-                    Orbit.PerturbedOrbit(VesselState.time, perturbDeltaV * perturbationDirections[i]*perturbationFractions[i]); //compute the perturbed orbit
+                    Orbit.PerturbedOrbit(VesselState.time, PERTURBATION_DELTA_V * perturbationDirections[i]*perturbationFractions[i]); //compute the perturbed orbit
 
                 double perturbedLandingTime = perturbedOrbit.PeR < endRadius
                     ? perturbedOrbit.NextTimeOfRadius(VesselState.time, endRadius)
@@ -425,7 +519,7 @@ namespace MuMech
                 landingDelta = Vector3d.Exclude(actualLandingPosition, landingDelta);
 
                 //normalize by the delta-V considered, so that deltas now has units of meters per (meter/second) [i.e., seconds]
-                deltas[i] = landingDelta / perturbDeltaV;
+                deltas[i] = landingDelta / PERTURBATION_DELTA_V;
             }
 
             // Now deltas stores the predicted offsets in landing position produced by each of the three perturbations.
@@ -435,10 +529,9 @@ namespace MuMech
             // into a position. We can't just get the current position of those coordinates, because the planet will
             // rotate during the descent, so we have to account for that.
             Vector3d desiredLandingPosition = MainBody.GetWorldSurfacePosition(Core.Target.targetLatitude, Core.Target.targetLongitude, heightASL) - MainBody.position;
+
+            // Moved rotation to its own method so it can be reused else where.
             desiredLandingPosition = RotateRelativePosition(desiredLandingPosition, tUT - VesselState.time);
-            //float bodyRotationAngleDuringDescent = (float)(360 * (Prediction.EndUT - VesselState.time) / MainBody.rotationPeriod);
-            //var bodyRotationDuringFall = Quaternion.AngleAxis(bodyRotationAngleDuringDescent, MainBody.angularVelocity.normalized);
-            //desiredLandingPosition = bodyRotationDuringFall * desiredLandingPosition;
 
             Vector3d desiredDelta = desiredLandingPosition - actualLandingPosition;
             desiredDelta = Vector3d.Exclude(actualLandingPosition, desiredDelta);
@@ -639,10 +732,11 @@ namespace MuMech
             Vector3d velFuture = Vessel.orbit.getOrbitalVelocityAtUT(bestUT); // Future inertial velocity ---
             Vector3d rotVelFuture = Vector3d.Cross(MainBody.angularVelocity, bestPos.normalized); // Body rotation velocity at that future point ---
             surfaceVel = velFuture - rotVelFuture;// Future surface-relative velocity ---
-            Debug.Log("bestUT:" + (bestUT - now) + " dist:" + bestDist + " alt:" + (bestPos.magnitude - R));
+            //Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1"));
             bestPos += body.position;
         }
 
+        // Rotate Body relative position based on it's rotation over input elapsed seconds from now.
         public Vector3d RotateRelativePosition(Vector3d posBodyCentered, double timeDeltaSeconds)
         {
             // Rotates position that is relative to Body forward/backward in time to where it will be after timeDeltaSeconds
@@ -751,13 +845,20 @@ namespace MuMech
 
         private IDescentSpeedPolicy PickDescentSpeedPolicy()
         {
-            if (UseAtmosphereToBrake())
+            if ( Core.Landing.FlySafe == false)
             {
-                return new PoweredCoastDescentSpeedPolicy(MainBody.Radius + DecelerationEndAltitude(), MainBody.GeeASL * 9.81,
-                    VesselState.limitedMaxThrustAccel);
+                return new GravityTurnDescentSpeedPolicy(MainBody.Radius + DecelerationEndAltitude(), MainBody.GeeASL * 9.81, VesselState.limitedMaxThrustAccel);
             }
+            else
+            {
+                if (UseAtmosphereToBrake())
+                {
+                    return new PoweredCoastDescentSpeedPolicy(MainBody.Radius + DecelerationEndAltitude(), MainBody.GeeASL * 9.81,
+                        VesselState.limitedMaxThrustAccel);
+                }
 
-            return new SafeDescentSpeedPolicy(MainBody.Radius + DecelerationEndAltitude(), MainBody.GeeASL * 9.81, VesselState.limitedMaxThrustAccel);
+                return new SafeDescentSpeedPolicy(MainBody.Radius + DecelerationEndAltitude(), MainBody.GeeASL * 9.81, VesselState.limitedMaxThrustAccel);
+            }
         }
 
         public double DecelerationEndAltitude()
@@ -871,7 +972,7 @@ namespace MuMech
             return Orbit.PeA < 2 * stoppingDistance + MainBody.Radius / 4;
         }
 
-        public double MaxAllowedSpeed() => DescentSpeedPolicy.MaxAllowedSpeed(VesselState.CoM - MainBody.position, VesselState.surfaceVelocity);
+        public double MaxAllowedSpeed(double terrainRadius = 0) => DescentSpeedPolicy.MaxAllowedSpeed(VesselState.CoM - MainBody.position, VesselState.surfaceVelocity, terrainRadius);
 
         public double MaxAllowedSpeedAfterDt(double dt) =>
             DescentSpeedPolicy.MaxAllowedSpeed(VesselState.CoM + VesselState.orbitalVelocity * dt - MainBody.position,
@@ -897,6 +998,8 @@ namespace MuMech
                 MechJebModuleLandingGuidance.LandingSites[0].Longitude);
         }
 
+
+        /// Get the horizontal distance to target without any body rotation adjustments
         public double getHDistanceToTarget()
         {
             // Use target altitude - We only want the horizontal component
@@ -909,6 +1012,7 @@ namespace MuMech
             return (angle * (Core.vessel.mainBody.Radius + asl));
         }
 
+        /// Get the horizontal 3d vector that points to the target without any body rotation adjustments
         public Vector3d getHDirectionToTarget()
         {
             // Use target altitude - We only want the horizontal component
@@ -979,12 +1083,67 @@ namespace MuMech
             downrangeVec  = track_dir * Vector3d.Dot(horizontalVec, track_dir);
             crossrangeVec = cross_dir * Vector3d.Dot(horizontalVec, cross_dir);
         }
+
+        public double ComputeOptimalDeorbitAltitude()
+        {
+            CelestialBody body = Vessel.mainBody;
+            Vector3d targetPos = Core.Target.GetPositionTargetPosition(); // Target position in body fixed frame
+
+            // --- Current orbital radius ---
+            Vector3d vesselPos = VesselState.CoM - body.position;
+            double r = vesselPos.magnitude;
+
+            // --- Circular orbital speed (shallow deorbit assumption) ---
+            double mu = body.gravParameter;
+            double vCirc = Math.Sqrt(mu / r);
+
+            // --- Local gravity at target ---
+            double g = mu / (targetPos.sqrMagnitude);
+
+            // --- Max thrust acceleration (fixed at 20 m/s^2) ---
+            double aMax = VesselState.limitedMaxThrustAccel;
+            double aNet = aMax - g;
+            if (aNet <= 0.0)
+                return double.PositiveInfinity;
+
+            // --- Suicide-burn altitude (vertical-only model) ---
+            double hVertical = (vCirc * vCirc) / (2.0 * aNet);
+
+            // --- Horizontal scaling factor ---
+            double S = 0.035; // 0.035 <= 0.05
+
+            // --- Final optimal gate altitude ---
+            double hGate = Math.Max(MIN_TARGET_ALTITUDE, hVertical * S);
+
+            return hGate;
+        }
+
+        void setTargetAltitude()
+        {
+            if (MainBody.atmosphere == true)
+            {
+                TargetAltitude = 0.5 * MainBody.atmosphereDepth;
+            }
+            else
+            {
+                TargetAltitude = Math.Max(5000.0, 0.023 * MainBody.Radius);
+            }
+
+            if (Core.Landing.TargetAltPercent <= 0)
+            {
+                Core.Landing.TgtAlt = ComputeOptimalDeorbitAltitude();
+            }
+            else
+            {
+                Core.Landing.TgtAlt = Core.Landing.TargetAltPercent * TargetAltitude / 100.0;
+            }
+        }
     }
 
     //A descent speed policy that gives the max safe speed if our entire velocity were straight down
     internal class SafeDescentSpeedPolicy : IDescentSpeedPolicy
     {
-        private readonly double _terrainRadius;
+        private double _terrainRadius;
         private readonly double _g;
         private readonly double _thrust;
 
@@ -995,8 +1154,9 @@ namespace MuMech
             _thrust        = thrust;
         }
 
-        public double MaxAllowedSpeed(Vector3d pos, Vector3d vel)
+        public double MaxAllowedSpeed(Vector3d pos, Vector3d vel, double terrainRadius = 0)
         {
+            if (terrainRadius > 0) _terrainRadius = terrainRadius;
             double altitude = pos.magnitude - _terrainRadius;
             return 0.9 * Math.Sqrt(2 * (_thrust - _g) * altitude);
         }
@@ -1004,7 +1164,7 @@ namespace MuMech
 
     internal class PoweredCoastDescentSpeedPolicy : IDescentSpeedPolicy
     {
-        private readonly float _terrainRadius;
+        private float _terrainRadius;
         private readonly float _g;
         private readonly float _thrust;
 
@@ -1015,8 +1175,9 @@ namespace MuMech
             _thrust        = (float)thrust;
         }
 
-        public double MaxAllowedSpeed(Vector3d pos, Vector3d vel)
+        public double MaxAllowedSpeed(Vector3d pos, Vector3d vel, double terrainRadius = 0)
         {
+            if (terrainRadius > 0) _terrainRadius = (float)terrainRadius;
             if (_terrainRadius < pos.magnitude)
                 return double.MaxValue;
 
@@ -1030,7 +1191,7 @@ namespace MuMech
 
     internal class GravityTurnDescentSpeedPolicy : IDescentSpeedPolicy
     {
-        private readonly double _terrainRadius;
+        private double _terrainRadius;
         private readonly double _g;
         private readonly double _thrust;
 
@@ -1041,29 +1202,30 @@ namespace MuMech
             _thrust        = thrust;
         }
 
-        public double MaxAllowedSpeed(Vector3d pos, Vector3d vel)
+        public double MaxAllowedSpeed(Vector3d pos, Vector3d vel, double terrainRadius = 0)
         {
+            if (terrainRadius > 0) _terrainRadius = terrainRadius;
             //do a binary search for the max speed that avoids death
             double maxFallDistance = pos.magnitude - _terrainRadius;
 
             double lowerBound = 0;
-            double upperBound = 1.1 * vel.magnitude;
+            double upperBound = 2.0 * vel.magnitude; // 2 <= 1.1
 
-            while (upperBound - lowerBound > 0.1)
+            while (upperBound - lowerBound > 0.01) // 0.01 <= 0.05 <= 0.1
             {
                 double test = (upperBound + lowerBound) / 2;
                 if (GravityTurnFallDistance(pos, test * vel.normalized) < maxFallDistance) lowerBound = test;
                 else upperBound                                                                       = test;
             }
 
-            return 0.95 * ((upperBound + lowerBound) / 2);
+            return 0.96 * ((upperBound + lowerBound) / 2);
         }
 
         private double GravityTurnFallDistance(Vector3d x, Vector3d v)
         {
             double startRadius = x.magnitude;
 
-            const int STEPS = 10;
+            const int STEPS = 20;
             for (int i = 0; i < STEPS; i++)
             {
                 Vector3d gVec = -_g * x.normalized;

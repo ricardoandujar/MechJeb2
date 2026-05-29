@@ -125,6 +125,7 @@ namespace MuMech
         public             double    SimulationRunningTime => SimulationRunning ? stopwatch.ElapsedMilliseconds / 1000d : 0;
         protected          long      millisecondsBetweenSimulations;
 
+        protected ReentrySimulation.Result rawResult;
         protected ReentrySimulation.Result result;
         protected ReentrySimulation.Result errorResult;
 
@@ -384,9 +385,27 @@ namespace MuMech
                         }
                         else
                         {
-                            if (result != null)
-                                result.Release();
-                            result = newResult;
+                            // PEDRO - Average the new result with the old result to try to give a more stable prediction. This is a bit of a hack, but it seems to work well in practice. We weight the new result more heavily than the old result to try to make the display more responsive to changes.
+                            if (rawResult != null)
+                            {
+                                ReentrySimulation.Result tempResult = newResult;
+                                double weightNew = 0.05;
+                                tempResult.EndPosition.Latitude  = newResult.EndPosition.Latitude  * weightNew + result.EndPosition.Latitude  * (1.0 - weightNew);
+                                tempResult.EndPosition.Longitude = newResult.EndPosition.Longitude * weightNew + result.EndPosition.Longitude * (1.0 - weightNew);
+                                tempResult.EndPosition.Radius    = newResult.EndPosition.Radius    * weightNew + result.EndPosition.Radius    * (1.0 - weightNew);
+                                tempResult.EndPosition.UT        = newResult.EndPosition.UT        * weightNew + result.EndPosition.UT        * (1.0 - weightNew);
+                                rawResult.Release();
+                                rawResult = newResult;
+                                if ( result != null ) result.Release();
+                                result = tempResult;
+                            }
+                            else
+                            {
+                                if (result != null)
+                                    result.Release();
+                                result = newResult;
+                                rawResult = newResult;
+                            }
                         }
                     }
                     else

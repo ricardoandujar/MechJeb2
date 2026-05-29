@@ -77,15 +77,14 @@ namespace MuMech
 
                         Core.Thrust.Tmode = MechJebModuleThrustController.TMode.KEEP_SURFACE;
 
-                        //core.thrust.trans_spd_act = (float)Math.Sqrt((vesselState.maxThrustAccel - vesselState.gravityForce.magnitude) * 2 * minalt) * 0.90F;
                         Vector3d estimatedLandingPosition = VesselState.CoM + VesselState.surfaceVelocity.sqrMagnitude /
                             (2 * VesselState.limitedMaxThrustAccel) * VesselState.surfaceVelocity.normalized;
                         double terrainRadius = MainBody.Radius + MainBody.TerrainAltitude(estimatedLandingPosition);
-                        _aggressivePolicy =
-                            new GravityTurnDescentSpeedPolicy(terrainRadius, MainBody.GeeASL * 9.81,
-                                VesselState.limitedMaxThrustAccel); // this constant policy creation is wastefull...
-                        Core.Thrust.TransSpdAct =
-                            (float)_aggressivePolicy.MaxAllowedSpeed(VesselState.CoM - MainBody.position, VesselState.surfaceVelocity);
+                        if (_aggressivePolicy == null)
+                        {
+                            _aggressivePolicy = new GravityTurnDescentSpeedPolicy(terrainRadius, MainBody.GeeASL * 9.81, VesselState.limitedMaxThrustAccel); 
+                        }
+                        Core.Thrust.TransSpdAct = (float)_aggressivePolicy.MaxAllowedSpeed(VesselState.CoM - MainBody.position, VesselState.surfaceVelocity, terrainRadius);
                     }
                 }
                 else

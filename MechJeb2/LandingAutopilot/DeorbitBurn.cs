@@ -10,7 +10,7 @@ namespace MuMech
     {
         public class DeorbitBurn : AutopilotStep
         {
-            private bool _deorbitBurnTriggered = false;
+            private bool _deorbitBurnTriggered;
 
             public DeorbitBurn(MechJebCore core) : base(core)
             {

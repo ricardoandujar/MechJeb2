@@ -9,14 +9,8 @@ namespace MuMech
     {
         public class CoastToDeceleration : AutopilotStep
         {
-            private const float MAX_ERROR_DEFAULT = 150;
-            private const float MAX_LARGE_DISTANCE = 10000; // 80000;
-            private const float FAST_SURFACE_SPEED = 6500;
-            private bool courseCorrect;
-
-            public CoastToDeceleration(MechJebCore core, bool correct = true) : base(core)
+            public CoastToDeceleration(MechJebCore core) : base(core)
             {
-                courseCorrect = correct;
             }
 
             public override AutopilotStep Drive(FlightCtrlState s)
@@ -24,7 +18,7 @@ namespace MuMech
                 if (!Core.Landing.PredictionReady)
                     return this;
 
-                Vector3d deltaV = Core.Landing.ComputeCourseCorrection();
+                Vector3d deltaV = Core.Landing.ComputeCourseCorrection(); // Default is to allow prograde correction.
 
                 if (!Core.Landing.RCSAdjustment) return this;
 
@@ -39,8 +33,7 @@ namespace MuMech
                 return this;
             }
 
-            private bool _warpReady = false;
-            private bool warpOn = false;
+            private bool _warpReady;
 
             public override AutopilotStep OnFixedUpdate()
             {
@@ -55,22 +48,8 @@ namespace MuMech
                     }
                 }
 
-                // Move to DecelerationBurn if:
-                //    If SurfaceSpeed reaches 90% of Max allowable speed.
-                //    If we're already at low altitude, skip directly to the Deceleration burn
-                //    If within atmosphere going too fast without heat shields
-                double pitchAngle = 90.0 - Vector3d.Angle(VesselState.surfaceVelocity, VesselState.up);
-                double hStoppingDistance = Math.Pow(VesselState.speedSurfaceHorizontal, 2) / (2 * VesselState.limitedMaxThrustAccel * Math.Abs(Math.Cos(pitchAngle * UtilMath.Deg2Rad)));
-                double vStoppingDistance = (VesselState.speedVertical < 0) ? Math.Pow(VesselState.speedVertical, 2) / (2 * (VesselState.limitedMaxThrustAccel * Math.Abs(Math.Sin(pitchAngle * UtilMath.Deg2Rad)) - VesselState.localg)) : 0;
                 double maxAllowedSpeed = Core.Landing.MaxAllowedSpeed();
-                double hTargetError = Core.Landing.getHDistanceToTarget();
-
-                if ((hTargetError < (1.5 * hStoppingDistance)) ||
-                    (VesselState.altitudeTrue < (1.5 * vStoppingDistance)) ||
-                    (VesselState.speedSurface > 0.9 * maxAllowedSpeed) ||
-                    (VesselState.altitudeASL < Core.Landing.DecelerationEndAltitude() + 5) ||
-                    ((VesselState.altitudeASL < MainBody.RealMaxAtmosphereAltitude()) && 
-                    (VesselState.speedSurface > Core.Landing.atmosSafeSpeed)) )
+                if (VesselState.speedSurface > 0.9 * maxAllowedSpeed)
                 {
                     Core.Warp.MinimumWarp();
                     if (Core.Landing.RCSAdjustment)
@@ -83,8 +62,7 @@ namespace MuMech
                 if (Core.Landing.LandAtTarget)
                 {
                     double currentError = Vector3d.Distance(Core.Target.GetPositionTargetPosition(), Core.Landing.LandingSite);
-                    double maxError = MAX_ERROR_DEFAULT + (MAX_LARGE_DISTANCE- MAX_ERROR_DEFAULT) *Mathf.Clamp01((float)VesselState.speedSurface / FAST_SURFACE_SPEED);
-                    if (courseCorrect && currentError > maxError)
+                    if (currentError > (MainBody.atmosphere ? 3500 : 1000))
                     {
                         if (!VesselState.parachuteDeployed &&
                             VesselState.drag <=
@@ -98,17 +76,28 @@ namespace MuMech
                     }
                     else
                     {
-                        Vector3d deltaV = Core.Landing.ComputeCourseCorrection();
+                        Vector3d deltaV = Core.Landing.ComputeCourseCorrection(); // Default is to allow prograde correction.
                         Status += "\n" + Localizer.Format("#MechJeb_LandingGuidance_Status2",
                             deltaV.magnitude.ToString("F3")); //"Course correction DV: " +  + " m/s"
                     }
                 }
 
-                if ( (Vector3.Scale(Core.vessel.angularVelocity, new Vector3(1f, 0f, 1f)).magnitude < 0.001) &&
-                     (Core.Attitude.attitudeAngleFromTarget() < 1) ) { _warpReady = true; } // less warp start warp stop jumping
+                // If we're already low, skip directly to the Deceleration burn
+                if (VesselState.altitudeASL < Core.Landing.DecelerationEndAltitude() + 5)
+                {
+                    Core.Warp.MinimumWarp();
+                    if (Core.Landing.RCSAdjustment)
+                        Core.RCS.Enabled = false;
+                    return new DecelerationBurn(Core);
+                }
+
+                if (Core.Attitude.attitudeAngleFromTarget() < 1) { _warpReady = true; } // less warp start warp stop jumping
+
+                if (Core.Attitude.attitudeAngleFromTarget() > 5) { _warpReady = false; } // hopefully
 
                 if (Core.Landing.PredictionReady)
                 {
+#if PEDRO
                     if (VesselState.drag < 0.01)
                     {
                         double decelerationStartTime = Core.Landing.Prediction.Trajectory.Any()
@@ -120,6 +109,7 @@ namespace MuMech
                         Core.Attitude.attitudeTo(decelerationStartAttitude, AttitudeReference.INERTIAL, Core.Landing);
                     }
                     else
+#endif
                     {
                         Core.Attitude.attitudeTo(Vector3.back, AttitudeReference.SURFACE_VELOCITY, Core.Landing);
                     }
@@ -131,13 +121,11 @@ namespace MuMech
                     // Make sure if we're hovering that we don't go straight into too fast of a warp
                     // (g * 5 is average velocity falling for 10 seconds from a hover)
                     double velocityGuess = Math.Max(Math.Abs(VesselState.speedVertical), VesselState.localg * 5);
-                    Core.Warp.WarpRegularAtRate((float)Math.Min(VesselState.altitudeASL / (10 * velocityGuess),(Orbit.period / 10)));
-                    warpOn = true;
+                    Core.Warp.WarpRegularAtRate((float)(VesselState.altitudeASL / (10 * velocityGuess)));
                 }
-                else if ( warpOn == true )
+                else
                 {
                     Core.Warp.MinimumWarp();
-                    warpOn = false;
                 }
 
                 return this;

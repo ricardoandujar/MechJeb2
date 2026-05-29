@@ -56,7 +56,7 @@ namespace MuMech
                     {
                         throttleDiv = 10;
                     }
-                    Core.Thrust.TargetThrottle = Mathf.Clamp01((float)(_planeChangeDVLeft / (throttleDiv * Core.VesselState.maxThrustAccel)));
+                    Core.Thrust.RequestActiveThrottle(Mathf.Clamp01((float)(_planeChangeDVLeft / (throttleDiv * Core.VesselState.maxThrustAccel))));
                 }
                 else
                 {
@@ -78,18 +78,19 @@ namespace MuMech
                 double Angle = Vector3d.Angle(finalVelocity, VesselState.orbitalVelocity);
 
 
-                // When using MoveToTarget exit once
+                // When using MoveToTarget2 exit once
                 // within horizontal distance where vertical velocity will start dropping. 
                 if (Core.Landing.UseOnlyMoveToTarget == true)
                 {
-                    double angleDistance = Core.Landing.MainBody.Radius * (30.0 / 180.0) * Mathf.PI;
+                    double angleDistance = Core.Landing.MainBody.Radius * (60.0 / 180.0) * Mathf.PI;
                     double ratioDistance = VesselState.altitudeTrue * Core.Landing.maxRatio;
-                    double checkDistance = ( ratioDistance < angleDistance) ? ratioDistance: angleDistance;
+                    double checkDistance = System.Math.Max(ratioDistance, angleDistance);
+                    //                  double checkDistance = ( ratioDistance < angleDistance) ? ratioDistance: angleDistance;
 
                     if (Core.Landing.getHDistanceToTarget() < checkDistance)
                     {
                         if (!MuUtils.PhysicsRunning()) Core.Warp.MinimumWarp(true);
-                        return new MoveToTarget(Core);
+                        return new MoveToTarget2(Core);
                     }
                 }
 
@@ -126,7 +127,8 @@ namespace MuMech
                         }
                         else
                         {
-                            return new LowDeorbitBurn(Core);
+                            Core.Thrust.ThrustOff();
+                            return new LowDeorbitBurn(Core); //DecelerationBurn(Core); would by cool to immediately proceed to DecelerationBurn instead, can't figure out how to convince trajectory predicted to do so with Pe>0, must be done in ReentrySimulation.cs somewhere.
                         }
                     }
                 }

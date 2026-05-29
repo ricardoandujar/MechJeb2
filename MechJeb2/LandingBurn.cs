@@ -36,7 +36,6 @@ namespace MuMech.LandingAutopilot
         private float  minDownRange;      // Minimum downrange distance to target for full ZevV application (used if ZevV<0 for conditional vertical braking boost)
         private double lateralGain = 0.4; // Lateral gain correction
         private double prev_t_go = 0;     // Previous t_go used to force timep step changes for better guidance convergence (not strictly necessary)
-        private double lastDesiredAcceleration = 0;
 
         /// <summary>
         /// Constructor - receives MechJeb core reference.
@@ -61,7 +60,7 @@ namespace MuMech.LandingAutopilot
             {
                 if (true == UpdateGuidanceAndControl(s))
                 {
-                    return new MoveToTarget2(Core);
+                    return new MoveToTarget(Core);
                 }
                 return this;
             }
@@ -230,7 +229,13 @@ namespace MuMech.LandingAutopilot
                 out downrangeVec, out crossrangeVec, out horizontalVec);
 
             // Check if burn should be active
-            ShouldStartBurn(ref posError, ref vel); 
+            //if (!ShouldStartBurn(slantRange, vy, horizontalVec))
+            //if (!
+            ShouldStartBurn(ref posError, ref vel); //)
+            //{
+                //Core.Attitude.attitudeTo(-VesselState.surfaceVelocity.normalized, AttitudeReference.INERTIAL, this);
+                //return recover;
+            //}
 
             // Local gravity magnitude
             Vector3d g = VesselState.gravityForce;
@@ -287,12 +292,9 @@ namespace MuMech.LandingAutopilot
 
             // below this altitude, switch to recovery mode if not on target (prevents hard landings from guidance errors or bad tuning)
             // Or, if the downrange to altitude ratio is close to minRatio, switch to recovery mode - The final landing is based on tracking vertical and horizontal velocity as we zero in to target.
-            if (lastDesiredAcceleration < (0.95*MoveToTarget2.LIMITED_MAX_THRUST_G_RATIO*VesselState.localg))
+            if ( ((downrange/alt) <= (1.1*Core.Landing.minRatio)) || (alt < Core.Landing.LandWithMoverAlt) || (downrange < Core.Landing.LandWithMoverOffset) )
             {
-                if (((downrange / alt) <= (1.1 * Core.Landing.minRatio)) || (alt < Core.Landing.LandWithMoverAlt) || (downrange < Core.Landing.LandWithMoverOffset))
-                {
-                    recover = true;
-                }
+                recover = true;
             }
 
             // Apply terminal velocity bias (encourages stronger vertical braking near ground to hit target speed)
@@ -338,7 +340,6 @@ namespace MuMech.LandingAutopilot
 
                 if (Core.Attitude.attitudeAngleFromTarget() < 30)
                 {
-                    lastDesiredAcceleration = desired_mag;
                     Core.Thrust.RequestActiveThrottle(throttle);
                 }
                 else
