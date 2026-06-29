@@ -21,6 +21,7 @@ namespace MuMech.LandingAutopilot
 
         // Flag: is time warp currently active?
         private bool warpOn = false;
+        private bool warpOnP = false;
 
         // Flag: is time warp allowed right now?
         private bool checkWarp = true;
@@ -78,58 +79,31 @@ namespace MuMech.LandingAutopilot
         /// <returns>This step (remains active)</returns>
         public override AutopilotStep OnFixedUpdate()
         {
-            if ( checkWarp == false )
-            {
+            if (warpOn == false)
                 return this;
-            }
 
-            // Angle between surface velocity and local up (90° = horizontal flight)
-            double pitchAngle = 90.0 - Vector3d.Angle(VesselState.surfaceVelocity, VesselState.up);
+            // Altitude above terrain (what you usually want for guidance "y")
+            double alt = VesselState.altitudeTrue - targetOffset;
 
-            // Cosine and sine of pitch angle for thrust projection calculations
-            double cosPitch = Math.Abs(Math.Cos(pitchAngle * UtilMath.Deg2Rad));
-            double sinPitch = Math.Abs(Math.Sin(pitchAngle * UtilMath.Deg2Rad));
+            // True radius from body center to bottom of vessel
+            double r_bottom = Vessel.mainBody.Radius
+                            + Vessel.mainBody.TerrainAltitude(Vessel.latitude, Vessel.longitude)
+                            + alt;
 
-            // Horizontal distance required to stop at max thrust (projected)
-            double hStoppingDistance = VesselState.speedSurfaceHorizontal * VesselState.speedSurfaceHorizontal /
-                                       (2 * VesselState.limitedMaxThrustAccel * cosPitch);
+            // Current position vector from body center
+            Vector3d pos = (VesselState.CoM - Vessel.mainBody.position).normalized * (r_bottom);
 
-            // Vertical distance required to stop if descending
-            double vStoppingDistance = (VesselState.speedVertical < 0)
-                ? VesselState.speedVertical * VesselState.speedVertical /
-                  (2 * (VesselState.limitedMaxThrustAccel * sinPitch - VesselState.localg))
-                : 0;
+            // Target position vector on surface
+            Vector3d targetPos = Core.Target.GetPositionTargetPosition();
 
-            // Horizontal distance to target landing site
-            double hTargetError = Core.Landing.getHDistanceToTarget();
+            // Vector from current position to target
+            Vector3d posError = targetPos - pos;
 
-            // Ratio of horizontal error to altitude (used for warp safety)
-            float ratio = (float)(hTargetError / VesselState.altitudeTrue);
+            // Surface-relative velocity vector
+            Vector3d vel = VesselState.surfaceVelocity;
 
-            // Conditions that force warp to stop (safety near ground/target/unsafe speed)
-            bool mustStopWarp =
-                (hTargetError < 1.5 * hStoppingDistance) ||
-                (VesselState.altitudeTrue < 1.5 * vStoppingDistance);
-
-            if (mustStopWarp) checkWarp = false;
-
-            // Perform warp if allowed and requested
-            if (checkWarp && Core.Node.Autowarp && !Vessel.LandedOrSplashed)
-            {
-                // Conservative velocity estimate for 10-second impact buffer
-                double velocityGuess = Math.Max(Math.Abs(VesselState.speedVertical), VesselState.localg * 5);
-
-                // Safe warp rate: limit based on altitude and orbital period
-                float warpRate = (float)Math.Min(VesselState.altitudeASL / (6 * velocityGuess), (Orbit.period / 6));
-
-                Core.Warp.WarpRegularAtRate(warpRate);
-                warpOn = true;
-            }
-            else if (warpOn || !MuUtils.PhysicsRunning())
-            {
-                Core.Warp.MinimumWarp();
-                warpOn = false;
-            }
+            // Check if burn should be active
+            ShouldStartBurn(ref posError, ref vel);
 
             return this;
         }
@@ -140,49 +114,90 @@ namespace MuMech.LandingAutopilot
 
             if (vel.magnitude < 1.0) return false;
 
+            bool     rc;
             Vector3d up = Vessel.up;
             Vector3d retro = -vel.normalized;
             double sin_theta = Math.Abs(Vector3d.Dot(retro, -up));   // sin of angle from horizontal
             double cos_theta = Math.Sqrt(1.0 - sin_theta * sin_theta);
-
             double Vy = Vector3d.Dot(vel, -up);             // downward component
             if (Vy < 1.0)
             {
                 Debug.Log($"[ShouldStartBurn2] sin_theta={sin_theta:F3}, cos_theta={cos_theta:F3}, Vy={Vy:F3}");
-                return false;
+                rc = false;
             }
-
-            double Vx = vel.magnitude * cos_theta;
-
-            double g = VesselState.localg;
-            double a = VesselState.limitedMaxThrustAccel;
-
-            // Effective accelerations along retrograde direction
-            double ay = a * sin_theta - g;                  // vertical (downward positive)
-            double ax = a * cos_theta;                      // horizontal
-
-            double h_vert  = (1 + Core.Landing.BurnMarginPerc / 100.0) * (Vy * Vy) / (2.0 * ay);
-            double d_horiz = (1 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * ax);
-
-            if (sin_theta < 0.25)
+            else
             {
-                h_vert = 0; // If nearly horizontal, ignore vertical stopping distance to prevent premature burn trigger
+                double Vx = vel.magnitude * cos_theta;
+                double g = VesselState.localg;
+                double a = VesselState.limitedMaxThrustAccel;
+
+                // Effective accelerations along retrograde direction
+                double ay = a * sin_theta - g;                  // vertical (downward positive)
+                double ax = a * cos_theta;                      // horizontal
+
+                double h_vert  = (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (Vy * Vy) / (2.0 * ay);
+                double d_horiz = (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * ax);
+
+                if (sin_theta < 0.25)
+                {
+                    h_vert = 0; // If nearly horizontal, ignore vertical stopping distance to prevent premature burn trigger
+                }
+
+                double current_h = -Vector3d.Dot(posError, up);
+
+                // Horizontal distance only (projection onto horizontal plane)
+                Vector3d posError_horizontal = posError - Vector3d.Dot(posError, up) * up;
+                double current_d = posError_horizontal.magnitude;
+
+                rc = (current_h <= (h_vert)) || (current_d <= (d_horiz));
+                if (rc)
+                {
+                    shouldBurnStarted = true;
+                    densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h / 5.0, MainBody), FlightGlobals.getExternalTemperature(current_h / 5.0, MainBody));
+                }
+                else
+                {
+                    rc = (current_h <= (1.35 * h_vert)) || (current_d <= (1.35 * d_horiz));
+
+                    // Perform warp if allowed and requested
+                    if (checkWarp && (rc == false) && Core.Node.Autowarp && !Vessel.LandedOrSplashed)
+                    {
+                        if (VesselState.altitudeASL < Vessel.mainBody.atmosphereDepth)
+                        {
+                            if ( warpOnP == false )
+                            {
+                                //too low to use any regular warp rates. Use physics warp at a max of x2:
+                                Core.Warp.WarpPhysicsAtRate(2);
+                                warpOnP = true;
+                            }
+                        }
+                        else
+                        {
+                            // Conservative velocity estimate for 10-second impact buffer
+                            double velocityGuess = Math.Max(Math.Abs(VesselState.speedVertical), VesselState.localg * 5);
+                            // Safe warp rate: limit based on altitude and orbital period
+                            float warpRate = (float)Math.Min(VesselState.altitudeTrue / (5 * velocityGuess), (Orbit.period / 6));
+
+                            Core.Warp.WarpRegularAtRate(warpRate);
+                            warpOnP = false;
+                            warpOn = true;
+                        }
+                        h_vert *= 1.35;
+                        d_horiz *= 1.35;
+                        Debug.Log($"[ShouldStartBurn2:w] current_h={current_h:F0}, h_vert={h_vert:F0}, current_d={current_d:F0}, d_horiz={d_horiz:F0}");
+                    }
+                    else if (warpOn)
+                    {
+                        Core.Warp.MinimumWarp();
+                        checkWarp = warpOn = warpOnP = false;
+                    }
+                    else
+                    {
+                        Debug.Log($"[ShouldStartBurn2] current_h={current_h:F0}, h_vert={h_vert:F0}, current_d={current_d:F0}, d_horiz={d_horiz:F0}");
+                    }
+                }
             }
 
-            double current_h = -Vector3d.Dot(posError, up);
-
-            // Horizontal distance only (projection onto horizontal plane)
-            Vector3d posError_horizontal = posError - Vector3d.Dot(posError, up) * up;
-            double current_d = posError_horizontal.magnitude;
-
-            Debug.Log($"[ShouldStartBurn2] current_h={current_h:F0}, h_vert={h_vert:F0}, current_d={current_d:F0}, d_horiz={d_horiz:F0}");
-
-            bool rc = current_h <= h_vert || current_d <= d_horiz;
-            if (rc)
-            {
-                shouldBurnStarted = true;
-                densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h/5.0, MainBody), FlightGlobals.getExternalTemperature(current_h/5.0, MainBody));
-            }
             return rc;
         }
 
@@ -194,6 +209,9 @@ namespace MuMech.LandingAutopilot
         private bool UpdateGuidanceAndControl(FlightCtrlState s)
         {
             bool recover = false;
+
+            if (warpOn == true)
+                return recover;
 
             // Altitude above terrain (what you usually want for guidance "y")
             double alt = VesselState.altitudeTrue - targetOffset;
@@ -350,7 +368,7 @@ namespace MuMech.LandingAutopilot
                 {
                     // Diagnostic log for debugging burn trigger
                     Debug.Log($"[burn] t_go={t_go:F1} alt={alt:F1} vel={Vessel.horizontalSrfSpeed:F1},{vy:F1} t={throttle:F2} {densityAtBurnStart:F3} ");
-                    debugCounter = 1;
+                    debugCounter = 2;
                 }
             }
 

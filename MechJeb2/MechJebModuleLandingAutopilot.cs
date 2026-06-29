@@ -1129,6 +1129,7 @@ namespace MuMech
                 TargetAltitude = Math.Max(5000.0, 0.023 * MainBody.Radius);
             }
 
+            // Set target Altitude directly overhead to target
             if (Core.Landing.TargetAltPercent <= 0)
             {
                 Core.Landing.TgtAlt = ComputeOptimalDeorbitAltitude();
