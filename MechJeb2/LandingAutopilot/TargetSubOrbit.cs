@@ -106,9 +106,9 @@ namespace MuMech
                     if ( ((ratio < 0.4) && (VesselState.altitudeTrue <= 1.1*Core.Landing.TargetAltitude)) ||
                         (VesselState.altitudeTrue <= 5000) )
                     {
-                        Debug.Log("exit TargetSubOrbit to MoveToTarget2");
+                        Debug.Log("exit TargetSubOrbit to MoveToTarget");
                         Core.Thrust.ThrustOff();
-                        return new MoveToTarget2(Core);
+                        return new MoveToTarget(Core);
                     }
                 }
 
@@ -152,7 +152,7 @@ namespace MuMech
                 Core.Thrust.ThrustOff();
                 if ((ProgradeCount >= 4) || (RetrogradeCount >= 4) || (LateralFineCount >= 4))
                 {
-                    return new MoveToTarget2(Core);
+                    return new MoveToTarget(Core);
                 }
                 return new LandingBurn(Core);
             }
@@ -222,6 +222,10 @@ namespace MuMech
                 double _hCorrectionUpAngle = hFarCorrectionAngle; // Controls Max angle to move horizontally.
                 double gainCancelHVelocity = baseGain; // Gain for horizontal velocity correction
                 double height = closestPos.magnitude - targetPos.magnitude;
+                Vector3d pos = (VesselState.CoM - Vessel.mainBody.position); // Current position vector from body center
+                Vector3d targetDistance = targetPos - pos; // Vector from current position to target
+                Vector3d closestDistance = closestPos - pos; // Vector from current position to target
+                double   deltaDistance = closestDistance.magnitude - targetDistance.magnitude; // Difference in distance to target and closest approach
                 deltaHeight = Core.Landing.TgtAlt - height;
 
                 switch (step)
@@ -234,19 +238,22 @@ namespace MuMech
                         herror =  gainCancelHVelocity * crossrangeVec; // Add Cross range to horizontal error
                         rc = 100; // we only want horizontal thrust here
                         break;
+                    // deltaHeight   = -10190 - means vessel travels 10.2km above target altitude at closest approach
+                    // deltaDistance =  -1633 - means vessel's closest approach is in front of the target by 1.6km (negative means in front of target, positive means behind target)
+                    // crossrangeVec.magnitude = < 500 - means vessel is within 500m of target in crossrange direction
                     case Step.STATE_LATERAL: // Burn lateral to set up for prograde burn
                         forceHoriz = true; // Force horizontal thrust
                         desiredHorizontalVel = Vector3d.zero;
                         herror =  gainCancelHVelocity * crossrangeVec; // Add Cross range to horizontal error
-                        Vector3d pos = (VesselState.CoM - Vessel.mainBody.position); // Current position vector from body center
-                        Vector3d targetDistance = targetPos - pos; // Vector from current position to target
-                        Vector3d closestDistance = closestPos - pos; // Vector from current position to target
-                        double   deltaDistance = closestDistance.magnitude - targetDistance.magnitude; // Difference in distance to target and closest approach
                         if ((throttleCount >= 4)||(crossrangeVec.magnitude < 500))
                         {
                             LateralCount = throttleCount;
                             throttleCount = 0;
-                            if (deltaDistance < -1000 )
+                            if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
+                                step = Step.STATE_RETROGRADE;
+                            else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < 2000))
+                                step = Step.STATE_PROGRADE;
+                            else if (deltaDistance < -1000 )
                                 step = Step.STATE_PROGRADE;
                             else if (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD*6)
                                 step = Step.STATE_RETROGRADE;
@@ -269,7 +276,7 @@ namespace MuMech
                             // Reduce the errror as we approach periapsis to avoid over correction
                             herror = 20 * herror * Mathf.Clamp01((float)((0.5 * VesselState.orbitApA - VesselState.orbitPeA) / (0.01 * VesselState.orbitApA))); // stop down range correction at periapsis = 0 and higher
 
-                            Debug.Log(" prograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0"));
+                            Debug.Log(" prograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
                             // Switch to fine lateral control when close to target or if periapsis is above half target altitude
                             if ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD)))
@@ -292,13 +299,11 @@ namespace MuMech
                             desiredHorizontalVel = desiredHorizontal * downrangeVec.normalized;
 
                             // Burn retrograde until height at closest position is close to target altitude, but only if it's crosses at a higher altitude.
-                            Debug.Log(" retrograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0"));
+                            Debug.Log(" retrograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
                             herror = deltaHeight * downrangeVec.normalized;
-                            lastHorizontalThrust = (float)dvSolution.magnitude;
-                            Core.Thrust.RequestActiveThrottle(lastHorizontalThrust);
                             rc = 100; // we only want horizontal thrust here
-                            if ((throttleCount >= 4) || (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD))
+                            if ((throttleCount >= 4) || (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD) )//|| (deltaDistance >= 2000))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
@@ -367,7 +372,8 @@ namespace MuMech
                     }
                     vCorrectionAngle = 0;
                     lastHorizontalThrust = (float)thrust;
-                    Core.Thrust.RequestActiveThrottle(lastHorizontalThrust);
+                    double throttleDiv = Core.Landing.debug11/Core.Landing.g;
+                    Core.Thrust.RequestActiveThrottle(lastHorizontalThrust/(float)throttleDiv);
                 }
 
                 // Vertical Control - we want to blend it based on the horizontal error and vertical error. When herror is large we use max thrust and primarily control
@@ -406,7 +412,8 @@ namespace MuMech
                         verticalThrust = horizontalThrust;
                     }
                     lastHorizontalThrust = (float)verticalThrust;
-                    Core.Thrust.RequestActiveThrottle(lastHorizontalThrust); // set vertical thrust
+                    double throttleDiv = Core.Landing.debug11/Core.Landing.g;
+                    Core.Thrust.RequestActiveThrottle(lastHorizontalThrust/(float)throttleDiv); // set vertical thrust
                 }
 
                 return vCorrectionAngle;

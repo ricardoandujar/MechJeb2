@@ -123,7 +123,14 @@ namespace MuMech
                 GUILayout.EndHorizontal();
             }
 
-            DrawGUITogglePredictions();
+            if ( false == DrawGUITogglePredictions())
+            {
+                GUILayout.Label(Localizer.Format("#MechJeb_LandingGuidance_Label10") + Core.Landing.targetingResult.distanceToTarget.ToSI() + "m"
+                                + Localizer.Format("#MechJeb_LandingGuidance_Label13") + (Vessel.Landed
+                                    ? "0.0s"
+                                    : GuiUtils.TimeToDHMS(Core.Landing.targetingResult.tUT - Planetarium.GetUniversalTime(),
+                                        1))); //Target difference = \nMax drag: \nDelta-v needed: \nTime to land:
+            }
 
             if (Core.Landing != null)
             {
@@ -311,13 +318,18 @@ namespace MuMech
                 Core.Landing.debug8h.Text = GUILayout.TextField(Core.Landing.debug8h.Text, GUILayout.Width(35));
                 GUILayout.EndHorizontal();
 
-                //GuiUtils.SimpleTextBox("debug2", Core.Landing.debug2, "", 35);
-                //GuiUtils.SimpleTextBox("debug3", Core.Landing.debug3, "", 35);
-                //GuiUtils.SimpleTextBox("debug4", Core.Landing.debug4, "", 35);
-                //GuiUtils.SimpleTextBox("debug5", Core.Landing.debug5, "", 35);
-                //GuiUtils.SimpleTextBox("debug6", Core.Landing.debug6, "", 35);
-                //GuiUtils.SimpleTextBox("debug7", Core.Landing.debug7, "", 35);
-                //GuiUtils.SimpleTextBox("debug8", Core.Landing.debug8, "", 35);
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("lmaxd:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug10.Text = GUILayout.TextField(Core.Landing.debug10.Text, GUILayout.Width(35));
+                GUILayout.Label("lgain:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug12.Text = GUILayout.TextField(Core.Landing.debug12.Text, GUILayout.Width(35));
+                GUILayout.Label("pcgain:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug11.Text = GUILayout.TextField(Core.Landing.debug11.Text, GUILayout.Width(35));
+                GUILayout.Label("d:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug13.Text = GUILayout.TextField(Core.Landing.debug13.Text, GUILayout.Width(35));
+                GUILayout.Label("fd:", noWrap, GUILayout.ExpandWidth(false));
+                Core.Landing.debug14.Text = GUILayout.TextField(Core.Landing.debug14.Text, GUILayout.Width(35));
+                GUILayout.EndHorizontal();
 
                 if (Core.Landing.Enabled)
                 {
@@ -358,8 +370,9 @@ namespace MuMech
         }
 
         [GeneralInfoItem("#MechJeb_LandingPredictions", InfoItem.Category.Misc)] //Landing predictions
-        private void DrawGUITogglePredictions()
+        private bool DrawGUITogglePredictions()
         {
+            bool rc = false;
             GUILayout.BeginVertical();
 
             bool active = GUILayout.Toggle(_predictor.Enabled, Localizer.Format("#MechJeb_LandingGuidance_checkbox5")); //Show landing predictions
@@ -385,17 +398,20 @@ namespace MuMech
                     GUILayout.Toggle(_predictor.worldTrajectory, Localizer.Format("#MechJeb_LandingGuidance_checkbox8")); //World trajectory
                 _predictor.camTrajectory =
                     GUILayout.Toggle(_predictor.camTrajectory, Localizer.Format("#MechJeb_LandingGuidance_checkbox9")); //Camera trajectory (WIP)
-                DrawGUIPrediction();
+                rc = DrawGUIPrediction();
             }
 
             GUILayout.EndVertical();
+            return rc;
         }
 
-        private void DrawGUIPrediction()
+        private bool DrawGUIPrediction()
         {
+            bool rc = false;
             ReentrySimulation.Result result = _predictor.Result;
             if (result != null)
             {
+                rc = true;
                 switch (result.Outcome)
                 {
                     case ReentrySimulation.Outcome.LANDED:
@@ -437,10 +453,12 @@ namespace MuMech
                         break;
 
                     case ReentrySimulation.Outcome.TIMED_OUT:
-                        GUILayout.Label(Localizer.Format("#MechJeb_LandingGuidance_Label19")); //Reentry simulation timed out.
+                        //GUILayout.Label(Localizer.Format("#MechJeb_LandingGuidance_Label19")); //Reentry simulation timed out.
+                        rc = false;
                         break;
                 }
             }
+            return rc;
         }
 
         private void InitLandingSitesList()

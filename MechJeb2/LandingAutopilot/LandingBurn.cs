@@ -62,7 +62,7 @@ namespace MuMech.LandingAutopilot
             {
                 if (true == UpdateGuidanceAndControl(s))
                 {
-                    return new MoveToTarget2(Core);
+                    return new MoveToTarget(Core);
                 }
                 return this;
             }
@@ -135,8 +135,8 @@ namespace MuMech.LandingAutopilot
                 double ay = a * sin_theta - g;                  // vertical (downward positive)
                 double ax = a * cos_theta;                      // horizontal
 
-                double h_vert  = (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (Vy * Vy) / (2.0 * ay);
-                double d_horiz = (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * ax);
+                double h_vert  = Math.Max(3000, (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (Vy * Vy) / (2.0 * ay));
+                double d_horiz = Math.Max(3000, (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * ax));
 
                 if (sin_theta < 0.25)
                 {
@@ -157,45 +157,50 @@ namespace MuMech.LandingAutopilot
                 }
                 else
                 {
-                    rc = (current_h <= (1.35 * h_vert)) || (current_d <= (1.35 * d_horiz));
+                    rc = (current_h <= (1.85 * h_vert)) || (current_d <= (1.85 * d_horiz));
 
                     // Perform warp if allowed and requested
                     if (checkWarp && (rc == false) && Core.Node.Autowarp && !Vessel.LandedOrSplashed)
                     {
-                        if (VesselState.altitudeASL < Vessel.mainBody.atmosphereDepth)
-                        {
-                            if ( warpOnP == false )
-                            {
-                                //too low to use any regular warp rates. Use physics warp at a max of x2:
-                                Core.Warp.WarpPhysicsAtRate(2);
-                                warpOnP = true;
-                            }
-                        }
-                        else
-                        {
-                            // Conservative velocity estimate for 10-second impact buffer
-                            double velocityGuess = Math.Max(Math.Abs(VesselState.speedVertical), VesselState.localg * 5);
-                            // Safe warp rate: limit based on altitude and orbital period
-                            float warpRate = (float)Math.Min(VesselState.altitudeTrue / (5 * velocityGuess), (Orbit.period / 6));
-
-                            Core.Warp.WarpRegularAtRate(warpRate);
-                            warpOnP = false;
-                            warpOn = true;
-                        }
-                        h_vert *= 1.35;
-                        d_horiz *= 1.35;
+                        h_vert *= 1.85;
+                        d_horiz *= 1.85;
                         Debug.Log($"[ShouldStartBurn2:w] current_h={current_h:F0}, h_vert={h_vert:F0}, current_d={current_d:F0}, d_horiz={d_horiz:F0}");
-                    }
-                    else if (warpOn)
-                    {
-                        Core.Warp.MinimumWarp();
-                        checkWarp = warpOn = warpOnP = false;
                     }
                     else
                     {
                         Debug.Log($"[ShouldStartBurn2] current_h={current_h:F0}, h_vert={h_vert:F0}, current_d={current_d:F0}, d_horiz={d_horiz:F0}");
                     }
                 }
+            }
+
+            // Perform warp if allowed and requested
+            if (checkWarp && (rc == false) && Core.Node.Autowarp && !Vessel.LandedOrSplashed)
+            {
+                if (VesselState.altitudeASL < Vessel.mainBody.atmosphereDepth)
+                {
+                    if (warpOnP == false)
+                    {
+                        //too low to use any regular warp rates. Use physics warp at a max of x2:
+                        Core.Warp.WarpPhysicsAtRate(2);
+                        warpOnP = true;
+                    }
+                }
+                else
+                {
+                    // Conservative velocity estimate for 10-second impact buffer
+                    double velocityGuess = Math.Max(Math.Abs(VesselState.speedVertical), VesselState.localg * 5);
+                    // Safe warp rate: limit based on altitude and orbital period
+                    float warpRate = (float)Math.Min(VesselState.altitudeTrue / (5 * velocityGuess), (Orbit.period / 6));
+
+                    Core.Warp.WarpRegularAtRate(warpRate);
+                    warpOnP = false;
+                    warpOn = true;
+                }
+            }
+            else if (warpOn)
+            {
+                Core.Warp.MinimumWarp(true);
+                checkWarp = warpOn = warpOnP = false;
             }
 
             return rc;
@@ -305,7 +310,7 @@ namespace MuMech.LandingAutopilot
 
             // below this altitude, switch to recovery mode if not on target (prevents hard landings from guidance errors or bad tuning)
             // Or, if the downrange to altitude ratio is close to minRatio, switch to recovery mode - The final landing is based on tracking vertical and horizontal velocity as we zero in to target.
-            if (lastDesiredAcceleration < (0.95*MoveToTarget2.LIMITED_MAX_THRUST_G_RATIO*VesselState.localg))
+            if (lastDesiredAcceleration < (0.95*MoveToTarget.LIMITED_MAX_THRUST_G_RATIO*VesselState.localg))
             {
                 if (((downrange / alt) <= (1.1 * Core.Landing.minRatio)) || (alt < Core.Landing.LandWithMoverAlt) || (downrange < Core.Landing.LandWithMoverOffset))
                 {

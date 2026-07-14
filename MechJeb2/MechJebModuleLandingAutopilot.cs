@@ -337,7 +337,7 @@ namespace MuMech
             {
                 if (UseOnlyMoveToTarget == true)
                 {
-                    SetStep(new MoveToTarget2(Core));
+                    SetStep(new MoveToTarget(Core));
                 }
                 else if (Core.Landing.LandingType == 1)
                 {
@@ -632,13 +632,12 @@ namespace MuMech
             return angle * radius;
         }
 
-        public void ClosestPointToSurfaceTarget(out Vector3d bestPos, out double bestUT, out double bestDist, out Vector3d surfaceVel, int coarseSamples = 50)
+        public void ClosestPointToSurfaceTarget(out Vector3d bestPos, out double bestUT, out double bestDist, out Vector3d surfaceVel, int coarseSamples = 50, double maxHorizon = 3600)
         {
             Orbit orbit = Vessel.orbit;
             CelestialBody body = orbit.referenceBody;
             double R = body.Radius;
             double now = Planetarium.GetUniversalTime();
-            const double maxHorizon = 3600.0;
             const double tol = 0.05;
             // --- Helpers -------------------------------------------------------------
             Vector3d TargetPosAtUT(double ut)
@@ -732,7 +731,7 @@ namespace MuMech
             Vector3d velFuture = Vessel.orbit.getOrbitalVelocityAtUT(bestUT); // Future inertial velocity ---
             Vector3d rotVelFuture = Vector3d.Cross(MainBody.angularVelocity, bestPos.normalized); // Body rotation velocity at that future point ---
             surfaceVel = velFuture - rotVelFuture;// Future surface-relative velocity ---
-            //Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1"));
+            Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1"));
             bestPos += body.position;
         }
 
@@ -1138,6 +1137,29 @@ namespace MuMech
             {
                 Core.Landing.TgtAlt = Core.Landing.TargetAltPercent * TargetAltitude / 100.0;
             }
+        }
+
+        //
+        // This is used to calculate a positive deltav to avoid collision with terrain in the future
+        // Will probably work best when attempting to move up but there is a steep hill ahead, but may
+        // be needed on the way down as long as we are not about to land.
+        //
+        public (double deltaV, bool willCrash) PredictAvoidCollisionDeltaV(double lookAheadSec, double minAltitude)
+        {
+            double ut = Planetarium.GetUniversalTime() + lookAheadSec;
+            Vector3d pos = Vessel.orbit.getPositionAtUT(ut);
+            double currentAlt = Vessel.mainBody.GetAltitude(pos) - Vessel.mainBody.TerrainAltitude(pos);
+            double deficit = minAltitude - currentAlt;
+            if (deficit <= 0) return (0, false); // Safe - no adjustment necessary
+
+            double vv = Vessel.verticalSpeed;
+            double aNet = VesselState.limitedMaxThrustAccel - VesselState.localg; // still compute for stopDist
+            double stopDist = (vv < 0) ? (vv * vv) / (2 * aNet) : 0;
+            bool willCrash = (currentAlt - stopDist) < 0;
+            if (willCrash) return (0, true);  // Worst case - even with max acceleration we will not make it, attempt accelerate up and backwards
+
+            double reqV = Math.Sqrt(2 * aNet * deficit) - vv;
+            return (Math.Max(0, reqV), false); // Only positive vertical adjust needed
         }
     }
 

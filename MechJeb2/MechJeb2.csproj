@@ -70,7 +70,6 @@
     <Compile Include="LandingAutopilot\KillHorizontalVelocity.cs" />
     <Compile Include="LandingAutopilot\LandingBurn.cs" />
     <Compile Include="LandingAutopilot\LowDeorbitBurn.cs" />
-    <Compile Include="LandingAutopilot\MoveToTarget2.cs" />
     <Compile Include="LandingAutopilot\MoveToTarget.cs" />
     <Compile Include="LandingAutopilot\PlaneChange.cs" />
     <Compile Include="LandingAutopilot\TargetSubOrbit.cs" />
