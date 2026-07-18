@@ -1,16 +1,7 @@
 ﻿using System;
-using System.Collections.Specialized;
 using KSP.Localization;
 using UnityEngine;
 
-//using System.Collections.Specialized;
-//using System.Diagnostics;
-//using System.Linq;
-//using Steamworks;
-//using static SoftMasking.SoftMask;
-//using static alglib;
-//using static SoftMasking.SoftMask;
-//using static UnityEngine.TouchScreenKeyboard;
 
 namespace MuMech
 {
