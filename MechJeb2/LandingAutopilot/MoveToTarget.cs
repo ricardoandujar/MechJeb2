@@ -375,20 +375,15 @@ namespace MuMech
 
                 // If the landing frame swung hard (overshoot / pad chatter), old H/L integrals and
                 // the world-frame horizontal average point the wrong way and fight the new axes.
+                // InvalidateHorizontal also drops the D sample history so the next tick does not
+                // invent a derivative from the pre-swing frame axes.
                 if (hasPrevLandingFrame)
                 {
                     double alignH = Vector3d.Dot(hDir, prevHDir);
                     double alignL = Vector3d.Dot(latDir, prevLatDir);
                     if (alignH < 0.2 || alignL < 0.2)
                     {
-                        Vector3d i = velocityPID.Integral;
-                        i.x = 0;
-                        i.z = 0;
-                        velocityPID.Integral = i;
-                        Vector3d d = velocityPID.FilteredDeriv;
-                        d.x = 0;
-                        d.z = 0;
-                        velocityPID.FilteredDeriv = d;
+                        velocityPID.InvalidateHorizontal();
                         horizontalAvg = Vector3d.zero;
                         aHAvg = 0;
                         aLAvg = 0;
@@ -410,11 +405,12 @@ namespace MuMech
                     eV *= 0.005;
 
                 Vector3d error = new Vector3d(eH, eV, eL);
-                Vector3d meas  = new Vector3d(Vector3d.Dot(hSurface, hDir), VesselState.speedVertical, Vector3d.Dot(hSurface, latDir));
                 double dt = Time.fixedDeltaTime;
                 if (dt < 1e-6) dt = 0.02;
 
-                velocityPID.Accumulate(error, meas, dt, DERIV_ALPHA, Core.Landing.debug92, Core.Landing.debug91);
+                // Pass world H surface + current frame axes so D is re-projected each tick
+                // instead of treating a rotating landing frame as a velocity jump.
+                velocityPID.Accumulate(error, hSurface, VesselState.speedVertical, hDir, latDir, dt, DERIV_ALPHA, Core.Landing.debug92, Core.Landing.debug91);
 
                 double gainV = ScheduledGain(Math.Abs(eV),
                     Core.Landing.debug3, Core.Landing.debug4, Core.Landing.debug5, Core.Landing.debug6, Core.Landing.debug7, Core.Landing.debug8);
@@ -465,9 +461,19 @@ namespace MuMech
                 // Smooth H/L in the landing frame, then rebuild world accel. Averaging the world
                 // horizontal vector (old path) smeared yesterday's H into today's L whenever hDir
                 // rotated — leftover axis fighting after the PID itself was decoupled.
+                // debug96 == 0 must not freeze aHAvg/aLAvg at 0 after a frame reset (that looked
+                // like dead H/L knobs). Treat a near-zero blend as "no smoothing".
                 double blend = Core.Landing.debug96;
-                aHAvg = aHAvg * (1 - blend) + blend * aH;
-                aLAvg = aLAvg * (1 - blend) + blend * aL;
+                if (blend < 1e-9)
+                {
+                    aHAvg = aH;
+                    aLAvg = aL;
+                }
+                else
+                {
+                    aHAvg = aHAvg * (1 - blend) + blend * aH;
+                    aLAvg = aLAvg * (1 - blend) + blend * aL;
+                }
                 aH = aHAvg;
                 aL = aLAvg;
                 Vector3d accel = aH * hDir + aV * up + aL * latDir;

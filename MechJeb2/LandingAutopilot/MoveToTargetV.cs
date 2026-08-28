@@ -27,25 +27,53 @@ namespace MuMech
             /// <summary>Filtered d(measVel)/dt in the landing frame (D-on-measurement, not D-on-error).</summary>
             public Vector3d FilteredDeriv;
 
-            private Vector3d _measPrev;
+            // Previous samples in WORLD space so D can be re-projected into today's landing
+            // frame. Storing frame-axis meas made soft (and hard) frame rotations look like
+            // huge velocity changes and re-coupled H/L through the D term.
+            private Vector3d _prevHSurface;
+            private double   _prevVertSpeed;
             private bool     _hasPrev;
             private Vector3d _lastError;
 
             public void Reset()
             {
-                Integral      = Vector3d.zero;
-                FilteredDeriv = Vector3d.zero;
-                _measPrev     = Vector3d.zero;
-                _hasPrev      = false;
-                _lastError    = Vector3d.zero;
+                Integral       = Vector3d.zero;
+                FilteredDeriv  = Vector3d.zero;
+                _prevHSurface  = Vector3d.zero;
+                _prevVertSpeed = 0;
+                _hasPrev       = false;
+                _lastError     = Vector3d.zero;
+            }
+
+            /// <summary>
+            /// Drop along-track / lateral I and D after a hard landing-frame swing.
+            /// Keeps vertical I (up is stable) and clears the world sample so the next
+            /// Accumulate does not invent a D spike from the old frame.
+            /// </summary>
+            public void InvalidateHorizontal()
+            {
+                Vector3d i = Integral;
+                i.x = 0;
+                i.z = 0;
+                Integral = i;
+
+                Vector3d d = FilteredDeriv;
+                d.x = 0;
+                d.z = 0;
+                FilteredDeriv = d;
+
+                _hasPrev = false;
             }
 
             /// <summary>
             /// Advance I and filtered measurement derivative.
             /// Vertical I matches the working axis PID (accumulates error with no dt).
             /// Along-track and lateral I use error*dt like the working horizontal PID.
+            /// D is computed by projecting the previous and current world velocities into
+            /// the CURRENT landing frame, so a rotating hDir/latDir does not fake dV/dt.
             /// </summary>
-            public void Accumulate(Vector3d error, Vector3d measVel, double dt, double alpha,
+            public void Accumulate(Vector3d error, Vector3d hSurface, double vertSpeed,
+                                   Vector3d hDir, Vector3d latDir, double dt, double alpha,
                                    double resetAbsH, double resetAbsV)
             {
                 if (dt < 1e-6)
@@ -69,19 +97,29 @@ namespace MuMech
                 if (Math.Abs(error.z) > resetAbsH)
                     Integral.z = 0;
 
+                Vector3d meas = new Vector3d(
+                    Vector3d.Dot(hSurface, hDir),
+                    vertSpeed,
+                    Vector3d.Dot(hSurface, latDir));
+
                 if (_hasPrev)
                 {
-                    Vector3d rawDv = (measVel - _measPrev) / dt;
+                    Vector3d prevMeas = new Vector3d(
+                        Vector3d.Dot(_prevHSurface, hDir),
+                        _prevVertSpeed,
+                        Vector3d.Dot(_prevHSurface, latDir));
+                    Vector3d rawDv = (meas - prevMeas) / dt;
                     FilteredDeriv = alpha * FilteredDeriv + (1.0 - alpha) * rawDv;
                 }
                 else
                 {
                     FilteredDeriv = Vector3d.zero;
-                    _hasPrev      = true;
+                    _hasPrev = true;
                 }
 
-                _measPrev  = measVel;
-                _lastError = error;
+                _prevHSurface  = hSurface;
+                _prevVertSpeed = vertSpeed;
+                _lastError     = error;
             }
 
             /// <summary>
