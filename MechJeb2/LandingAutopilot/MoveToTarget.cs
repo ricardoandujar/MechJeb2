@@ -381,6 +381,10 @@ namespace MuMech
                     Core.Landing.debug3, Core.Landing.debug4, Core.Landing.debug5, Core.Landing.debug6, Core.Landing.debug7, Core.Landing.debug8);
                 double gainH = ScheduledGain(Math.Abs(eH),
                     Core.Landing.debug3h, Core.Landing.debug4h, Core.Landing.debug5h, Core.Landing.debug6h, Core.Landing.debug7h, Core.Landing.debug8h);
+                // Schedule L on |eL|, not |eH|. Reusing gainH zeroed lateral in the H
+                // inner deadband, which is exactly when we still need to kill cross-track.
+                double gainL = ScheduledGain(Math.Abs(eL),
+                    Core.Landing.debug3h, Core.Landing.debug4h, Core.Landing.debug5h, Core.Landing.debug6h, Core.Landing.debug7h, Core.Landing.debug8h);
 
                 double kpV = VerticalKp();
                 double kiV = VerticalKi();
@@ -405,15 +409,16 @@ namespace MuMech
                 double gainCancelHVelocity = (hTargetError <= hCloseLimit) ? baseGain : baseGain / 13.0;
                 double kpL = kpH * Core.Landing.debug12 * gainCancelHVelocity;
                 double kiL = kiH * 0.25 * Core.Landing.debug12;
-                double aL = gainH * (kpL * eL + kiL * velocityPID.Integral.z + dL);
-
-                // Cap |aL| vs |aH| like the old debug10 limit of lateral vs horizontal error.
-                double aHAbs = Math.Abs(aH);
-                double aLMax = Core.Landing.debug10 * Math.Max(aHAbs, 1e-6);
-                if (Math.Abs(aL) > aLMax)
-                    aL = Math.Sign(aL) * aLMax;
+                double aL = gainL * (kpL * eL + kiL * velocityPID.Integral.z + dL);
 
                 double aLimit = Math.Max(1e-6, actualLimitedMaxThrustAccel);
+                // debug10 still limits L vs H, but never below 20% of available accel.
+                // Capping against max(|aH|, 1e-6) froze L whenever H was settled and left
+                // the pad meander the old mix was supposed to kill.
+                double aHAbs = Math.Abs(aH);
+                double aLMax = Math.Max(Core.Landing.debug10 * aHAbs, 0.2 * aLimit);
+                if (Math.Abs(aL) > aLMax)
+                    aL = Math.Sign(aL) * aLMax;
                 aV = Math.Max(-aLimit, Math.Min(aLimit, aV));
                 aH = Math.Max(-aLimit, Math.Min(aLimit, aH));
                 aL = Math.Max(-aLimit, Math.Min(aLimit, aL));
@@ -620,7 +625,10 @@ namespace MuMech
                     setSubOrbitalHorizontal(ref desiredHorizontalVel, ref herror);
                 }
 
-                // For now check collision avoidance while increasing vertical as it may not be enough
+                // Hop-phase collision (Keplerian 15s / 1500 m look-ahead). That predictor
+                // false-fires on the pad, so it stays gated to hTargetError > 5 km.
+                // The 30s ignore is load-bearing for hops off the ground: minAltitude is
+                // 1500 m, so a fresh MoveToTarget at 0-100 m would always boost vertical.
                 if(vIgnoreCollision > 0)
                 {
                     vIgnoreCollision--;
@@ -648,7 +656,7 @@ namespace MuMech
                     }
                     else if (vCollisionCounter > 0)
                     {
-                        desiredVerticalSpeed += vCollisionDeltaV*(vCollisionCounter/COLLISION_TAIL);
+                        desiredVerticalSpeed += vCollisionDeltaV * ((double)vCollisionCounter / COLLISION_TAIL);
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
                         vCollisionCounter--;
                         Debug.Log("collision3: " + vError.ToString("F2") + "  " + vCollisionCounter.ToString("F0"));
@@ -760,7 +768,6 @@ namespace MuMech
                 double divisor = (hTargetError > hMidLimit) ? divFar : (hTargetError > hCloseLimit) ? divMid : divClose;  // 100-200-400(pol)<=(baseline2-gilly)2-20-30<=(baseline1)2-50-90
                 double _hCorrectionUpAngle;
                 double maxHThrust = Math.Min(LOW_GRAVITY_THRUST_MAX * Core.Landing.g, limitedMaxThrustAccel);
-                double gainCancelHVelocity = (hTargetError <= hCloseLimit) ? baseGain : baseGain / 13.0; // gilly=4(hTargetError < 500)
 
                 // Scale divisor based on local gravity and cap the values.
                 // 2 <= 1.0 (slight flipping) <= 0.5 (lots of flipping) <= 2.0  ? Divisor is bigger for larger gravity - not sure this is right
@@ -876,18 +883,10 @@ namespace MuMech
                     Debug.Log("setHorizontalSpeed: default horizontal");
                 }
 
-                // Zero out the surface lateral horizontal velocity relative to the desired horizontal velocity - avoids a limit cycle.
-                Vector3d lateralHorizontal;
-                if (Core.Landing.g <= Core.Landing.LOW_GRAVITY)
-                {
-                    lateralHorizontal = Core.Landing.debug12 * gainCancelHVelocity * Vector3d.Exclude(desiredHorizontalVel, VesselState.horizontalSurface);
-                }
-                else
-                {
-                    lateralHorizontal = Core.Landing.debug12 * gainCancelHVelocity * Vector3d.Exclude(desiredHorizontalVel, VesselState.horizontalSurface);
-                }
-                lateralHorizontal = Math.Min(Core.Landing.debug10*herror.magnitude,lateralHorizontal.magnitude) *lateralHorizontal.normalized; // limit lateral to 20% of the horizontal error to avoid instability.
-                herror -= lateralHorizontal;
+                // Lateral is a first-class PID axis in setThrustVector (eL / aL).
+                // Do not fold it into herror: that was the old axis-independent mix and it
+                // skews the landing frame near the pad (BuildLandingFrame falls back to
+                // hError when desiredHorizontalVel is tiny).
 
                 // Calculate horizontal correction angle using horizontal herror.
                 return Math.Max(0, Math.Min(_hCorrectionUpAngle, baseGain * H_CORRECTION_ANGLE_CONSTANT * herror.magnitude));
