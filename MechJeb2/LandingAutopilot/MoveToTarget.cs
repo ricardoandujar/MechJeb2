@@ -70,6 +70,12 @@ namespace MuMech
             private int ignoreLandingCounter = 0;   // Used to Control how long to ignore landing check
             private double verticalSign = 1;   // Used to control the sign of vertical thrust in low gravity - when upright verticalSign is positive, when pitched forward to speed up it is negative, when pitched back to slow down it is positive. This allows the PID controller to continue to operate even when pitched forward or backward by not allowing the vertical thrust to be negative when pitched forward and not allowing the vertical thrust to be positive when pitched back.
             private Vector3d horizontalAvg;
+            // Landing-frame H/L smoothing (world-frame horizontalAvg re-coupled axes when hDir rotated).
+            private double aHAvg;
+            private double aLAvg;
+            private Vector3d prevHDir;
+            private Vector3d prevLatDir;
+            private bool hasPrevLandingFrame;
             private double hCurrentError = 0;
             private double startTiltAlt = 0;
             private double startTiltHVel = 0;
@@ -287,11 +293,19 @@ namespace MuMech
             private void BuildLandingFrame(Vector3d desiredHorizontalVel, Vector3d hError, out Vector3d hDir, out Vector3d up, out Vector3d latDir)
             {
                 up = Vessel.up;
-                hDir = Vector3d.Exclude(up, desiredHorizontalVel);
+                // Near the pad desiredHorizontalVel is tiny and noisy. Prefer the geometric
+                // target direction so the H/L frame does not chatter and re-fight itself.
+                Vector3d towardTarget = Vector3d.Exclude(up, Core.Landing.targetingResult.horizontalVec);
+                if (desiredHorizontalVel.sqrMagnitude >= 0.25)
+                    hDir = Vector3d.Exclude(up, desiredHorizontalVel);
+                else if (towardTarget.sqrMagnitude > 1e-12)
+                    hDir = towardTarget;
+                else
+                    hDir = Vector3d.Exclude(up, desiredHorizontalVel);
                 if (hDir.sqrMagnitude < 1e-12)
                     hDir = Vector3d.Exclude(up, hError);
                 if (hDir.sqrMagnitude < 1e-12)
-                    hDir = Vector3d.Exclude(up, Core.Landing.targetingResult.horizontalVec);
+                    hDir = towardTarget;
                 if (hDir.sqrMagnitude < 1e-12)
                     hDir = Vector3d.Exclude(up, VesselState.forward);
                 if (hDir.sqrMagnitude < 1e-12)
@@ -359,6 +373,31 @@ namespace MuMech
                     hHysteresis = false;
                 }
 
+                // If the landing frame swung hard (overshoot / pad chatter), old H/L integrals and
+                // the world-frame horizontal average point the wrong way and fight the new axes.
+                if (hasPrevLandingFrame)
+                {
+                    double alignH = Vector3d.Dot(hDir, prevHDir);
+                    double alignL = Vector3d.Dot(latDir, prevLatDir);
+                    if (alignH < 0.2 || alignL < 0.2)
+                    {
+                        Vector3d i = velocityPID.Integral;
+                        i.x = 0;
+                        i.z = 0;
+                        velocityPID.Integral = i;
+                        Vector3d d = velocityPID.FilteredDeriv;
+                        d.x = 0;
+                        d.z = 0;
+                        velocityPID.FilteredDeriv = d;
+                        horizontalAvg = Vector3d.zero;
+                        aHAvg = 0;
+                        aLAvg = 0;
+                    }
+                }
+                prevHDir = hDir;
+                prevLatDir = latDir;
+                hasPrevLandingFrame = true;
+
                 double eH = Vector3d.Dot(desiredHorizontalVel - hSurface, hDir);
                 double eV = vError;
                 double eL = -Vector3d.Dot(hSurface, latDir);
@@ -423,13 +462,16 @@ namespace MuMech
                 aH = Math.Max(-aLimit, Math.Min(aLimit, aH));
                 aL = Math.Max(-aLimit, Math.Min(aLimit, aL));
 
+                // Smooth H/L in the landing frame, then rebuild world accel. Averaging the world
+                // horizontal vector (old path) smeared yesterday's H into today's L whenever hDir
+                // rotated — leftover axis fighting after the PID itself was decoupled.
+                double blend = Core.Landing.debug96;
+                aHAvg = aHAvg * (1 - blend) + blend * aH;
+                aLAvg = aLAvg * (1 - blend) + blend * aL;
+                aH = aHAvg;
+                aL = aLAvg;
                 Vector3d accel = aH * hDir + aV * up + aL * latDir;
-
-                // Smooth the horizontal command (working debug96 average) without touching vertical.
-                Vector3d aVert  = Vector3d.Dot(accel, up) * up;
-                Vector3d aHoriz = accel - aVert;
-                horizontalAvg = horizontalAvg * (1 - Core.Landing.debug96) + Core.Landing.debug96 * aHoriz;
-                accel = horizontalAvg + aVert;
+                horizontalAvg = aH * hDir + aL * latDir;
 
                 bool upright = false;
                 double vMinAngle;
@@ -538,6 +580,8 @@ namespace MuMech
                 {
                     accel = up * Math.Max(0, Vector3d.Dot(accel, up));
                     horizontalAvg = Vector3d.zero;
+                    aHAvg = 0;
+                    aLAvg = 0;
                     Debug.Log("initial ascension");
                 }
                 // Old mixer zeroed H *throttle* when >50 deg off, but kept H in the attitude vector so
