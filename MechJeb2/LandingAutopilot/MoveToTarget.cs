@@ -363,8 +363,11 @@ namespace MuMech
                 double eV = vError;
                 double eL = -Vector3d.Dot(hSurface, latDir);
 
-                // Working high-g vertical PID scaled the error down when trying to arrest an ascent.
-                if (Core.Landing.g > Core.Landing.LOW_GRAVITY && eV < 0)
+                // High-g: soften only when the speed profile itself is climbing and we are
+                // faster-up than commanded. During descent (desiredVerticalSpeed <= 0) this
+                // 0.005 scale left aV stuck near +g, so the vessel climbed through a -0.5 m/s
+                // target even with a working v* loop.
+                if (Core.Landing.g > Core.Landing.LOW_GRAVITY && desiredVerticalSpeed > 0 && eV < 0)
                     eV *= 0.005;
 
                 Vector3d error = new Vector3d(eH, eV, eL);
@@ -388,10 +391,11 @@ namespace MuMech
                 double dH = -Core.Landing.debug13 * velocityPID.FilteredDeriv.x;
                 double dL = -Core.Landing.debug13 * velocityPID.FilteredDeriv.z;
 
-                // Full local-g feedforward on the vertical axis. Tilt then raises |a| automatically
-                // (the old code added g*|dot(up,forward)| only to the vertical throttle, which is
-                // what let horizontal and vertical fight over the hypot).
-                double gComp = VesselState.localg;
+                // Hover feedforward on +up so a tilt raises |a| and the vertical component stays ~g.
+                // Arm it only while the vertical loop is live: zero v* knobs must not keep thrusting +g
+                // (that was the upward bias with debug=0).
+                bool verticalLoopOn = Math.Abs(gainV) > 1e-18 && (Math.Abs(kpV) > 1e-18 || Math.Abs(kiV) > 1e-18);
+                double gComp = verticalLoopOn ? VesselState.localg : 0.0;
 
                 double aV = gComp + gainV * (kpV * eV + kiV * velocityPID.Integral.y);
                 double aH = gainH * (kpH * eH + kiH * velocityPID.Integral.x + dH);
@@ -520,18 +524,9 @@ namespace MuMech
                     Debug.Log("hadjust " + horizNow.magnitude.ToString("F3") + "," + vCmd.ToString("F3"));
                 }
 
-                // hCorrectionAngle is ~ tan(tilt) from remaining H error. Cap |aH| so we do not
-                // command more tilt than the working mixer would have.
-                if (hCorrectionAngle > 0)
-                {
-                    horizNow = accel - up * Vector3d.Dot(accel, up);
-                    double maxFromAngle = hCorrectionAngle * Math.Max(Math.Abs(Vector3d.Dot(accel, up)), VesselState.localg);
-                    if (horizNow.magnitude > maxFromAngle)
-                    {
-                        horizNow *= maxFromAngle / horizNow.magnitude;
-                        accel = horizNow + up * Vector3d.Dot(accel, up);
-                    }
-                }
+                // Do not cap |aH| with hCorrectionAngle. That leftover mix weight is baseGain*0.4*|herror|,
+                // not tan(tilt) in m/s^2. Near the target it crushed the H PID to ~0 and left the
+                // ZEM/ZEV residual ~0.7 m/s meander. Tilt limit is the debug93 cone above.
 
                 // Initial ascent: vertical only until 100 m.
                 if ((desiredVerticalSpeed > 0) && (VesselState.altitudeTrue <= 100))
@@ -540,14 +535,11 @@ namespace MuMech
                     horizontalAvg = Vector3d.zero;
                     Debug.Log("initial ascension");
                 }
-                else
-                {
-                    Vector3d hOnly = accel - up * Vector3d.Dot(accel, up);
-                    if ((hOnly.magnitude > 0.005) && Vector3.Angle(hOnly, VesselState.forward) > 50)
-                    {
-                        accel = up * Vector3d.Dot(accel, up);
-                    }
-                }
+                // Old mixer zeroed H *throttle* when >50 deg off, but kept H in the attitude vector so
+                // the craft would still slew toward the target. Stripping H from accel here
+                // pointed attitude at +up forever after a vertical ZEM/ZEV handoff (forward ~ up,
+                // H command ~ 90 deg) — no steering. Drive() already cuts throttle beyond
+                // throttleAngle (30 deg).
 
                 // Rockets cannot pull. Allow a downward world component only for low-g pitch-over.
                 bool allowPitchOver = (Core.Landing.g <= Core.Landing.LOW_GRAVITY) && (desiredVerticalSpeed < 0) && (VesselState.altitudeTrue >= 30);
