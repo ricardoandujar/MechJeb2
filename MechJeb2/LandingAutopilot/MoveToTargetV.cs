@@ -1,241 +1,114 @@
-﻿using System;
-using KSP.Localization;
-using TMPro;
+using System;
 using UnityEngine;
-using static alglib;
-using static iT;
 
 namespace MuMech
 {
     namespace Landing
     {
-        // Vector PID with gravity/TWR scaling
-        public class VectorPID
+        /// <summary>
+        /// Unified 3D velocity PID in the landing frame.
+        /// Frame axes: X = along-track (horizontal toward target), Y = vertical (up), Z = lateral (cross-track).
+        ///
+        /// Per-axis Kp/Ki/Kd and gain schedules stay independently adjustable (the existing v* / h*
+        /// debug knobs, plus lateral via debug10/debug12). Coupling is NOT "run three loops and
+        /// hypot the throttles" — integral/D state lives in one object, anti-windup is on the
+        /// saturated 3D accel, and the caller turns one acceleration vector into attitude+throttle.
+        ///
+        /// This replaces the unfinished VectorPID skeleton. The live AutopilotStep is still
+        /// MoveToTarget; the previous axis-independent controller is MoveToTargetAxisIndependent.
+        /// </summary>
+        public class LandingFramePID
         {
-            private Vector3d Kp;
-            private Vector3d Ki;
-            private Vector3d MinI;
-            private Vector3d MaxI;
-            private Vector3d Kd;
-            private double FilterAlpha;
-            private Vector3d integral = Vector3d.zero;
-            private Vector3d prevError = Vector3d.zero;
-            private Vector3d filteredDeriv = Vector3d.zero;
-            private Vessel vessel;
-            private bool use_g;
+            public const double IntegralMax = 500.0;
 
-            public VectorPID(ref Vessel _vessel, ref Vector3d kp, ref Vector3d ki, ref Vector3d kd, ref double filterAlpha, double maxI, bool use_g = false)
+            /// <summary>Integral state: x=along-track, y=vertical, z=lateral.</summary>
+            public Vector3d Integral;
+
+            /// <summary>Filtered d(measVel)/dt in the landing frame (D-on-measurement, not D-on-error).</summary>
+            public Vector3d FilteredDeriv;
+
+            private Vector3d _measPrev;
+            private bool     _hasPrev;
+            private Vector3d _lastError;
+
+            public void Reset()
             {
-                vessel = _vessel;
-                Kp = kp;
-                Ki = ki;
-                Kd = kd;
-                FilterAlpha = filterAlpha;
-                MinI = new Vector3d(-maxI, -maxI, -maxI);
-                MaxI = new Vector3d( maxI,  maxI,  maxI);
-                this.use_g = use_g;
+                Integral      = Vector3d.zero;
+                FilteredDeriv = Vector3d.zero;
+                _measPrev     = Vector3d.zero;
+                _hasPrev      = false;
+                _lastError    = Vector3d.zero;
             }
 
-            public Vector3d Update(Vector3d error, double dt, double g, double maxAccel)
+            /// <summary>
+            /// Advance I and filtered measurement derivative.
+            /// Vertical I matches the working axis PID (accumulates error with no dt).
+            /// Along-track and lateral I use error*dt like the working horizontal PID.
+            /// </summary>
+            public void Accumulate(Vector3d error, Vector3d measVel, double dt, double alpha,
+                                   double resetAbsH, double resetAbsV)
             {
-                double scale = g / maxAccel;   // higher accel capability → lower gains
+                if (dt < 1e-6)
+                    dt = 0.02;
 
-                Vector3d scaledKp = Kp * scale;
-                Vector3d scaledKi = Ki * scale;
-                Vector3d scaledKd = Kd * scale;
+                // Vertical (working pidVelocity_v): I += error, no dt.
+                Integral.y += error.y;
+                Integral.y =  Clamp(Integral.y, -IntegralMax, IntegralMax);
+                if (Math.Abs(error.y) > resetAbsV)
+                    Integral.y = 0;
 
-                integral = Vector3d.Max(MinI, Vector3d.Min(MaxI, integral + error * dt));
+                // Along-track (working pidVelocity_h): I += error*dt.
+                Integral.x += error.x * dt;
+                Integral.x =  Clamp(Integral.x, -IntegralMax, IntegralMax);
+                if (Math.Abs(error.x) > resetAbsH)
+                    Integral.x = 0;
 
-                Vector3d deriv = (error - prevError) / dt;
-                filteredDeriv = FilterAlpha * filteredDeriv + (1 - FilterAlpha) * deriv;
+                // Lateral: same formulation as along-track so it shares a time scale with H.
+                Integral.z += error.z * dt;
+                Integral.z =  Clamp(Integral.z, -IntegralMax, IntegralMax);
+                if (Math.Abs(error.z) > resetAbsH)
+                    Integral.z = 0;
 
-                Vector3d p = Vector3d.Scale(scaledKp, error);
-                Vector3d i = Vector3d.Scale(scaledKi, integral);
-                Vector3d d = Vector3d.Scale(scaledKd, filteredDeriv);
-
-                Vector3d output = p + i + d + ((use_g) ? vessel.up * g : Vector3d.zero);
-
-                prevError = error;
-                return output;
-            }
-
-            public void Reset() { integral = prevError = filteredDeriv = Vector3.zero; }
-        }
-
-        public class MoveToTargetV : AutopilotStep
-        {
-            enum MoveSequence
-            {
-                Disabled,           // Disabled - do nothing - When Land at Target is selected, this will transition to BurnToApoA
-                BurnToApoA,         // Perform Burn to Acend To Suborbital Apoapsis - After this step, either go to CoastToApoA or CoastToLandingBurn
-                CoastToApoA,        // Wait for Apoapsis - Apoapsis set, coast to Apoapsis or Warp to Apoapsis - At the end of this step, either go to TargetSubObit or CoastToLandingBurn
-                CoastToLandingBurn, // Coast to Landing Burn - Wait for Landing Burn, or Warp to Landing Burn - After this step, either go to LandingBurn or FinalLanding
-                LandingBurn,        // Perform Landing Burn - Burn to Landing Burn - After this step, either go to FinalLanding
-                FinalLanding        // Move to Final Landing and Land - this will transition to Disabled when the landing is complete
-            }
-
-            private Vessel vessel;
-            private Vector3d PosKp = new Vector3d(0.6, 0.6, 0.6);
-            private Vector3d PosKi = new Vector3d(0.08, 0.08, 0.08);
-            private Vector3d PosKd = new Vector3d(1.2, 1.2, 1.2);
-            private double PosFilterAlpha = 0.82;
-            private VectorPID positionPID; // terminal
-
-            private Vector3d VelKp = new Vector3d(0.6, 0.6, 0.6);
-            private Vector3d VelKi = new Vector3d(0.08, 0.08, 0.08);
-            private Vector3d VelKd = new Vector3d(1.2, 1.2, 1.2);
-            private double VelFilterAlpha = 0.82;
-            private VectorPID velocityPID;
-
-            private MoveSequence sequence = MoveSequence.Disabled; // Initialize to disabled, will determine next step based on conditions
-
-            public MoveToTargetV(MechJebCore core) : base(core)
-            {
-                vessel = Core.part.vessel;
-                positionPID = new VectorPID(ref vessel, ref PosKp, ref PosKi, ref PosKd, ref PosFilterAlpha, 1.0);
-                velocityPID = new VectorPID(ref vessel, ref VelKp, ref VelKi, ref VelKd, ref VelFilterAlpha, 1.0, true);
-            }
-
-            public override AutopilotStep Drive(FlightCtrlState s)
-            {
-                // ... your setup
-
-                // your phase / suborbital logic here
-                // In Drive / UpdateControl
-                Vector3d posError = Core.Target.GetPositionTargetPosition() - Vessel.CoM;
-                double altitude = Vector3d.Dot(posError, Vessel.up);
-                Vector3d vel = Vessel.obt_velocity; // or surface
-                Vector3d velError = CalculateVelocityError(posError, vel, Vessel.up, altitude); // your ratio logic
-
-                // 1. Get ZEM/ZEV feedforward (your existing method)
-                Vector3d zemZevAccel = ComputeZEMZEV(posError, vel, landingVelocity, t_go); // returns desired accel
-
-                // 2. PID correction on velocity error
-                Vector3d pidCorrection = velocityPID.Update(velError, Time.fixedDeltaTime, VesselState.localg, VesselState.limitedMaxThrustAccel);
-
-                // 3. Combined desired acceleration
-                Vector3d desiredAccel = zemZevAccel + pidCorrection;
-
-                // 4. Terminal positionPID blend (close range)
-                if (altitude < 50.0)
+                if (_hasPrev)
                 {
-                    Vector3d posCorr = positionPID.Update(posError, Time.fixedDeltaTime,  VesselState.localg, VesselState.limitedMaxThrustAccel) * 0.5;
-                    desiredAccel += posCorr; // or replace velocity target
+                    Vector3d rawDv = (measVel - _measPrev) / dt;
+                    FilteredDeriv = alpha * FilteredDeriv + (1.0 - alpha) * rawDv;
                 }
                 else
                 {
-                    // rely on ZEM/ZEV and velocity PID, mostly ZEM/ZEV feedforward, less velocity PID correction
+                    FilteredDeriv = Vector3d.zero;
+                    _hasPrev      = true;
                 }
 
-                // Limit, gravity already in ZEM/ZEV or add here
-                ExecuteThrust(desiredAccel);
-
-                return this;
+                _measPrev  = measVel;
+                _lastError = error;
             }
 
-            private Vector3d CalculateVelocityError(Vector3d posError, Vector3d currentVel, Vector3d up, double altitude)
+            /// <summary>
+            /// Coupled anti-windup: if the 3D accel was reduced (cone, saturation, or projection),
+            /// bleed I on every axis rather than letting one axis wind up while another is clipped.
+            /// </summary>
+            public void AntiWindup(Vector3d rawAccel, Vector3d appliedAccel)
             {
-                double hTargetError = posError.magnitude; // or your targetingResult.hTargetError
-                float ratio = (float)(hTargetError / altitude);
+                double rawMag      = rawAccel.magnitude;
+                double appliedMag  = appliedAccel.magnitude;
+                if (rawMag < 1e-9)
+                    return;
 
-                // Vertical desired speed (your steepness logic)
-                float fraction = (ratio >= maxRatio) ? 0f : Mathf.Max(0f, Mathf.Min(1f, (maxRatio - ratio) / (maxRatio - minRatio)));
-                double desiredVerticalSpeed = (fraction < 0.0001f) ? 0 : -Math.Abs(desiredVerticalSpeed) * ((Mathf.Pow(steepness, fraction) - 1f) / (steepness - 1f));
-
-                // Horizontal (your divisor + max speed logic)
-                double divisor = (hTargetError > hMidLimit) ? divFar : (hTargetError > hCloseLimit) ? divMid : divClose;
-                double maxH = Math.Min(hTargetError * 2 * maxHThrust / divisor, Core.Landing.GetCircularOrbitSpeed(altitude, MainBody));
-                Vector3d desiredHorizontalVel = maxH * courseCorrection.normalized;
-
-                Vector3d desiredVel = (desiredVerticalSpeed * up) + desiredHorizontalVel;
-
-                // Lateral cancel (your gainCancelHVelocity)
-                Vector3d lateral = Core.Landing.debug12 * gainCancelHVelocity * Vector3d.Exclude(desiredHorizontalVel, currentVel);
-                desiredVel -= lateral;
-
-                // Terminal positionPID blend
-                if (altitude < 50.0)
+                if (appliedMag + 0.05 < rawMag)
                 {
-                    Vector3d posCorr = positionPID.Update(posError, dt, g, maxAccel) * 0.5;
-                    desiredVel += posCorr;
+                    // Scale I with the same factor we lost on the vector. Shared bleed is the coupling:
+                    // a saturated horizontal command also eases the vertical integral, and vice versa.
+                    double scale = Clamp(appliedMag / rawMag, 0.5, 0.98);
+                    Integral *= scale;
                 }
-
-                return desiredVel - currentVel; // velocity error
             }
 
-            //
-            // Determine Direction and Magnitude of Thrust to Apply
-            //
-            private void ExecuteThrust(Vector3d desiredAccel)
+            private static double Clamp(double v, double lo, double hi)
             {
-                // your thrust / attitude logic adapted to vector
-                Vector3d dir = desiredAccel.normalized;
-                Quaternion targetRot = QuaternionD.LookRotation(dir, -Vessel.GetTransform().forward);
-                Core.Attitude.attitudeTo(targetRot, AttitudeReference.INERTIAL, this);
-
-                // Set Debug Vectors as horizontal and vertical components of desired thrust vector
-                MechJebModuleDebugArrows.debugVector = Vector3d.Dot(desiredAccel, Vessel.upAxis) * Vessel.upAxis;
-                MechJebModuleDebugArrows.debugVector2 = desiredAccel - MechJebModuleDebugArrows.debugVector;
-
-                if (MechJebModuleDebugArrows.debugVector.magnitude < 0.01)
-                {
-                    MechJebModuleDebugArrows.debugVector *= 1000;
-                }
-                if (MechJebModuleDebugArrows.debugVector2.magnitude < 0.01)
-                {
-                    MechJebModuleDebugArrows.debugVector2 *= 1000;
-                }
-
-                // If angle between current and desired thrust vector is too large then set thrust to zero. Thrust will only
-                // occur when in the ball park.
-                bool disableThrust = false;
-
-                // Angle is small enough, allow thrust for correct sequence
-                if (Core.Attitude.attitudeAngleFromTarget() < throttleAngle)
-                {
-                    // Not actively performing collision avoidance, check the sequence
-                    if ((vCollisionCounter == 0))
-                    {
-                        switch (sequence)
-                        {
-                            // Either disabled or coasting, disable thrust for these sequences.
-                            case MoveSequence.Disabled:
-                            case MoveSequence.CoastToApoA:
-                            case MoveSequence.CoastToLandingBurn:
-                                disableThrust = true;
-                                break;
-
-                            // Enable thrust for these sequences.
-                            default:
-                            case MoveSequence.BurnToApoA:
-                            case MoveSequence.LandingBurn:
-                            case MoveSequence.FinalLanding:
-                                break;
-                        }
-                    }
-
-                    // Angle is too large, disable thrust
-                    else
-                    {
-                        disableThrust = true;
-                    }
-
-                    // Check if we are in the right attitude to thrust
-                    double attitudeAngleFromThrust = Vector3d.Angle(Vessel.transform.up, dir);
-                    if (disableThrust == true)
-                    {
-                        Core.Thrust.ThrustOff();
-                        Debug.Log("thrust  OFF");
-                    }
-                    else
-                    {
-                        Vector3d thrust = dir * Mathf.Clamp01((float)(desiredAccel.magnitude / VesselState.limitedMaxThrustAccel));
-                        Core.Thrust.RequestActiveThrottle((float)(thrust.magnitude));
-                        Vector3d vertical = Vector3d.Dot(thrust, Vessel.up) * Vessel.up; // up component (radial)
-                        Vector3d horizontal = thrust - vertical;                         // horizontal component (tangent plane)
-                        Debug.Log("thrust  v:" + vertical.magnitude.ToString("F3") + "  h:" + horizontal.magnitude.ToString("F3"));
-                    }
-                }
+                if (v < lo) return lo;
+                if (v > hi) return hi;
+                return v;
             }
         }
     }
