@@ -115,6 +115,9 @@ namespace MuMech
             private const int COLLISION_TAIL = 30*50;
             private int vIgnoreCollision = COLLISION_TAIL;
             private double vCollisionDeltaV = 0;
+            // True this tick while collision1/2/3 is boosting V. Unified PID must
+            // not keep a full H/L command during that hop (ASCENDING mixer, no cone).
+            private bool collisionHopActive = false;
 
             public MoveToTarget(MechJebCore core) : base(core)
             {
@@ -348,23 +351,41 @@ namespace MuMech
 
                 // Along-track hysteresis: freeze the frame when |eH| is inside the innermost H band
                 // so attitude does not chatter around the target (same debug3h deadband as before).
+                // Near the pad BuildLandingFrame already picked targetingResult (desired H vel
+                // is tiny). Freezing a heading captured on a noisy desired-vel sample would
+                // override that toward-target frame and re-fight H/L. Keep hysteresis for the
+                // far / noisy-eH chatter case it was meant for.
+                Vector3d towardTarget = Vector3d.Exclude(up, Core.Landing.targetingResult.horizontalVec);
+                bool usedTowardTarget = (desiredHorizontalVel.sqrMagnitude < 0.25) && (towardTarget.sqrMagnitude > 1e-12);
                 double eHProbe = Vector3d.Dot(desiredHorizontalVel - hSurface, hDir);
                 if (Math.Abs(eHProbe) < Core.Landing.debug3h)
                 {
-                    if (hHysteresis == false)
+                    if (usedTowardTarget)
                     {
-                        hHysteresis = true;
-                        hHysteresisVector = hDir;
-                    }
-                    if (hHysteresisVector.sqrMagnitude > 1e-12)
-                    {
-                        Vector3d frozen = Vector3d.Exclude(up, hHysteresisVector);
-                        if (frozen.sqrMagnitude > 1e-12)
+                        if (hHysteresis && towardTarget.sqrMagnitude > 1e-12 && hHysteresisVector.sqrMagnitude > 1e-12)
                         {
-                            hDir = frozen.normalized;
-                            latDir = Vector3d.Cross(up, hDir);
-                            if (latDir.sqrMagnitude > 1e-12)
-                                latDir = latDir.normalized;
+                            Vector3d frozenAlign = Vector3d.Exclude(up, hHysteresisVector);
+                            if (frozenAlign.sqrMagnitude > 1e-12 && Vector3d.Dot(frozenAlign.normalized, towardTarget.normalized) < 0.5)
+                                hHysteresis = false;
+                        }
+                    }
+                    else
+                    {
+                        if (hHysteresis == false)
+                        {
+                            hHysteresis = true;
+                            hHysteresisVector = hDir;
+                        }
+                        if (hHysteresisVector.sqrMagnitude > 1e-12)
+                        {
+                            Vector3d frozen = Vector3d.Exclude(up, hHysteresisVector);
+                            if (frozen.sqrMagnitude > 1e-12)
+                            {
+                                hDir = frozen.normalized;
+                                latDir = Vector3d.Cross(up, hDir);
+                                if (latDir.sqrMagnitude > 1e-12)
+                                    latDir = latDir.normalized;
+                            }
                         }
                     }
                 }
@@ -396,6 +417,13 @@ namespace MuMech
                 double eH = Vector3d.Dot(desiredHorizontalVel - hSurface, hDir);
                 double eV = vError;
                 double eL = -Vector3d.Dot(hSurface, latDir);
+                // Collision hop is vertical-first. Zero H/L setpoints so I/D do not wind
+                // a kill-H command while V is climbing; aH/aL are stripped after the PID.
+                if (collisionHopActive)
+                {
+                    eH = 0;
+                    eL = 0;
+                }
 
                 // High-g: soften only when the speed profile itself is climbing and we are
                 // faster-up than commanded. During descent (desiredVerticalSpeed <= 0) this
@@ -457,6 +485,18 @@ namespace MuMech
                 aV = Math.Max(-aLimit, Math.Min(aLimit, aV));
                 aH = Math.Max(-aLimit, Math.Min(aLimit, aH));
                 aL = Math.Max(-aLimit, Math.Min(aLimit, aL));
+
+                // A 200-1500 m terrain hop puts desiredVerticalSpeed > 0 (ASCENDING), so
+                // the debug93 upright cone is off and the 100 m initial-ascent H-zero
+                // does not apply. Zero H/L here so the hop cannot re-fight V.
+                if (collisionHopActive)
+                {
+                    aH = 0;
+                    aL = 0;
+                    aHAvg = 0;
+                    aLAvg = 0;
+                    Debug.Log("collision hop: zero H/L");
+                }
 
                 // Smooth H/L in the landing frame, then rebuild world accel. Averaging the world
                 // horizontal vector (old path) smeared yesterday's H into today's L whenever hDir
@@ -679,6 +719,7 @@ namespace MuMech
                 // false-fires on the pad, so it stays gated to hTargetError > 5 km.
                 // The 30s ignore is load-bearing for hops off the ground: minAltitude is
                 // 1500 m, so a fresh MoveToTarget at 0-100 m would always boost vertical.
+                collisionHopActive = false;
                 if(vIgnoreCollision > 0)
                 {
                     vIgnoreCollision--;
@@ -688,27 +729,42 @@ namespace MuMech
                     (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
                     if (deltaV > 0)
                     {
+                        if (vCollisionCounter <= 0)
+                            velocityPID.InvalidateHorizontal();
                         vCollisionDeltaV = Math.Max(vCollisionDeltaV, deltaV);
                         desiredVerticalSpeed += vCollisionDeltaV;
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
+                        // Same idea as collision2: hop is vertical-first. Zeroing only
+                        // desiredHorizontalVel still leaves a large eH (kill current H)
+                        // that the ASCENDING mixer will fight V with. Flag + aH/aL strip
+                        // in setThrustVector is the 3D coupling.
+                        desiredHorizontalVel = Vector3d.zero;
+                        herror = desiredHorizontalVel - VesselState.horizontalSurface;
                         vCollisionCounter = COLLISION_TAIL;
+                        collisionHopActive = true;
                         Debug.Log("collision1: " + vError.ToString("F2"));
                     }
                     else if (willCrash == true)
                     {
+                        if (vCollisionCounter <= 0)
+                            velocityPID.InvalidateHorizontal();
                         vCollisionDeltaV = Math.Max(vCollisionDeltaV, 500);
                         desiredVerticalSpeed += vCollisionDeltaV;
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
                         desiredHorizontalVel = Vector3d.zero;
                         herror = desiredHorizontalVel - VesselState.horizontalSurface;
                         vCollisionCounter = COLLISION_TAIL;
+                        collisionHopActive = true;
                         Debug.Log("collision2: " + vError.ToString("F2") + "  " + herror.magnitude.ToString("F2"));
                     }
                     else if (vCollisionCounter > 0)
                     {
                         desiredVerticalSpeed += vCollisionDeltaV * ((double)vCollisionCounter / COLLISION_TAIL);
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
+                        desiredHorizontalVel = Vector3d.zero;
+                        herror = desiredHorizontalVel - VesselState.horizontalSurface;
                         vCollisionCounter--;
+                        collisionHopActive = true;
                         Debug.Log("collision3: " + vError.ToString("F2") + "  " + vCollisionCounter.ToString("F0"));
                     }
                     else
