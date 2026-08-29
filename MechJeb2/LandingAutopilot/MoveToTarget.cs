@@ -115,8 +115,9 @@ namespace MuMech
             private const int COLLISION_TAIL = 30*50;
             private int vIgnoreCollision = COLLISION_TAIL;
             private double vCollisionDeltaV = 0;
-            // True this tick while collision1/2/3 is boosting V. Unified PID must
-            // not keep a full H/L command during that hop (ASCENDING mixer, no cone).
+            // True this tick in the hard vertical-first window (collision1/2, and
+            // collision3 while remaining boost > half tail). Unified PID must not
+            // keep a full H/L command then (ASCENDING mixer, no cone).
             private bool collisionHopActive = false;
 
             public MoveToTarget(MechJebCore core) : base(core)
@@ -716,7 +717,9 @@ namespace MuMech
                 }
 
                 // Hop-phase collision (Keplerian 15s / 1500 m look-ahead). That predictor
-                // false-fires on the pad, so it stays gated to hTargetError > 5 km.
+                // false-fires on the pad, so NEW predictions stay gated to hTargetError > 5 km.
+                // An in-progress tail (vCollisionCounter > 0) keeps decaying even after we
+                // cross 5 km; cutting it off restored H at full strength mid-hop.
                 // The 30s ignore is load-bearing for hops off the ground: minAltitude is
                 // 1500 m, so a fresh MoveToTarget at 0-100 m would always boost vertical.
                 collisionHopActive = false;
@@ -724,9 +727,15 @@ namespace MuMech
                 {
                     vIgnoreCollision--;
                 }
-                else if ((hTargetError > 5000) )
+                else
                 {
-                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
+                    double deltaV = 0;
+                    bool willCrash = false;
+                    if (hTargetError > 5000)
+                    {
+                        (deltaV, willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
+                    }
+
                     if (deltaV > 0)
                     {
                         if (vCollisionCounter <= 0)
@@ -761,11 +770,16 @@ namespace MuMech
                     {
                         desiredVerticalSpeed += vCollisionDeltaV * ((double)vCollisionCounter / COLLISION_TAIL);
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
+                        // PID still wants to kill H (desired H = 0), but do not keep the
+                        // full aH/aL strip for the entire 30 s tail: that coasts H and
+                        // drifts. Vertical-first only while remaining boost is still
+                        // large (first half). After that, drop the strip so gentle H
+                        // braking can run without re-fighting peak V.
                         desiredHorizontalVel = Vector3d.zero;
                         herror = desiredHorizontalVel - VesselState.horizontalSurface;
+                        collisionHopActive = vCollisionCounter > COLLISION_TAIL / 2;
                         vCollisionCounter--;
-                        collisionHopActive = true;
-                        Debug.Log("collision3: " + vError.ToString("F2") + "  " + vCollisionCounter.ToString("F0"));
+                        Debug.Log("collision3: " + vError.ToString("F2") + "  " + vCollisionCounter.ToString("F0") + "  hop=" + collisionHopActive);
                     }
                     else
                     {
