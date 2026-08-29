@@ -115,10 +115,12 @@ namespace MuMech
             private const int COLLISION_TAIL = 30*50;
             private int vIgnoreCollision = COLLISION_TAIL;
             private double vCollisionDeltaV = 0;
-            // True this tick in the hard vertical-first window (collision1/2, and
-            // collision3 while remaining boost > half tail). Unified PID must not
-            // keep a full H/L command then (ASCENDING mixer, no cone).
+            // hopBlend 1 = full H/L strip (vertical-first). Decays with remaining
+            // V boost / HOP_STRIP_BOOST so the strip drop does not slam aH.
             private bool collisionHopActive = false;
+            private double hopBlend = 0;
+            private const double HOP_STRIP_BOOST = 20; // m/s remaining V: full strip above this
+            private const double HOP_REARM_RATIO = 1.5; // re-arm in-progress hop only if new dV is well above remaining and the armed peak
 
             public MoveToTarget(MechJebCore core) : base(core)
             {
@@ -418,12 +420,14 @@ namespace MuMech
                 double eH = Vector3d.Dot(desiredHorizontalVel - hSurface, hDir);
                 double eV = vError;
                 double eL = -Vector3d.Dot(hSurface, latDir);
-                // Collision hop is vertical-first. Zero H/L setpoints so I/D do not wind
-                // a kill-H command while V is climbing; aH/aL are stripped after the PID.
-                if (collisionHopActive)
+                // Collision hop is vertical-first. Scale H/L errors with (1-hopBlend)
+                // so I/D do not wind a full kill-H command while V is climbing, and
+                // so the strip drop fades instead of a boolean cliff.
+                if (hopBlend > 0)
                 {
-                    eH = 0;
-                    eL = 0;
+                    double hopLive = 1.0 - hopBlend;
+                    eH *= hopLive;
+                    eL *= hopLive;
                 }
 
                 // High-g: soften only when the speed profile itself is climbing and we are
@@ -489,14 +493,24 @@ namespace MuMech
 
                 // A 200-1500 m terrain hop puts desiredVerticalSpeed > 0 (ASCENDING), so
                 // the debug93 upright cone is off and the 100 m initial-ascent H-zero
-                // does not apply. Zero H/L here so the hop cannot re-fight V.
-                if (collisionHopActive)
+                // does not apply. hopBlend 1 zeros H/L; as remaining V drops through
+                // HOP_STRIP_BOOST it fades H/L back in instead of slamming aH.
+                // Do not leave aHAvg/aLAvg stuck at 0 after the fade (debug96 near
+                // zero already means no smoothing).
+                if (hopBlend >= 1)
                 {
                     aH = 0;
                     aL = 0;
                     aHAvg = 0;
                     aLAvg = 0;
                     Debug.Log("collision hop: zero H/L");
+                }
+                else if (hopBlend > 0)
+                {
+                    double hopLive = 1.0 - hopBlend;
+                    aH *= hopLive;
+                    aL *= hopLive;
+                    Debug.Log("collision hop: blend=" + hopBlend.ToString("F2"));
                 }
 
                 // Smooth H/L in the landing frame, then rebuild world accel. Averaging the world
@@ -723,6 +737,7 @@ namespace MuMech
                 // The 30s ignore is load-bearing for hops off the ground: minAltitude is
                 // 1500 m, so a fresh MoveToTarget at 0-100 m would always boost vertical.
                 collisionHopActive = false;
+                hopBlend = 0;
                 if(vIgnoreCollision > 0)
                 {
                     vIgnoreCollision--;
@@ -736,50 +751,56 @@ namespace MuMech
                         (deltaV, willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
                     }
 
-                    if (deltaV > 0)
+                    double newRequired = (deltaV > 0) ? deltaV : ((willCrash == true) ? 500.0 : 0.0);
+                    double remainingBoost = (vCollisionCounter > 0)
+                        ? vCollisionDeltaV * ((double)vCollisionCounter / COLLISION_TAIL)
+                        : 0.0;
+                    bool hopInProgress = vCollisionCounter > 0;
+                    // Same hot prediction must not reset COLLISION_TAIL every tick
+                    // (collision3 never ran, H stayed stripped). Re-arm only for a
+                    // fresh hop or a real new obstacle: new dV well above remaining
+                    // boost AND above the already-armed peak.
+                    bool substantialUpgrade = hopInProgress
+                        && newRequired > remainingBoost * HOP_REARM_RATIO
+                        && newRequired > vCollisionDeltaV;
+
+                    if (newRequired > 0 && (hopInProgress == false || substantialUpgrade))
                     {
-                        if (vCollisionCounter <= 0)
-                            velocityPID.InvalidateHorizontal();
-                        vCollisionDeltaV = Math.Max(vCollisionDeltaV, deltaV);
+                        // Fresh hop or real upgrade: invalidate H/L I/D. Do not
+                        // InvalidateHorizontal on a skipped re-fire.
+                        velocityPID.InvalidateHorizontal();
+                        vCollisionDeltaV = Math.Max(vCollisionDeltaV, newRequired);
                         desiredVerticalSpeed += vCollisionDeltaV;
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
-                        // Same idea as collision2: hop is vertical-first. Zeroing only
-                        // desiredHorizontalVel still leaves a large eH (kill current H)
-                        // that the ASCENDING mixer will fight V with. Flag + aH/aL strip
-                        // in setThrustVector is the 3D coupling.
+                        // Hop is vertical-first. Zeroing only desiredHorizontalVel still
+                        // leaves a large eH that the ASCENDING mixer will fight V with.
+                        // hopBlend + aH/aL scale in setThrustVector is the 3D coupling.
                         desiredHorizontalVel = Vector3d.zero;
                         herror = desiredHorizontalVel - VesselState.horizontalSurface;
                         vCollisionCounter = COLLISION_TAIL;
+                        hopBlend = 1;
                         collisionHopActive = true;
-                        Debug.Log("collision1: " + vError.ToString("F2"));
-                    }
-                    else if (willCrash == true)
-                    {
-                        if (vCollisionCounter <= 0)
-                            velocityPID.InvalidateHorizontal();
-                        vCollisionDeltaV = Math.Max(vCollisionDeltaV, 500);
-                        desiredVerticalSpeed += vCollisionDeltaV;
-                        vError = desiredVerticalSpeed - VesselState.speedVertical;
-                        desiredHorizontalVel = Vector3d.zero;
-                        herror = desiredHorizontalVel - VesselState.horizontalSurface;
-                        vCollisionCounter = COLLISION_TAIL;
-                        collisionHopActive = true;
-                        Debug.Log("collision2: " + vError.ToString("F2") + "  " + herror.magnitude.ToString("F2"));
+                        if (deltaV > 0)
+                            Debug.Log("collision1: " + vError.ToString("F2"));
+                        else
+                            Debug.Log("collision2: " + vError.ToString("F2") + "  " + herror.magnitude.ToString("F2"));
                     }
                     else if (vCollisionCounter > 0)
                     {
-                        desiredVerticalSpeed += vCollisionDeltaV * ((double)vCollisionCounter / COLLISION_TAIL);
+                        remainingBoost = vCollisionDeltaV * ((double)vCollisionCounter / COLLISION_TAIL);
+                        desiredVerticalSpeed += remainingBoost;
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
-                        // PID still wants to kill H (desired H = 0), but do not keep the
-                        // full aH/aL strip for the entire 30 s tail: that coasts H and
-                        // drifts. Vertical-first only while remaining boost is still
-                        // large (first half). After that, drop the strip so gentle H
-                        // braking can run without re-fighting peak V.
+                        // PID still wants to kill H (desired H = 0). Keep the hard H/L
+                        // strip while remaining V boost is large, not merely the first
+                        // half of the clock (collision2's 500 m/s floor left 250 m/s of
+                        // V at half-tail). Fade H back in as remaining drops through
+                        // HOP_STRIP_BOOST (~20 m/s).
                         desiredHorizontalVel = Vector3d.zero;
                         herror = desiredHorizontalVel - VesselState.horizontalSurface;
-                        collisionHopActive = vCollisionCounter > COLLISION_TAIL / 2;
+                        hopBlend = Math.Max(0.0, Math.Min(1.0, remainingBoost / HOP_STRIP_BOOST));
+                        collisionHopActive = hopBlend >= 1;
                         vCollisionCounter--;
-                        Debug.Log("collision3: " + vError.ToString("F2") + "  " + vCollisionCounter.ToString("F0") + "  hop=" + collisionHopActive);
+                        Debug.Log("collision3: " + vError.ToString("F2") + "  " + vCollisionCounter.ToString("F0") + "  hop=" + collisionHopActive + " blend=" + hopBlend.ToString("F2"));
                     }
                     else
                     {
