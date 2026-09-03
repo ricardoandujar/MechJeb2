@@ -81,7 +81,9 @@ namespace MuMech
                 hFarCorrectionAngle = OVERSHOOT_ANGLE_FRACTION * Math.Sqrt(Math.Pow(limitedMaxThrustAccel, 2) - Math.Pow(Core.Landing.g, 2)) / Core.Landing.g;
                 actualLimitedMaxThrustAccel = VesselState.limitedMaxThrustAccel;
 
-                if (VesselState.orbitTimeToAp < 120 )
+                double timeToAp = VesselState.orbitTimeToAp;
+                if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
+                    && !double.IsNaN(timeToAp) && !double.IsInfinity(timeToAp) && timeToAp < 120)
                 {
                     minVerticalAngle = 0;
                 }
@@ -249,7 +251,19 @@ namespace MuMech
                         {
                             LateralCount = throttleCount;
                             throttleCount = 0;
-                            if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
+                            bool heightFinite = !double.IsNaN(deltaHeight) && !double.IsInfinity(deltaHeight)
+                                && !double.IsNaN(height) && !double.IsInfinity(height);
+                            bool hyperbolic = !MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit);
+                            // Inf apoapsis / NaN closest approach: do not default to prograde
+                            // (that adds energy and there is no Ap to raise). Retrograde until
+                            // intercept math has a finite closest approach near cruise alt.
+                            if (!heightFinite)
+                                step = Step.STATE_RETROGRADE;
+                            else if (hyperbolic && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD))
+                                step = Step.STATE_RETROGRADE;
+                            else if (hyperbolic && (VesselState.speedVertical > 1) && (deltaDistance < -1000))
+                                step = Step.STATE_RETROGRADE;
+                            else if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
                                 step = Step.STATE_RETROGRADE;
                             else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < 2000))
                                 step = Step.STATE_PROGRADE;
@@ -257,7 +271,7 @@ namespace MuMech
                                 step = Step.STATE_PROGRADE;
                             else if (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD*6)
                                 step = Step.STATE_RETROGRADE;
-                            else 
+                            else
                                 step = Step.STATE_PROGRADE;
                         }
                         Debug.Log(" lateral deltaHeight:" + deltaHeight.ToString("F1") + "  deltaDistance" + deltaDistance.ToString("F1"));
@@ -273,8 +287,23 @@ namespace MuMech
                             desiredHorizontalVel = desiredHorizontal * downrangeVec.normalized;
                             herror = 1.1 * desiredHorizontalVel - hOrbitalVelocity * Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity).normalized;
 
-                            // Reduce the errror as we approach periapsis to avoid over correction
-                            herror = 20 * herror * Mathf.Clamp01((float)((0.5 * VesselState.orbitApA - VesselState.orbitPeA) / (0.01 * VesselState.orbitApA))); // stop down range correction at periapsis = 0 and higher
+                            // Reduce the error as we approach periapsis to avoid over correction.
+                            // (0.5*ApA - PeA)/(0.01*ApA) is Inf/Inf = NaN on hyperbola and NaN'd herror.
+                            double peScale;
+                            if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
+                                && Math.Abs(VesselState.orbitApA) > 1)
+                            {
+                                peScale = Mathf.Clamp01((float)((0.5 * VesselState.orbitApA - VesselState.orbitPeA) / (0.01 * VesselState.orbitApA)));
+                            }
+                            else
+                            {
+                                double tPe = Vessel.orbit.timeToPe;
+                                if (double.IsNaN(tPe) || double.IsInfinity(tPe) || tPe <= 0)
+                                    peScale = 0;
+                                else
+                                    peScale = Mathf.Clamp01((float)(tPe / 60.0));
+                            }
+                            herror = 20 * herror * peScale;
 
                             Debug.Log(" prograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 

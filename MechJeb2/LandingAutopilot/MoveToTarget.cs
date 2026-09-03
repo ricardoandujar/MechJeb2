@@ -652,7 +652,13 @@ namespace MuMech
                 // throttleAngle (30 deg).
 
                 // Rockets cannot pull. Allow a downward world component only for low-g pitch-over.
-                bool allowPitchOver = (Core.Landing.g <= Core.Landing.LOW_GRAVITY) && (desiredVerticalSpeed < 0) && (VesselState.altitudeTrue >= 30);
+                // Far cruise commands desired V = 0 (steepness ratio). On Phobos-class g, that used
+                // to strip downward accel while leftover +V was already above escape, so H tracked
+                // but V never dumped and intercept math saw Inf apoapsis. Hyperbolic transit is
+                // allowed; pitch over whenever we still need to reduce V, not only when desired < 0.
+                bool needDumpV = VesselState.speedVertical > desiredVerticalSpeed + 2.0;
+                bool allowPitchOver = (Core.Landing.g <= Core.Landing.LOW_GRAVITY) && (VesselState.altitudeTrue >= 30)
+                    && ((desiredVerticalSpeed < 0) || needDumpV);
                 double avFinal = Vector3d.Dot(accel, up);
                 if ((allowPitchOver == false) && (avFinal < 0))
                     accel -= up * avFinal;
@@ -869,7 +875,13 @@ namespace MuMech
                     {
                         double vFrac = (MainBody.atmosphere == true )? 0.8:0.2;
                         desiredVerticalSpeed = Math.Min(vFrac * Core.Landing.GetCircularOrbitSpeed(VesselState.altitudeTrue, MainBody), Math.Max(3.0, (ratio - maxRatio) * (1 + hTargetError / ASCENT_H_DISTANCE_DIVISOR)));
-                        if ((Math.Abs(VesselState.orbitApA - Vessel.terrainAltitude) > Math.Min(1.2 * hTargetError, subOrbitalApA)) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
+                        // Inf/negative ApA (hyperbola) is not a height. Once at cruise alt, stop
+                        // commanding climb so leftover V can be dumped toward a finite intercept.
+                        bool apaFinite = MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit);
+                        bool apoapsisHighEnough = apaFinite
+                            ? ((Math.Abs(VesselState.orbitApA - Vessel.terrainAltitude) > Math.Min(1.2 * hTargetError, subOrbitalApA)) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
+                            : (VesselState.altitudeTrue >= Math.Max(Core.Landing.TgtAlt, ASCENT_AOA_MIN_ALT));
+                        if (apoapsisHighEnough)
                         {
                             desiredVerticalSpeed = 0;
                         }
@@ -1147,21 +1159,35 @@ namespace MuMech
             public void TargetSubOrbital(ref Vector3d desiredThrustVector)
             {
                 double _hCurrentError = hCurrentError;
-                double decelerationStartTime = VesselState.orbitTimeToAp - 4;
+                bool apaFinite = MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit);
+                double timeToAp = VesselState.orbitTimeToAp;
+                bool apTimeFinite = apaFinite && !double.IsNaN(timeToAp) && !double.IsInfinity(timeToAp);
+                double decelerationStartTime = apTimeFinite ? timeToAp - 4 : double.NaN;
 
                 // Use correction attitude if apoapsis is high enough.
                 // Determine when we can stop burning when target apoapsis has been reached
                 // Once stopped a secondary burn will be performed to reach target
+                // Hyperbolic: there is no apoapsis to wait for or warp to (timeToAp is Inf).
                 if (suppressThrottle == 0)
                 {
-                    double checkApa = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
-                    if (Math.Abs(VesselState.orbitApA) >= checkApa)
+                    if (apTimeFinite)
                     {
-                        if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
+                        double checkApa = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
+                        if (Math.Abs(VesselState.orbitApA) >= checkApa)
                         {
-                            suppressThrottle++; // suppress throttle during initial burn
-                            trace += 'S' + 'a';
+                            if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
+                            {
+                                suppressThrottle++; // suppress throttle during initial burn
+                                trace += 'S' + 'a';
+                            }
                         }
+                    }
+                    else if ((VesselState.altitudeTrue >= Core.Landing.TgtAlt) && (VesselState.speedVertical > 0))
+                    {
+                        stopIncrease = true;
+                        suppressThrottle = 2;
+                        trace += 'H';
+                        errStep++; trace += ((int)errStep).ToString();
                     }
                 }
 
@@ -1169,7 +1195,7 @@ namespace MuMech
                 if (suppressThrottle == 1)
                 {
                     // Hold on until we get to point where we can burn to target.
-                    if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
+                    if (apTimeFinite && (decelerationStartTime > 0) && (VesselState.speedVertical > 0))
                     {
                         Debug.Log("warp");
                         if (Core.Node.Autowarp && (decelerationStartTime > 0))

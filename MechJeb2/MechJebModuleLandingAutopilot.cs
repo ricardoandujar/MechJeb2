@@ -632,6 +632,25 @@ namespace MuMech
             return angle * radius;
         }
 
+
+        /// <summary>
+        /// True when apoapsis is an elliptical number intercept math can use.
+        /// Hyperbolic/parabolic ApA is Inf or negative; (0.5*Inf)/(0.01*Inf) is NaN.
+        /// </summary>
+        public static bool ApoapsisIsFinite(Orbit o)
+        {
+            if (o == null) return false;
+            if (double.IsNaN(o.eccentricity) || o.eccentricity >= 1.0) return false;
+            double apa = o.ApA;
+            return !double.IsNaN(apa) && !double.IsInfinity(apa) && apa > 0;
+        }
+
+        public static bool IsFiniteVec(Vector3d p)
+        {
+            return !double.IsNaN(p.x) && !double.IsNaN(p.y) && !double.IsNaN(p.z)
+                && !double.IsInfinity(p.x) && !double.IsInfinity(p.y) && !double.IsInfinity(p.z);
+        }
+
         public void ClosestPointToSurfaceTarget(out Vector3d bestPos, out double bestUT, out double bestDist, out Vector3d surfaceVel, int coarseSamples = 50, double maxHorizon = 3600)
         {
             Orbit orbit = Vessel.orbit;
@@ -639,6 +658,14 @@ namespace MuMech
             double R = body.Radius;
             double now = Planetarium.GetUniversalTime();
             const double tol = 0.05;
+            double rNow = orbit.pos.magnitude;
+            if (!IsFiniteVec(orbit.pos) || rNow < R) rNow = R;
+            double soi = body.sphereOfInfluence;
+            double rCap;
+            if (!double.IsNaN(soi) && !double.IsInfinity(soi) && soi > R)
+                rCap = Math.Min(soi, Math.Max(5.0 * R, 3.0 * rNow));
+            else
+                rCap = Math.Max(5.0 * R, 3.0 * rNow);
             // --- Helpers -------------------------------------------------------------
             Vector3d TargetPosAtUT(double ut)
             {
@@ -652,9 +679,20 @@ namespace MuMech
             double GetDist(double ut)
             {
                 Vector3d srcPos = orbit.getPositionAtUT(ut) - body.position;
-                if (srcPos.magnitude < R) return double.MaxValue;
+                if (!IsFiniteVec(srcPos) || srcPos.magnitude < R || srcPos.magnitude > rCap) return double.MaxValue;
                 Vector3d tgtPos = TargetPosAtUT(ut);
+                if (!IsFiniteVec(tgtPos)) return double.MaxValue;
                 return ArcDistance(srcPos, tgtPos, R);
+            }
+            void Consider(double ut)
+            {
+                double dist = GetDist(ut);
+                if (dist >= bestDist) return;
+                Vector3d srcPos = orbit.getPositionAtUT(ut) - body.position;
+                if (!IsFiniteVec(srcPos)) return;
+                bestDist = dist;
+                bestUT = ut;
+                bestPos = srcPos;
             }
             // --- 1. Binary-search horizon detection ---------------------------------
             double FindImpactUT(double nowUT, double horizon)
@@ -662,13 +700,13 @@ namespace MuMech
                 double lo = nowUT;
                 double hi = nowUT + horizon;
                 Vector3d pHi = orbit.getPositionAtUT(hi) - body.position;
-                if (pHi.magnitude > R)
+                if (!IsFiniteVec(pHi) || pHi.magnitude > R)
                     return hi;
                 for (int i = 0; i < 40; i++)
                 {
                     double mid = 0.5 * (lo + hi);
                     Vector3d p = orbit.getPositionAtUT(mid) - body.position;
-                    if (p.magnitude < R)
+                    if (!IsFiniteVec(p) || p.magnitude < R)
                         hi = mid;
                     else
                         lo = mid;
@@ -681,22 +719,35 @@ namespace MuMech
             bestUT = now;
             bestPos = Vector3d.zero;
             double step = (endUT - now) / coarseSamples;
+            if (step < 0 || double.IsNaN(step) || double.IsInfinity(step)) step = 0;
             for (int i = 0; i <= coarseSamples; i++)
             {
                 double ut = now + i * step;
                 Vector3d srcPos = orbit.getPositionAtUT(ut) - body.position;
+                if (!IsFiniteVec(srcPos) || srcPos.magnitude > rCap)
+                    continue;
                 if (srcPos.magnitude < R)
                     break;
-                double dist = ArcDistance(srcPos, TargetPosAtUT(ut), R);
-                if (dist < bestDist)
-                {
-                    bestDist = dist;
-                    bestUT = ut;
-                    bestPos = srcPos;
-                }
+                Consider(ut);
+            }
+            // Hyperbola has no apoapsis; periapsis is the natural closest-to-body time.
+            if (orbit.eccentricity >= 1.0)
+            {
+                double tPe = orbit.timeToPe;
+                if (!double.IsNaN(tPe) && !double.IsInfinity(tPe) && tPe >= 0 && now + tPe <= endUT)
+                    Consider(now + tPe);
+            }
+            if (!IsFiniteVec(bestPos) || bestDist == double.MaxValue)
+            {
+                bestUT = now;
+                bestPos = orbit.getPositionAtUT(now) - body.position;
+                if (!IsFiniteVec(bestPos)) bestPos = orbit.pos;
+                bestDist = GetDist(now);
+                if (double.IsNaN(bestDist) || double.IsInfinity(bestDist)) bestDist = 0;
             }
             // --- 3. Fine refinement with golden section search ----------------------
             double refineWindow = step * 5.0;
+            if (double.IsNaN(refineWindow) || double.IsInfinity(refineWindow) || refineWindow <= 0) refineWindow = 10.0;
             double refineStart = Math.Max(now, bestUT - refineWindow);
             double refineEnd = Math.Min(endUT, bestUT + refineWindow);
             double phi = (1.0 + Math.Sqrt(5.0)) / 2.0;
@@ -728,13 +779,17 @@ namespace MuMech
                 bestUT = fineUT;
                 bestPos = orbit.getPositionAtUT(bestUT) - body.position;
             }
+            if (!IsFiniteVec(bestPos))
+            {
+                bestUT = now;
+                bestPos = orbit.pos;
+            }
             Vector3d velFuture = Vessel.orbit.getOrbitalVelocityAtUT(bestUT); // Future inertial velocity ---
             Vector3d rotVelFuture = Vector3d.Cross(MainBody.angularVelocity, bestPos.normalized); // Body rotation velocity at that future point ---
             surfaceVel = velFuture - rotVelFuture;// Future surface-relative velocity ---
             Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1"));
             bestPos += body.position;
         }
-
         // Rotate Body relative position based on it's rotation over input elapsed seconds from now.
         public Vector3d RotateRelativePosition(Vector3d posBodyCentered, double timeDeltaSeconds)
         {
