@@ -119,8 +119,27 @@ namespace MuMech
             // V boost / HOP_STRIP_BOOST so the strip drop does not slam aH.
             private bool collisionHopActive = false;
             private double hopBlend = 0;
+            // Set when low-g far cruise ended but terrain/hop blocked TargetSubOrbit handoff.
+            // Retried each Drive until CoastClearForSubOrbitHandOff, then FineTune.
+            private bool pendingSubOrbitHandOff = false;
             private const double HOP_STRIP_BOOST = 20; // m/s remaining V: full strip above this
             private const double HOP_REARM_RATIO = 1.5; // re-arm in-progress hop only if new dV is well above remaining and the armed peak
+
+            // True when MoveToTarget may safely hand off to TargetSubOrbit: no armed collision
+            // hop and the same 15s/1500 m look-ahead used for hops reports clear. Keeps hop in
+            // charge over irregular terrain until the coast is actually clear.
+            private bool CoastClearForSubOrbitHandOff(double hTargetError)
+            {
+                if ((vCollisionCounter > 0) || (hopBlend > 0))
+                    return false;
+                if (hTargetError > 5000)
+                {
+                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
+                    if (willCrash || deltaV > 0)
+                        return false;
+                }
+                return true;
+            }
 
             public MoveToTarget(MechJebCore core) : base(core)
             {
@@ -656,8 +675,12 @@ namespace MuMech
                 // to strip downward accel while leftover +V was already above escape, so H tracked
                 // but V never dumped and intercept math saw Inf apoapsis. Hyperbolic transit is
                 // allowed; pitch over whenever we still need to reduce V, not only when desired < 0.
-                bool needDumpV = VesselState.speedVertical > desiredVerticalSpeed + 2.0;
+                // Collision hop wins while armed: remainingBoost decays under actual +V and the
+                // dump was pitching over into the hop. Between hops, dump may still bleed leftover.
+                bool hopArmed = (hopBlend > 0) || (vCollisionCounter > 0);
+                bool needDumpV = !hopArmed && (VesselState.speedVertical > desiredVerticalSpeed + 2.0);
                 bool allowPitchOver = (Core.Landing.g <= Core.Landing.LOW_GRAVITY) && (VesselState.altitudeTrue >= 30)
+                    && !hopArmed
                     && ((desiredVerticalSpeed < 0) || needDumpV);
                 double avFinal = Vector3d.Dot(accel, up);
                 if ((allowPitchOver == false) && (avFinal < 0))
@@ -830,21 +853,32 @@ namespace MuMech
                     Core.Landing.increaseVertical = false; // max ratio is less than max ratio  - no need to increase altitude.
                     Debug.Log("stopIncrease: " + hCurrentError.ToString("F1") + ", " + ratio.ToString("F2"));
 
-                    // If in range of suborbital target then do retro burn.
+                    // If in range of suborbital target then hand off to TargetSubOrbit.
+                    // Low-g far used to stay in MoveToTarget (PeA rarely >= 9000 on small bodies)
+                    // and fight leftover +V with pitch-over forever. Prefer TargetSubOrbit once
+                    // climb is done - but only if collision coast is clear (Vesta-class terrain).
+                    bool lowGFar = (Core.Landing.g <= Core.Landing.LOW_GRAVITY)
+                        && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT);
+                    bool coastClear = CoastClearForSubOrbitHandOff(hTargetError);
                     if (((Core.Landing.g > Core.Landing.LOW_GRAVITY) && (hTargetError > Core.Landing.POST_TARGET_THRESHOLD))
-                        || (VesselState.orbitPeA >= 9000) )
+                        || (VesselState.orbitPeA >= 9000)
+                        || (lowGFar && coastClear))
                     {
                         trace += 'f';
                         errStep = Ascend2Target.FineTune;
+                        pendingSubOrbitHandOff = false;
                     }
 
-                    // Otherwise use move to target to get there.
+                    // Otherwise use move to target to get there (incl. low-g far while hop/terrain
+                    // still in the way - keep collision avoidance in charge).
                     else
                     {
                         checkWarp = false;    // Exiting ascent phase at low altitude or due to large periapsis - just move to target
                         trace += 'm';          
                         suppressThrottle = 2;                   // make sure throttle is NOT disabled
                         errStep = Ascend2Target.Completed;      // Set ascent step to completed so it does not start it again.
+                        if (lowGFar && (coastClear == false))
+                            pendingSubOrbitHandOff = true;
                     }
                 }
 
@@ -884,6 +918,14 @@ namespace MuMech
                         if (apoapsisHighEnough)
                         {
                             desiredVerticalSpeed = 0;
+                            // Low-g far: end increaseVertical so stopIncrease can hand off to
+                            // TargetSubOrbit once the collision coast is clear, instead of
+                            // sitting at desired V = 0 and pitch-over-dumping leftover +V forever.
+                            if ((Core.Landing.g <= Core.Landing.LOW_GRAVITY)
+                                && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT))
+                            {
+                                stopIncrease = true;
+                            }
                         }
                         ignoreLandingCounter = 0; // reset ignore landing count to allow start from a landing
                     }
@@ -1314,16 +1356,40 @@ namespace MuMech
 
                 // Move to target strategy
                 move(ref desiredVerticalSpeed, ref desiredThrustVector);
+
+                // Retry deferred low-g far handoff once hop/terrain look-ahead clears.
+                double handoffH = Core.Landing.targetingResult.hTargetError;
+                if (pendingSubOrbitHandOff
+                    && (handoffH > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT)
+                    && CoastClearForSubOrbitHandOff(handoffH))
+                {
+                    errStep = Ascend2Target.FineTune;
+                    pendingSubOrbitHandOff = false;
+                    trace += 'r';
+                }
+
                 if ( (errStep >= Ascend2Target.FineTune) && (errStep < Ascend2Target.Completed))
                 {
-                    Core.Thrust.ThrustOff();
-                    if (Core.Landing.LandingType == 1)
+                    // Irregular bodies (Vesta-class): do not leave MoveToTarget while a hop is
+                    // armed or the look-ahead still wants +V / crash avoidance.
+                    if (!CoastClearForSubOrbitHandOff(handoffH))
                     {
-                        return new TargetSubOrbit(Core);
+                        errStep = Ascend2Target.Completed;
+                        pendingSubOrbitHandOff = true;
+                        trace += 't';
                     }
                     else
                     {
-                        return new CourseCorrection(Core);
+                        pendingSubOrbitHandOff = false;
+                        Core.Thrust.ThrustOff();
+                        if (Core.Landing.LandingType == 1)
+                        {
+                            return new TargetSubOrbit(Core);
+                        }
+                        else
+                        {
+                            return new CourseCorrection(Core);
+                        }
                     }
                 }
 
