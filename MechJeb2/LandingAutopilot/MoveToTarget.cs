@@ -129,8 +129,8 @@ namespace MuMech
             private const double HOP_REARM_RATIO = 1.5; // re-arm in-progress hop only if new dV is well above remaining and the armed peak
 
             // True when MoveToTarget may safely hand off to TargetSubOrbit: no armed collision
-            // hop and the same 15s/1500 m look-ahead used for hops reports clear. Keeps hop in
-            // charge over irregular terrain until the coast is actually clear.
+            // hop and the hop predictor (trajectory + heading rims) reports clear. Keeps hop
+            // in charge over irregular terrain until the coast is actually clear.
             private bool CoastClearForSubOrbitHandOff(double hTargetError)
             {
                 if (_coastClearThisDrive)
@@ -777,20 +777,27 @@ namespace MuMech
                     setSubOrbitalHorizontal(ref desiredHorizontalVel, ref herror);
                 }
 
-                // Hop-phase collision (Keplerian 15s / 1500 m look-ahead). That predictor
-                // false-fires on the pad, so NEW predictions stay gated to hTargetError > 5 km.
+                // Hop-phase collision (trajectory + heading terrain vs our ASL).
+                // Keplerian-only 15s/1500 m AGL misses a crater rim from the floor.
+                // Predictor still false-fires on the pad, so NEW predictions stay
+                // gated to hTargetError > 5 km.
                 // An in-progress tail (vCollisionCounter > 0) keeps decaying even after we
                 // cross 5 km; cutting it off restored H at full strength mid-hop.
                 // The 30s ignore is load-bearing for hops off the ground: minAltitude is
                 // 1500 m, so a fresh MoveToTarget at 0-100 m would always boost vertical.
                 collisionHopActive = false;
                 hopBlend = 0;
-                if(vIgnoreCollision > 0)
+                // Pad false-fire: the 30s ignore is for hTargetError <= 5 km.
+                // From a crater hundreds of km out the 5 km gate already protects
+                // the pad; skip ignore so climb-out hop can arm on the first Drive.
+                if (vIgnoreCollision > 0 && hTargetError <= 5000)
                 {
                     vIgnoreCollision--;
                 }
                 else
                 {
+                    if (vIgnoreCollision > 0)
+                        vIgnoreCollision = 0;
                     double deltaV = 0;
                     bool willCrash = false;
                     if (hTargetError > 5000)
@@ -838,18 +845,36 @@ namespace MuMech
                     else if (vCollisionCounter > 0)
                     {
                         remainingBoost = vCollisionDeltaV * ((double)vCollisionCounter / COLLISION_TAIL);
-                        desiredVerticalSpeed += remainingBoost;
+                        // Live remaining climb must win over a decaying tail. Otherwise
+                        // hopBlend fades, leftover-V dump pitches into the rim, and the
+                        // next hop never fully recovers (Vesta crater pulse-down).
+                        double vBoost = remainingBoost;
+                        if (newRequired > vBoost) vBoost = newRequired;
+                        desiredVerticalSpeed += vBoost;
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
                         // PID still wants to kill H (desired H = 0). Keep the hard H/L
                         // strip while remaining V boost is large, not merely the first
                         // half of the clock (collision2's 500 m/s floor left 250 m/s of
                         // V at half-tail). Fade H back in as remaining drops through
-                        // HOP_STRIP_BOOST (~20 m/s).
+                        // HOP_STRIP_BOOST (~20 m/s) - but not while a rim is still in
+                        // the climb-out path.
                         desiredHorizontalVel = Vector3d.zero;
                         herror = desiredHorizontalVel - VesselState.horizontalSurface;
-                        hopBlend = Math.Max(0.0, Math.Min(1.0, remainingBoost / HOP_STRIP_BOOST));
+                        if (newRequired > 0)
+                            hopBlend = 1;
+                        else
+                            hopBlend = Math.Max(0.0, Math.Min(1.0, remainingBoost / HOP_STRIP_BOOST));
                         collisionHopActive = hopBlend >= 1;
                         vCollisionCounter--;
+                        if (vCollisionCounter <= 0 && newRequired > 0)
+                        {
+                            // Re-arm without a dump-V gap. Do not InvalidateHorizontal
+                            // (that is for a fresh obstacle); this is the same rim.
+                            vCollisionCounter = COLLISION_TAIL;
+                            vCollisionDeltaV = Math.Max(vCollisionDeltaV, newRequired);
+                            hopBlend = 1;
+                            collisionHopActive = true;
+                        }
                         if (LOG_LANDING_TICK)
                             Debug.Log("collision3: " + vError.ToString("F2") + "  " + vCollisionCounter.ToString("F0") + "  hop=" + collisionHopActive + " blend=" + hopBlend.ToString("F2"));
                     }

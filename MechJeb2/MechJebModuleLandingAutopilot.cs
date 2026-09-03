@@ -98,6 +98,15 @@ namespace MuMech
         private const double CLOSEST_POINT_FULL_PERIOD = 1.0;
         private const bool LOG_CLOSEST_POINT = false;
 
+        // Same-tick reuse for hop + CoastClear. Do not keep this across UT: a 0.05s
+        // stale answer would make coast-clear lie about a rim still in the way.
+        private bool _avoidCacheValid;
+        private double _avoidCacheNow;
+        private double _avoidCacheLookAhead;
+        private double _avoidCacheMinAlt;
+        private double _avoidCacheDV;
+        private bool _avoidCacheCrash;
+
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public readonly EditableDouble TouchdownSpeed = 0.5;
 
@@ -1300,20 +1309,103 @@ namespace MuMech
         //
         public (double deltaV, bool willCrash) PredictAvoidCollisionDeltaV(double lookAheadSec, double minAltitude)
         {
-            double ut = Planetarium.GetUniversalTime() + lookAheadSec;
-            Vector3d pos = Vessel.orbit.getPositionAtUT(ut);
-            double currentAlt = Vessel.mainBody.GetAltitude(pos) - Vessel.mainBody.TerrainAltitude(pos);
-            double deficit = minAltitude - currentAlt;
-            if (deficit <= 0) return (0, false); // Safe - no adjustment necessary
+            // Hop + CoastClear both call this every Drive with (15, 1500). Reuse one
+            // evaluation per UT so the heading samples do not run 3x, but never answer
+            // from a previous tick (that is how a cache makes coast-clear lie).
+            double now = Planetarium.GetUniversalTime();
+            if (_avoidCacheValid
+                && now == _avoidCacheNow
+                && lookAheadSec == _avoidCacheLookAhead
+                && minAltitude == _avoidCacheMinAlt)
+                return (_avoidCacheDV, _avoidCacheCrash);
 
+            CelestialBody body = Vessel.mainBody;
             double vv = Vessel.verticalSpeed;
-            double aNet = VesselState.limitedMaxThrustAccel - VesselState.localg; // still compute for stopDist
-            double stopDist = (vv < 0) ? (vv * vv) / (2 * aNet) : 0;
-            bool willCrash = (currentAlt - stopDist) < 0;
-            if (willCrash) return (0, true);  // Worst case - even with max acceleration we will not make it, attempt accelerate up and backwards
+            double aNet = VesselState.limitedMaxThrustAccel - VesselState.localg;
+            if (!(aNet > 0.05)) aNet = 0.05;
+            double vesselASL = VesselState.altitudeASL;
+            Vector3d vesselWorld = VesselState.CoM;
+            Vector3d up = VesselState.up;
+            double worstDeficit = 0;
+            bool willCrash = false;
 
-            double reqV = Math.Sqrt(2 * aNet * deficit) - vv;
-            return (Math.Max(0, reqV), false); // Only positive vertical adjust needed
+            void ConsiderTrajectoryAgl(double agl)
+            {
+                if (double.IsNaN(agl) || double.IsInfinity(agl)) return;
+                double deficit = minAltitude - agl;
+                if (deficit > worstDeficit) worstDeficit = deficit;
+                double stopDist = (vv < 0) ? (vv * vv) / (2.0 * aNet) : 0;
+                if ((agl - stopDist) < 0) willCrash = true;
+            }
+
+            // Keplerian samples along the current trajectory. One 15s point over the
+            // crater floor reports AGL vs the floor and misses a rim a few km away.
+            if (lookAheadSec > 0 && Vessel.orbit != null)
+            {
+                const int nTime = 6;
+                for (int i = 1; i <= nTime; i++)
+                {
+                    double dt = lookAheadSec * i / nTime;
+                    Vector3d pos = Vessel.orbit.getPositionAtUT(now + dt);
+                    if (!IsFiniteVec(pos)) continue;
+                    double posASL = body.GetAltitude(pos);
+                    double terrainASL = body.TerrainAltitude(pos);
+                    ConsiderTrajectoryAgl(posASL - terrainASL);
+                }
+            }
+
+            // Heading samples: compare OUR ASL to terrain ASL ahead. A wall higher
+            // than we are is a hop even if t+15s is still over the hole with AGL
+            // above minAltitude. Do not mark willCrash here: a distant rim is climbable.
+            double lookRange = Math.Max(4000.0, 8.0 * Math.Max(50.0, VesselState.altitudeTrue));
+            lookRange = Math.Max(lookRange, VesselState.speedSurfaceHorizontal * Math.Max(lookAheadSec, 15.0));
+            lookRange = Math.Min(lookRange, 40000.0);
+            double hErr = targetingResult.hTargetError;
+            if (hErr > 100.0) lookRange = Math.Min(lookRange, hErr);
+
+            void SampleHeading(Vector3d dir)
+            {
+                if (dir.sqrMagnitude < 1e-6) return;
+                dir.Normalize();
+                double d = 250.0;
+                for (int i = 0; i < 8 && d <= lookRange + 1.0; i++, d *= 2.0)
+                {
+                    Vector3d sampleWorld = vesselWorld + dir * d;
+                    if (!IsFiniteVec(sampleWorld)) continue;
+                    double terrainASL = body.TerrainAltitude(sampleWorld);
+                    if (double.IsNaN(terrainASL) || double.IsInfinity(terrainASL)) continue;
+                    double clearance = vesselASL - terrainASL;
+                    double deficit = minAltitude - clearance;
+                    if (deficit > worstDeficit) worstDeficit = deficit;
+                }
+            }
+
+            SampleHeading(targetingResult.horizontalVec);
+            Vector3d hVel = Vector3d.Exclude(up, VesselState.horizontalSurface);
+            if (hVel.sqrMagnitude > 1.0)
+            {
+                Vector3d toTarget = targetingResult.horizontalVec;
+                double align = 1.0;
+                if (toTarget.sqrMagnitude > 1e-6)
+                    align = Vector3d.Dot(hVel.normalized, toTarget.normalized);
+                if (align < 0.95)
+                    SampleHeading(hVel);
+            }
+
+            double reqV = 0;
+            if (worstDeficit > 0)
+            {
+                reqV = Math.Sqrt(2.0 * aNet * worstDeficit) - vv;
+                if (reqV < 0) reqV = 0;
+            }
+
+            _avoidCacheValid = true;
+            _avoidCacheNow = now;
+            _avoidCacheLookAhead = lookAheadSec;
+            _avoidCacheMinAlt = minAltitude;
+            _avoidCacheDV = reqV;
+            _avoidCacheCrash = willCrash;
+            return (reqV, willCrash);
         }
     }
 
