@@ -122,6 +122,9 @@ namespace MuMech
             // Set when low-g far cruise ended but terrain/hop blocked TargetSubOrbit handoff.
             // Retried each Drive until CoastClearForSubOrbitHandOff, then FineTune.
             private bool pendingSubOrbitHandOff = false;
+            private bool _coastClearThisDrive;
+            private bool _coastClearResult;
+            private const bool LOG_LANDING_TICK = false; // Unity Debug.Log on the physics thread freezes the mouse
             private const double HOP_STRIP_BOOST = 20; // m/s remaining V: full strip above this
             private const double HOP_REARM_RATIO = 1.5; // re-arm in-progress hop only if new dV is well above remaining and the armed peak
 
@@ -130,15 +133,19 @@ namespace MuMech
             // charge over irregular terrain until the coast is actually clear.
             private bool CoastClearForSubOrbitHandOff(double hTargetError)
             {
+                if (_coastClearThisDrive)
+                    return _coastClearResult;
+                _coastClearThisDrive = true;
                 if ((vCollisionCounter > 0) || (hopBlend > 0))
-                    return false;
-                if (hTargetError > 5000)
+                    _coastClearResult = false;
+                else if (hTargetError > 5000)
                 {
                     (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
-                    if (willCrash || deltaV > 0)
-                        return false;
+                    _coastClearResult = !(willCrash || deltaV > 0);
                 }
-                return true;
+                else
+                    _coastClearResult = true;
+                return _coastClearResult;
             }
 
             public MoveToTarget(MechJebCore core) : base(core)
@@ -522,14 +529,16 @@ namespace MuMech
                     aL = 0;
                     aHAvg = 0;
                     aLAvg = 0;
-                    Debug.Log("collision hop: zero H/L");
+                    if (LOG_LANDING_TICK)
+                        Debug.Log("collision hop: zero H/L");
                 }
                 else if (hopBlend > 0)
                 {
                     double hopLive = 1.0 - hopBlend;
                     aH *= hopLive;
                     aL *= hopLive;
-                    Debug.Log("collision hop: blend=" + hopBlend.ToString("F2"));
+                    if (LOG_LANDING_TICK)
+                        Debug.Log("collision hop: blend=" + hopBlend.ToString("F2"));
                 }
 
                 // Smooth H/L in the landing frame, then rebuild world accel. Averaging the world
@@ -574,7 +583,8 @@ namespace MuMech
                             vMinAngle = 0.2;
                             vMaxAngle = 1.0;
                         }
-                        Debug.Log("ascending " + vMinAngle.ToString("F2") + " " + vMaxAngle.ToString("F2"));
+                        if (LOG_LANDING_TICK)
+                            Debug.Log("ascending " + vMinAngle.ToString("F2") + " " + vMaxAngle.ToString("F2"));
                     }
                     else
                     {
@@ -589,7 +599,8 @@ namespace MuMech
                             vMinAngle = 0;
                             vMaxAngle = 1.3;
                         }
-                        Debug.Log("descending " + vMinAngle.ToString("F2") + " " + vMaxAngle.ToString("F2"));
+                        if (LOG_LANDING_TICK)
+                            Debug.Log("descending " + vMinAngle.ToString("F2") + " " + vMaxAngle.ToString("F2"));
                     }
                 }
                 else
@@ -607,7 +618,8 @@ namespace MuMech
                             vMinAngle = 0.15;
                             vMaxAngle = 1.0;
                         }
-                        Debug.Log("lg ascending " + vMinAngle.ToString("F2") + " " + vMaxAngle.ToString("F2"));
+                        if (LOG_LANDING_TICK)
+                            Debug.Log("lg ascending " + vMinAngle.ToString("F2") + " " + vMaxAngle.ToString("F2"));
                     }
                     else
                     {
@@ -624,7 +636,8 @@ namespace MuMech
                             vMaxAngle = +Math.Abs(aV);
                             throttleAngle = 30;
                         }
-                        Debug.Log("lg descending " + vMinAngle.ToString("F2") + " " + vMaxAngle.ToString("F2"));
+                        if (LOG_LANDING_TICK)
+                            Debug.Log("lg descending " + vMinAngle.ToString("F2") + " " + vMaxAngle.ToString("F2"));
                     }
                 }
 
@@ -648,7 +661,8 @@ namespace MuMech
                         horizNow *= hratio;
                     }
                     accel = horizNow + up * vCmd;
-                    Debug.Log("hadjust " + horizNow.magnitude.ToString("F3") + "," + vCmd.ToString("F3"));
+                    if (LOG_LANDING_TICK)
+                        Debug.Log("hadjust " + horizNow.magnitude.ToString("F3") + "," + vCmd.ToString("F3"));
                 }
 
                 // Do not cap |aH| with hCorrectionAngle. That leftover mix weight is baseGain*0.4*|herror|,
@@ -662,7 +676,8 @@ namespace MuMech
                     horizontalAvg = Vector3d.zero;
                     aHAvg = 0;
                     aLAvg = 0;
-                    Debug.Log("initial ascension");
+                    if (LOG_LANDING_TICK)
+                        Debug.Log("initial ascension");
                 }
                 // Old mixer zeroed H *throttle* when >50 deg off, but kept H in the attitude vector so
                 // the craft would still slew toward the target. Stripping H from accel here
@@ -703,11 +718,14 @@ namespace MuMech
 
                 Vector3d vPart = Vector3d.Dot(desiredThrustVector, up) * up;
                 Vector3d hPart = desiredThrustVector - vPart;
-                Debug.Log("pid3d  eH:" + eH.ToString("F2") + " eV:" + eV.ToString("F2") + " eL:" + eL.ToString("F2")
-                    + "  aH:" + aH.ToString("F3") + " aV:" + aV.ToString("F3") + " aL:" + aL.ToString("F3")
-                    + "  t:" + throttle.ToString("F4"));
-                Debug.Log("vector  v:" + vPart.magnitude.ToString("F3") + "  h:" + hPart.magnitude.ToString("F3") + "  hCorrectionAngle:" + hCorrectionAngle.ToString("F3"));
-                Debug.Log("thrust  v:" + vPart.magnitude.ToString("F3") + "  h:" + hPart.magnitude.ToString("F3") + "  hCorrectionAngle:" + hCorrectionAngle.ToString("F3"));
+                if (LOG_LANDING_TICK)
+                {
+                    Debug.Log("pid3d  eH:" + eH.ToString("F2") + " eV:" + eV.ToString("F2") + " eL:" + eL.ToString("F2")
+                        + "  aH:" + aH.ToString("F3") + " aV:" + aV.ToString("F3") + " aL:" + aL.ToString("F3")
+                        + "  t:" + throttle.ToString("F4"));
+                    Debug.Log("vector  v:" + vPart.magnitude.ToString("F3") + "  h:" + hPart.magnitude.ToString("F3") + "  hCorrectionAngle:" + hCorrectionAngle.ToString("F3"));
+                    Debug.Log("thrust  v:" + vPart.magnitude.ToString("F3") + "  h:" + hPart.magnitude.ToString("F3") + "  hCorrectionAngle:" + hCorrectionAngle.ToString("F3"));
+                }
             }
 
             // move 
@@ -809,10 +827,13 @@ namespace MuMech
                         vCollisionCounter = COLLISION_TAIL;
                         hopBlend = 1;
                         collisionHopActive = true;
-                        if (deltaV > 0)
-                            Debug.Log("collision1: " + vError.ToString("F2"));
-                        else
-                            Debug.Log("collision2: " + vError.ToString("F2") + "  " + herror.magnitude.ToString("F2"));
+                        if (LOG_LANDING_TICK)
+                        {
+                            if (deltaV > 0)
+                                Debug.Log("collision1: " + vError.ToString("F2"));
+                            else
+                                Debug.Log("collision2: " + vError.ToString("F2") + "  " + herror.magnitude.ToString("F2"));
+                        }
                     }
                     else if (vCollisionCounter > 0)
                     {
@@ -829,7 +850,8 @@ namespace MuMech
                         hopBlend = Math.Max(0.0, Math.Min(1.0, remainingBoost / HOP_STRIP_BOOST));
                         collisionHopActive = hopBlend >= 1;
                         vCollisionCounter--;
-                        Debug.Log("collision3: " + vError.ToString("F2") + "  " + vCollisionCounter.ToString("F0") + "  hop=" + collisionHopActive + " blend=" + hopBlend.ToString("F2"));
+                        if (LOG_LANDING_TICK)
+                            Debug.Log("collision3: " + vError.ToString("F2") + "  " + vCollisionCounter.ToString("F0") + "  hop=" + collisionHopActive + " blend=" + hopBlend.ToString("F2"));
                     }
                     else
                     {
@@ -1286,6 +1308,7 @@ namespace MuMech
 
             public override AutopilotStep Drive(FlightCtrlState s)
             {
+                _coastClearThisDrive = false;
                 if (checkWarp == true)
                 {
                     return this;

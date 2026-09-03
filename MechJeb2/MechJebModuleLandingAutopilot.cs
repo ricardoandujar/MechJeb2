@@ -84,6 +84,20 @@ namespace MuMech
         public double TargetAltitude = 0; // Set in constructor
         public TargetingResult targetingResult;
 
+        // ClosestPointToSurfaceTarget is on the FixedUpdate path. A full 50+40+100
+        // getPositionAtUT search plus Debug.Log every tick freezes the Unity mouse.
+        private bool _closestPointCacheValid;
+        private double _closestPointCacheNow;
+        private double _closestPointCacheLat;
+        private double _closestPointCacheLon;
+        private Vector3d _closestPointCachePos;
+        private double _closestPointCacheUT;
+        private double _closestPointCacheDist;
+        private Vector3d _closestPointCacheVel;
+        private const double CLOSEST_POINT_REUSE_DT = 0.05;
+        private const double CLOSEST_POINT_FULL_PERIOD = 1.0;
+        private const bool LOG_CLOSEST_POINT = false;
+
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public readonly EditableDouble TouchdownSpeed = 0.5;
 
@@ -657,6 +671,19 @@ namespace MuMech
             CelestialBody body = orbit.referenceBody;
             double R = body.Radius;
             double now = Planetarium.GetUniversalTime();
+            double lat = Core.Target.targetLatitude;
+            double lon = Core.Target.targetLongitude;
+            if (_closestPointCacheValid
+                && lat == _closestPointCacheLat && lon == _closestPointCacheLon
+                && (now - _closestPointCacheNow) >= 0
+                && (now - _closestPointCacheNow) < CLOSEST_POINT_REUSE_DT)
+            {
+                bestPos = _closestPointCachePos;
+                bestUT = _closestPointCacheUT;
+                bestDist = _closestPointCacheDist;
+                surfaceVel = _closestPointCacheVel;
+                return;
+            }
             const double tol = 0.05;
             double rNow = orbit.pos.magnitude;
             if (!IsFiniteVec(orbit.pos) || rNow < R) rNow = R;
@@ -696,6 +723,63 @@ namespace MuMech
                 workDist = dist;
                 workUT = ut;
                 workPos = srcPos;
+            }
+            bool needFullSearch = !_closestPointCacheValid
+                || lat != _closestPointCacheLat || lon != _closestPointCacheLon
+                || (now - _closestPointCacheNow) >= CLOSEST_POINT_FULL_PERIOD;
+            if (!needFullSearch)
+            {
+                workDist = double.MaxValue;
+                workUT = now;
+                workPos = Vector3d.zero;
+                double seedUT = _closestPointCacheUT;
+                if (double.IsNaN(seedUT) || double.IsInfinity(seedUT) || seedUT < now)
+                    seedUT = now;
+                double window = 20.0;
+                double aC = Math.Max(now, seedUT - window);
+                double bC = seedUT + window;
+                if (bC < aC) bC = aC + window;
+                double phiC = (1.0 + Math.Sqrt(5.0)) / 2.0;
+                double invPhiC = 1.0 / phiC;
+                double invPhi2C = invPhiC * invPhiC;
+                for (int iter = 0; iter < 25 && (bC - aC) > tol; iter++)
+                {
+                    double x1 = aC + invPhi2C * (bC - aC);
+                    double x2 = aC + invPhiC * (bC - aC);
+                    if (GetDist(x1) < GetDist(x2))
+                        bC = x2;
+                    else
+                        aC = x1;
+                }
+                Consider((aC + bC) / 2.0);
+                Consider(seedUT);
+                Consider(now);
+                if (!IsFiniteVec(workPos) || workDist == double.MaxValue)
+                {
+                    workUT = now;
+                    workPos = orbit.getPositionAtUT(now) - body.position;
+                    if (!IsFiniteVec(workPos)) workPos = orbit.pos;
+                    workDist = GetDist(now);
+                    if (double.IsNaN(workDist) || double.IsInfinity(workDist)) workDist = 0;
+                }
+                bestDist = workDist;
+                bestUT = workUT;
+                bestPos = workPos;
+                Vector3d velCheap = Vessel.orbit.getOrbitalVelocityAtUT(bestUT);
+                Vector3d rotCheap = Vector3d.Cross(MainBody.angularVelocity, bestPos.normalized);
+                surfaceVel = velCheap - rotCheap;
+                if (LOG_CLOSEST_POINT)
+                    Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1") + " cheap");
+                bestPos += body.position;
+                _closestPointCacheValid = true;
+                _closestPointCacheNow = now;
+                _closestPointCacheLat = lat;
+                _closestPointCacheLon = lon;
+                _closestPointCachePos = bestPos;
+                _closestPointCacheUT = bestUT;
+                _closestPointCacheDist = bestDist;
+                _closestPointCacheVel = surfaceVel;
+                return;
             }
             // --- 1. Binary-search horizon detection ---------------------------------
             double FindImpactUT(double nowUT, double horizon)
@@ -793,8 +877,17 @@ namespace MuMech
             Vector3d velFuture = Vessel.orbit.getOrbitalVelocityAtUT(bestUT); // Future inertial velocity ---
             Vector3d rotVelFuture = Vector3d.Cross(MainBody.angularVelocity, bestPos.normalized); // Body rotation velocity at that future point ---
             surfaceVel = velFuture - rotVelFuture;// Future surface-relative velocity ---
-            Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1"));
+            if (LOG_CLOSEST_POINT)
+                Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1"));
             bestPos += body.position;
+            _closestPointCacheValid = true;
+            _closestPointCacheNow = now;
+            _closestPointCacheLat = lat;
+            _closestPointCacheLon = lon;
+            _closestPointCachePos = bestPos;
+            _closestPointCacheUT = bestUT;
+            _closestPointCacheDist = bestDist;
+            _closestPointCacheVel = surfaceVel;
         }
         // Rotate Body relative position based on it's rotation over input elapsed seconds from now.
         public Vector3d RotateRelativePosition(Vector3d posBodyCentered, double timeDeltaSeconds)
