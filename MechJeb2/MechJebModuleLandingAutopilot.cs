@@ -684,15 +684,18 @@ namespace MuMech
                 if (!IsFiniteVec(tgtPos)) return double.MaxValue;
                 return ArcDistance(srcPos, tgtPos, R);
             }
+            double workDist = double.MaxValue;
+            double workUT = now;
+            Vector3d workPos = Vector3d.zero;
             void Consider(double ut)
             {
                 double dist = GetDist(ut);
-                if (dist >= bestDist) return;
+                if (dist >= workDist) return;
                 Vector3d srcPos = orbit.getPositionAtUT(ut) - body.position;
                 if (!IsFiniteVec(srcPos)) return;
-                bestDist = dist;
-                bestUT = ut;
-                bestPos = srcPos;
+                workDist = dist;
+                workUT = ut;
+                workPos = srcPos;
             }
             // --- 1. Binary-search horizon detection ---------------------------------
             double FindImpactUT(double nowUT, double horizon)
@@ -715,9 +718,9 @@ namespace MuMech
             }
             double endUT = FindImpactUT(now, maxHorizon);
             // --- 2. Coarse global search --------------------------------------------
-            bestDist = double.MaxValue;
-            bestUT = now;
-            bestPos = Vector3d.zero;
+            workDist = double.MaxValue;
+            workUT = now;
+            workPos = Vector3d.zero;
             double step = (endUT - now) / coarseSamples;
             if (step < 0 || double.IsNaN(step) || double.IsInfinity(step)) step = 0;
             for (int i = 0; i <= coarseSamples; i++)
@@ -737,19 +740,19 @@ namespace MuMech
                 if (!double.IsNaN(tPe) && !double.IsInfinity(tPe) && tPe >= 0 && now + tPe <= endUT)
                     Consider(now + tPe);
             }
-            if (!IsFiniteVec(bestPos) || bestDist == double.MaxValue)
+            if (!IsFiniteVec(workPos) || workDist == double.MaxValue)
             {
-                bestUT = now;
-                bestPos = orbit.getPositionAtUT(now) - body.position;
-                if (!IsFiniteVec(bestPos)) bestPos = orbit.pos;
-                bestDist = GetDist(now);
-                if (double.IsNaN(bestDist) || double.IsInfinity(bestDist)) bestDist = 0;
+                workUT = now;
+                workPos = orbit.getPositionAtUT(now) - body.position;
+                if (!IsFiniteVec(workPos)) workPos = orbit.pos;
+                workDist = GetDist(now);
+                if (double.IsNaN(workDist) || double.IsInfinity(workDist)) workDist = 0;
             }
             // --- 3. Fine refinement with golden section search ----------------------
             double refineWindow = step * 5.0;
             if (double.IsNaN(refineWindow) || double.IsInfinity(refineWindow) || refineWindow <= 0) refineWindow = 10.0;
-            double refineStart = Math.Max(now, bestUT - refineWindow);
-            double refineEnd = Math.Min(endUT, bestUT + refineWindow);
+            double refineStart = Math.Max(now, workUT - refineWindow);
+            double refineEnd = Math.Min(endUT, workUT + refineWindow);
             double phi = (1.0 + Math.Sqrt(5.0)) / 2.0;
             double invPhi = 1.0 / phi;
             double invPhi2 = invPhi * invPhi;
@@ -773,17 +776,20 @@ namespace MuMech
             }
             double fineUT = (a + b) / 2.0;
             double fineDist = GetDist(fineUT);
-            if (fineDist < bestDist)
+            if (fineDist < workDist)
             {
-                bestDist = fineDist;
-                bestUT = fineUT;
-                bestPos = orbit.getPositionAtUT(bestUT) - body.position;
+                workDist = fineDist;
+                workUT = fineUT;
+                workPos = orbit.getPositionAtUT(workUT) - body.position;
             }
-            if (!IsFiniteVec(bestPos))
+            if (!IsFiniteVec(workPos))
             {
-                bestUT = now;
-                bestPos = orbit.pos;
+                workUT = now;
+                workPos = orbit.pos;
             }
+            bestDist = workDist;
+            bestUT = workUT;
+            bestPos = workPos;
             Vector3d velFuture = Vessel.orbit.getOrbitalVelocityAtUT(bestUT); // Future inertial velocity ---
             Vector3d rotVelFuture = Vector3d.Cross(MainBody.angularVelocity, bestPos.normalized); // Body rotation velocity at that future point ---
             surfaceVel = velFuture - rotVelFuture;// Future surface-relative velocity ---
