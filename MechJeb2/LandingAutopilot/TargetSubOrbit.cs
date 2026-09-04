@@ -19,8 +19,6 @@ namespace MuMech
             private const double TARGET_FAR_DISTANCE_THRESHOLD = 2.5*50000; // Distance to target at which to switch from prograde/retrograde burn to fine lateral control to target before final landing burn. This is used to avoid overshooting the target when doing a prograde or retrograde burn and allow for more precise targeting of the final landing burn.
             private const double TARGET_DISTANCE_THRESHOLD = 300; // Final Distance to target at which to switch to final landing burn.   
             private const double DELTA_TARGET_ALT_THRESHOLD = 600; // Threshold for switching between prograde and retrograde burn when close to target - if the target altitude is above the current altitude by this amount then we will do a prograde burn, if it's below then we will do a retrograde burn, if it's close then we will do a lateral burn to fine tune the approach to target before the final burn.
-            // ClosestPoint past pad (positive deltaDistance). Exit RETROGRADE only when below this.
-            private const double INTERCEPT_PAST_PAD_M = 1000;
             private double hFarCorrectionAngle;             // far horizontal distance overshoot angle
             private double velaccum = 0;                    // Integral velocity error accumulator for PI Controller
             private double limitedMaxThrustAccel = 0;       // Limited thrust acceleration used to calculate TWR and overshoot angle + scale max speed
@@ -147,15 +145,23 @@ namespace MuMech
                     }
                     else
                     {
-                        // Still climbing, ApA past pad, or ClosestPoint still past pad:
-                        // keep dumping. Ap-ahead with ClosestPoint past (descending overshoot)
-                        // was exiting to LATERAL once height crossed (9/4 9:19 Vesta).
-                        if (ApoapsisPastDestination(Core.Target.GetPositionTargetPosition())
-                            || deltaDistance > INTERCEPT_PAST_PAD_M)
+                        // ApA past pad: dump. Pad already behind: hop recover via MoveToTarget.
+                        // ClosestPoint/intercept past is allowed (do not force RETROGRADE on it).
+                        Vector3d tgtPosCorrect = Core.Target.GetPositionTargetPosition();
+                        if (ApoapsisPastDestination(tgtPosCorrect))
+                        {
                             step = Step.STATE_RETROGRADE;
+                            throttleCount = 0;
+                        }
+                        else if (PadOverflightBehind(tgtPosCorrect))
+                        {
+                            return new MoveToTarget(Core);
+                        }
                         else
+                        {
                             step = Step.STATE_LATERAL;
-                        throttleCount = 0;
+                            throttleCount = 0;
+                        }
                     }
                 }
 
@@ -356,6 +362,10 @@ namespace MuMech
 
                 double angPad = SignedOrbitAngle(pos, targetPosBody, n);
                 double alongTrack = angPad * r; // signed meters along orbit
+                // Pad already behind / at: do not clamp a negative dt up to 5s (that
+                // would sample ahead of the vessel instead of the pad).
+                if (alongTrack <= 0.0)
+                    return false;
                 double dt = alongTrack / hOrbSpeed;
                 if (dt < 5.0)
                     dt = 5.0;
@@ -375,6 +385,33 @@ namespace MuMech
                 gateDt = dt;
                 return !double.IsNaN(gateDeltaHeight) && !double.IsInfinity(gateDeltaHeight);
             }
+
+            /// <summary>
+            /// True when finite signed along-track to pad is clearly behind (~>1 km past).
+            /// Same orbit-normal SignedOrbitAngle approach as TryPadOverflightGate.
+            /// </summary>
+            private bool PadOverflightBehind(Vector3d targetPosBody)
+            {
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(targetPosBody))
+                    return false;
+
+                Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
+                Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
+                if (n.sqrMagnitude < 1e-6)
+                    return false;
+                n.Normalize();
+
+                double r = pos.magnitude;
+                if (double.IsNaN(r) || r < 1.0)
+                    return false;
+
+                double angPad = SignedOrbitAngle(pos, targetPosBody, n);
+                double alongTrack = angPad * r;
+                if (double.IsNaN(alongTrack) || double.IsInfinity(alongTrack))
+                    return false;
+                return alongTrack < -1000.0;
+            }
+
             public double setHorizontalSpeed(Vector3d downrangeVec, Vector3d crossrangeVec, Vector3d closestPos, Vector3d targetPos,
                  ref Vector3d surfaceVel, out Vector3d desiredHorizontalVel, out Vector3d herror)
             {
@@ -423,8 +460,6 @@ namespace MuMech
                                 step = Step.STATE_RETROGRADE;
                             else if (ApoapsisPastDestination(targetPos))
                                 step = Step.STATE_RETROGRADE; // ApA past pad: pull energy back
-                            else if (deltaDistance > INTERCEPT_PAST_PAD_M)
-                                step = Step.STATE_RETROGRADE; // ClosestPoint past pad: dump until intercept not past
                             else if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
                                 step = Step.STATE_RETROGRADE;
                             else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < 2000))
@@ -470,8 +505,8 @@ namespace MuMech
                             Debug.Log(" prograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
                             // Switch to fine lateral control when close to target or if periapsis is above half target altitude
-                            // Past pad: do not fine-tune / CORRECT - pull Ap back first.
-                            if (ApoapsisPastDestination(targetPos) || deltaDistance > INTERCEPT_PAST_PAD_M)
+                            // ApA past pad: do not fine-tune / CORRECT - pull Ap back first.
+                            if (ApoapsisPastDestination(targetPos))
                             {
                                 ProgradeCount = throttleCount;
                                 throttleCount = 0;
@@ -511,12 +546,18 @@ namespace MuMech
                             herror = -retroMag * downrangeVec.normalized;
                             rc = 100; // we only want horizontal thrust here
 
-                            // Height near TgtAlt is not enough if ApA is still past the pad,
-                            // or ClosestPoint is still past (Ap may already be before pad on a
-                            // descending overshoot - 9/4 9:19: height +725 with deltaDistance +47 km).
-                            // Keep dumping until Ap not past AND ClosestPoint not significantly past.
-                            bool interceptPast = deltaDistance > INTERCEPT_PAST_PAD_M;
-                            if (!pastDest && !interceptPast && ((throttleCount >= 4) || (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD)))
+                            // Exit on pad-overflight height gate when pad still ahead.
+                            // If pad is already behind, do NOT treat ClosestPoint deltaHeight
+                            // match as OK (9/4 9:19: height +725 with pad still behind).
+                            // Keep dumping while ApoapsisPastDestination; intercept past allowed.
+                            bool heightOk;
+                            if (TryPadOverflightGate(targetPos, out double padDhExit, out _))
+                                heightOk = padDhExit >= -DELTA_TARGET_ALT_THRESHOLD;
+                            else if (PadOverflightBehind(targetPos))
+                                heightOk = false;
+                            else
+                                heightOk = deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD;
+                            if (!pastDest && ((throttleCount >= 4) || heightOk))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
@@ -535,8 +576,8 @@ namespace MuMech
                             MechJebModuleDebugArrows.debugVector2 = herror;
                             Debug.Log("Lateral Fine HError Mag:" + distanceToTarget.ToString("F0"));
 
-                            // Do not declare CORRECT while ApA or ClosestPoint is still past the pad.
-                            if (ApoapsisPastDestination(targetPos) || deltaDistance > INTERCEPT_PAST_PAD_M)
+                            // Do not declare CORRECT while ApA is still past the pad.
+                            if (ApoapsisPastDestination(targetPos))
                             {
                                 LateralFineCount = throttleCount;
                                 throttleCount = 0;
