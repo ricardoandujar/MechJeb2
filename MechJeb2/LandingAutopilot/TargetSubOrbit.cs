@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using KSP.Localization;
 using MechJebLib.Functions;
 using MuMech.LandingAutopilot;
@@ -45,6 +45,7 @@ namespace MuMech
             private bool forceHoriz = true;
             private double distanceToTarget;
             private double deltaHeight;
+            private double deltaDistance;
             private double tUT;
 
             private bool throttleOn = false;
@@ -145,8 +146,11 @@ namespace MuMech
                     else
                     {
                         // Still climbing or ClosestPoint/Ap past destination after overhead:
-                        // stay in TargetSubOrbit and re-select pro/retro/lateral.
-                        step = Step.STATE_LATERAL;
+                        // stay in TargetSubOrbit - pull Ap back if past, else re-select.
+                        if (InterceptPastDestination(deltaDistance, tUT))
+                            step = Step.STATE_RETROGRADE;
+                        else
+                            step = Step.STATE_LATERAL;
                         throttleCount = 0;
                     }
                 }
@@ -220,6 +224,22 @@ namespace MuMech
                 // Set the desired Horizontal Velocity to reach target. Error to subtract the vessels current horizontal velocity.
                 double hCorrectionAngle = setHorizontalSpeed(downrangeVec, crossrangeVec, closestPos, targetPos, ref surfaceVel, out Vector3d desiredHorizontalVel, out Vector3d herror);
 
+                // Altitude-above-target / TgtAlt: for pro/retro energy burns, command vertical
+                // so coast height at ClosestPoint approaches the gate (not only null V).
+                // Landing descent curve in setVerticalSpeed is left for lateral modes.
+                if (step == Step.STATE_PROGRADE || step == Step.STATE_RETROGRADE)
+                {
+                    if (!double.IsNaN(deltaHeight) && !double.IsInfinity(deltaHeight)
+                        && !double.IsNaN(tUT) && !double.IsInfinity(tUT))
+                    {
+                        double dt = Math.Max(5.0, tUT - Planetarium.GetUniversalTime());
+                        desiredVerticalSpeed = Math.Max(-150.0, Math.Min(150.0, deltaHeight / dt));
+                        // RETROGRADE pulls Ap back: do not command a climb that fights the dump.
+                        if (step == Step.STATE_RETROGRADE)
+                            desiredVerticalSpeed = Math.Min(0.0, desiredVerticalSpeed);
+                    }
+                }
+
                 // Set the thrust based on primarily vertical herror, with horizontal as an alternate for thrust calculation when vertical is not needed.
                 vCorrectionAngle = setThrustAndVerticalAngle(out double verror, ref desiredVerticalSpeed, ref herror, ref desiredHorizontalVel);
 
@@ -246,6 +266,27 @@ namespace MuMech
                 if (Double.IsNaN(desiredVerticalSpeed)) return;
             }
 
+
+            // ClosestPoint after the pad, or finite Ap still ahead of the intercept:
+            // ApA / ballistic high point is past the destination. Keep burning retrograde.
+            bool InterceptPastDestination(double deltaDistance, double closestUT)
+            {
+                if (!double.IsNaN(deltaDistance) && !double.IsInfinity(deltaDistance) && deltaDistance > 1000)
+                    return true;
+
+                if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
+                {
+                    double now = Planetarium.GetUniversalTime();
+                    double tAp = VesselState.orbitTimeToAp;
+                    if (!double.IsNaN(tAp) && !double.IsInfinity(tAp) && tAp > 0 && tAp < 600
+                        && !double.IsNaN(closestUT) && !double.IsInfinity(closestUT)
+                        && closestUT < now + tAp)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
             public double setHorizontalSpeed(Vector3d downrangeVec, Vector3d crossrangeVec, Vector3d closestPos, Vector3d targetPos,
                  ref Vector3d surfaceVel, out Vector3d desiredHorizontalVel, out Vector3d herror)
             {
@@ -256,7 +297,7 @@ namespace MuMech
                 Vector3d pos = (VesselState.CoM - Vessel.mainBody.position); // Current position vector from body center
                 Vector3d targetDistance = targetPos - pos; // Vector from current position to target
                 Vector3d closestDistance = closestPos - pos; // Vector from current position to target
-                double   deltaDistance = closestDistance.magnitude - targetDistance.magnitude; // Difference in distance to target and closest approach
+                deltaDistance = closestDistance.magnitude - targetDistance.magnitude; // Difference in distance to target and closest approach
                 deltaHeight = Core.Landing.TgtAlt - height;
 
                 switch (step)
@@ -292,6 +333,8 @@ namespace MuMech
                                 step = Step.STATE_RETROGRADE;
                             else if (hyperbolic && (VesselState.speedVertical > 1) && (deltaDistance < -1000))
                                 step = Step.STATE_RETROGRADE;
+                            else if (InterceptPastDestination(deltaDistance, tUT))
+                                step = Step.STATE_RETROGRADE; // Ap / closest past pad: pull energy back
                             else if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
                                 step = Step.STATE_RETROGRADE;
                             else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < 2000))
@@ -337,7 +380,14 @@ namespace MuMech
                             Debug.Log(" prograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
                             // Switch to fine lateral control when close to target or if periapsis is above half target altitude
-                            if ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD)))
+                            // Past pad: do not fine-tune / CORRECT — pull Ap back first.
+                            if (InterceptPastDestination(deltaDistance, tUT))
+                            {
+                                ProgradeCount = throttleCount;
+                                throttleCount = 0;
+                                step = Step.STATE_RETROGRADE;
+                            }
+                            else if ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD)))
                             {
                                 ProgradeCount = throttleCount;
                                 throttleCount = 0;
@@ -359,9 +409,21 @@ namespace MuMech
                             // Burn retrograde until height at closest position is close to target altitude, but only if it's crosses at a higher altitude.
                             Debug.Log(" retrograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
-                            herror = deltaHeight * downrangeVec.normalized;
+                            bool pastDest = InterceptPastDestination(deltaDistance, tUT);
+
+                            // Always anti-downrange in RETROGRADE. Signed deltaHeight became
+                            // prograde once height crossed, which left Ap past the pad.
+                            double retroMag = Math.Abs(deltaHeight);
+                            if (pastDest)
+                                retroMag = Math.Max(retroMag, 2000.0);
+                            else if (retroMag < 1.0)
+                                retroMag = 1.0;
+                            herror = -retroMag * downrangeVec.normalized;
                             rc = 100; // we only want horizontal thrust here
-                            if ((throttleCount >= 4) || (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD) )//|| (deltaDistance >= 2000))
+
+                            // Height at ClosestPoint near TgtAlt is not enough if that point is still
+                            // past the pad - keep retrograde until Ap / intercept is at or before dest.
+                            if (!pastDest && ((throttleCount >= 4) || (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD)))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
@@ -380,7 +442,14 @@ namespace MuMech
                             MechJebModuleDebugArrows.debugVector2 = herror;
                             Debug.Log("Lateral Fine HError Mag:" + distanceToTarget.ToString("F0"));
 
-                            if ((throttleCount >= 4) || (distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero) )
+                            // Do not declare CORRECT while Ap / closest is still past the pad.
+                            if (InterceptPastDestination(deltaDistance, tUT))
+                            {
+                                LateralFineCount = throttleCount;
+                                throttleCount = 0;
+                                step = Step.STATE_RETROGRADE;
+                            }
+                            else if ((throttleCount >= 4) || (distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero) )
                             {
                                 LateralFineCount = throttleCount;
                                 throttleCount = 0;
