@@ -145,9 +145,9 @@ namespace MuMech
                     }
                     else
                     {
-                        // Still climbing or ClosestPoint/Ap past destination after overhead:
-                        // stay in TargetSubOrbit - pull Ap back if past, else re-select.
-                        if (InterceptPastDestination(deltaDistance, tUT))
+                        // Still climbing or ApA past the pad after overhead:
+                        // pull Ap back if past; ClosestPoint/intercept past dest is allowed.
+                        if (ApoapsisPastDestination(Core.Target.GetPositionTargetPosition()))
                             step = Step.STATE_RETROGRADE;
                         else
                             step = Step.STATE_LATERAL;
@@ -224,16 +224,25 @@ namespace MuMech
                 // Set the desired Horizontal Velocity to reach target. Error to subtract the vessels current horizontal velocity.
                 double hCorrectionAngle = setHorizontalSpeed(downrangeVec, crossrangeVec, closestPos, targetPos, ref surfaceVel, out Vector3d desiredHorizontalVel, out Vector3d herror);
 
-                // Altitude-above-target / TgtAlt: for pro/retro energy burns, command vertical
-                // so coast height at ClosestPoint approaches the gate (not only null V).
+                // TgtAlt shapes coast height OVER THE PAD (overflight gate so LandingBurn
+                // has ZEM-ZEV room). Do not match height at ClosestPoint when that point is
+                // still tens of km past the dest - intercept past is allowed.
                 // Landing descent curve in setVerticalSpeed is left for lateral modes.
                 if (step == Step.STATE_PROGRADE || step == Step.STATE_RETROGRADE)
                 {
-                    if (!double.IsNaN(deltaHeight) && !double.IsInfinity(deltaHeight)
-                        && !double.IsNaN(tUT) && !double.IsInfinity(tUT))
+                    double gateDh = deltaHeight;
+                    double gateDt = (!double.IsNaN(tUT) && !double.IsInfinity(tUT))
+                        ? Math.Max(5.0, tUT - Planetarium.GetUniversalTime())
+                        : 5.0;
+                    if (TryPadOverflightGate(targetPos, out double padDh, out double padDt))
                     {
-                        double dt = Math.Max(5.0, tUT - Planetarium.GetUniversalTime());
-                        desiredVerticalSpeed = Math.Max(-150.0, Math.Min(150.0, deltaHeight / dt));
+                        gateDh = padDh;
+                        gateDt = padDt;
+                    }
+                    if (!double.IsNaN(gateDh) && !double.IsInfinity(gateDh)
+                        && !double.IsNaN(gateDt) && !double.IsInfinity(gateDt) && gateDt > 0)
+                    {
+                        desiredVerticalSpeed = Math.Max(-150.0, Math.Min(150.0, gateDh / gateDt));
                         // RETROGRADE pulls Ap back: do not command a climb that fights the dump.
                         if (step == Step.STATE_RETROGRADE)
                             desiredVerticalSpeed = Math.Min(0.0, desiredVerticalSpeed);
@@ -267,29 +276,100 @@ namespace MuMech
             }
 
 
-            // ClosestPoint after the pad, or (near/at pad) finite Ap still after the intercept.
-            // Do NOT use the Ap clause when ClosestPoint is still short — that wrongly forces
-            // retrograde while STATE_LATERAL still needs prograde stretch.
-            private bool InterceptPastDestination(double deltaDistanceArg, double closestUT)
+            // Signed along-track angle from 'from' to 'to' about orbit normal (prograde +).
+            private static double SignedOrbitAngle(Vector3d from, Vector3d to, Vector3d orbitNormal)
             {
-                if (!double.IsNaN(deltaDistanceArg) && !double.IsInfinity(deltaDistanceArg) && deltaDistanceArg > 1000)
-                    return true;
+                Vector3d a = Vector3d.Exclude(orbitNormal, from);
+                Vector3d b = Vector3d.Exclude(orbitNormal, to);
+                if (a.sqrMagnitude < 1e-12 || b.sqrMagnitude < 1e-12)
+                    return 0;
+                a.Normalize();
+                b.Normalize();
+                double sin = Vector3d.Dot(orbitNormal.normalized, Vector3d.Cross(a, b));
+                double cos = Vector3d.Dot(a, b);
+                return Math.Atan2(sin, cos);
+            }
 
-                // Only when ClosestPoint is near or past the pad: Ap after intercept means
-                // we are still climbing through / past the destination.
-                if (!double.IsNaN(deltaDistanceArg) && !double.IsInfinity(deltaDistanceArg) && deltaDistanceArg > -2000
-                    && MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
-                {
-                    double now = Planetarium.GetUniversalTime();
-                    double tAp = VesselState.orbitTimeToAp;
-                    if (!double.IsNaN(tAp) && !double.IsInfinity(tAp) && tAp > 0 && tAp < 600
-                        && !double.IsNaN(closestUT) && !double.IsInfinity(closestUT)
-                        && closestUT < now + tAp)
-                    {
-                        return true;
-                    }
-                }
-                return false;
+            /// <summary>
+            /// True when finite ApA is still past the landing target along-track
+            /// (timeToAp ahead of pad overflight, or Ap ground-track past dest).
+            /// ClosestPoint / intercept past dest is allowed and must NOT force RETROGRADE.
+            /// </summary>
+            private bool ApoapsisPastDestination(Vector3d targetPosBody)
+            {
+                if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
+                    return false;
+
+                double now = Planetarium.GetUniversalTime();
+                double tAp = VesselState.orbitTimeToAp;
+                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0 || tAp >= 600)
+                    return false;
+
+                Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
+                Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
+                if (n.sqrMagnitude < 1e-6)
+                    return false;
+                n.Normalize();
+
+                Vector3d apPos = Vessel.orbit.getPositionAtUT(now + tAp) - Vessel.mainBody.position;
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(apPos)
+                    || !MechJebModuleLandingAutopilot.IsFiniteVec(targetPosBody))
+                    return false;
+
+                double angPad = SignedOrbitAngle(pos, targetPosBody, n);
+                double angAp = SignedOrbitAngle(pos, apPos, n);
+                // ~1 km along-track margin at body radius
+                double marginRad = 1000.0 / Math.Max(Vessel.mainBody.Radius, 1.0);
+                return angAp > angPad + marginRad;
+            }
+
+            /// <summary>
+            /// Coast height above the target radius at estimated pad overflight (TgtAlt gate)
+            /// and dt to that overflight. Used so pro/retro shape path over the pad, not at
+            /// ClosestPoint when ClosestPoint is far past dest.
+            /// </summary>
+            private bool TryPadOverflightGate(Vector3d targetPosBody, out double gateDeltaHeight, out double gateDt)
+            {
+                gateDeltaHeight = double.NaN;
+                gateDt = double.NaN;
+
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(targetPosBody))
+                    return false;
+
+                Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
+                Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
+                if (n.sqrMagnitude < 1e-6)
+                    return false;
+                n.Normalize();
+
+                double r = pos.magnitude;
+                if (double.IsNaN(r) || r < 1.0)
+                    return false;
+
+                double hOrbSpeed = Vector3d.Exclude(VesselState.up, VesselState.orbitalVelocity).magnitude;
+                if (hOrbSpeed < 10.0)
+                    return false;
+
+                double angPad = SignedOrbitAngle(pos, targetPosBody, n);
+                double alongTrack = angPad * r; // signed meters along orbit
+                double dt = alongTrack / hOrbSpeed;
+                if (dt < 5.0)
+                    dt = 5.0;
+                if (dt > 600.0)
+                    return false;
+
+                double now = Planetarium.GetUniversalTime();
+                Vector3d atPad = Vessel.orbit.getPositionAtUT(now + dt) - Vessel.mainBody.position;
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(atPad))
+                    return false;
+
+                double heightOverPad = atPad.magnitude - targetPosBody.magnitude;
+                if (double.IsNaN(heightOverPad) || double.IsInfinity(heightOverPad))
+                    return false;
+
+                gateDeltaHeight = Core.Landing.TgtAlt - heightOverPad;
+                gateDt = dt;
+                return !double.IsNaN(gateDeltaHeight) && !double.IsInfinity(gateDeltaHeight);
             }
             public double setHorizontalSpeed(Vector3d downrangeVec, Vector3d crossrangeVec, Vector3d closestPos, Vector3d targetPos,
                  ref Vector3d surfaceVel, out Vector3d desiredHorizontalVel, out Vector3d herror)
@@ -337,8 +417,8 @@ namespace MuMech
                                 step = Step.STATE_RETROGRADE;
                             else if (hyperbolic && (VesselState.speedVertical > 1) && (deltaDistance < -1000))
                                 step = Step.STATE_RETROGRADE;
-                            else if (InterceptPastDestination(deltaDistance, tUT))
-                                step = Step.STATE_RETROGRADE; // Ap / closest past pad: pull energy back
+                            else if (ApoapsisPastDestination(targetPos))
+                                step = Step.STATE_RETROGRADE; // ApA past pad: pull energy back
                             else if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
                                 step = Step.STATE_RETROGRADE;
                             else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < 2000))
@@ -385,7 +465,7 @@ namespace MuMech
 
                             // Switch to fine lateral control when close to target or if periapsis is above half target altitude
                             // Past pad: do not fine-tune / CORRECT — pull Ap back first.
-                            if (InterceptPastDestination(deltaDistance, tUT))
+                            if (ApoapsisPastDestination(targetPos))
                             {
                                 ProgradeCount = throttleCount;
                                 throttleCount = 0;
@@ -413,7 +493,7 @@ namespace MuMech
                             // Burn retrograde until height at closest position is close to target altitude, but only if it's crosses at a higher altitude.
                             Debug.Log(" retrograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
-                            bool pastDest = InterceptPastDestination(deltaDistance, tUT);
+                            bool pastDest = ApoapsisPastDestination(targetPos);
 
                             // Always anti-downrange in RETROGRADE. Signed deltaHeight became
                             // prograde once height crossed, which left Ap past the pad.
@@ -425,8 +505,8 @@ namespace MuMech
                             herror = -retroMag * downrangeVec.normalized;
                             rc = 100; // we only want horizontal thrust here
 
-                            // Height at ClosestPoint near TgtAlt is not enough if that point is still
-                            // past the pad - keep retrograde until Ap / intercept is at or before dest.
+                            // Height near TgtAlt is not enough if ApA is still past the pad -
+                            // keep retrograde until Ap is at or before dest (intercept past is OK).
                             if (!pastDest && ((throttleCount >= 4) || (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD)))
                             {
                                 RetrogradeCount = throttleCount;
@@ -446,8 +526,8 @@ namespace MuMech
                             MechJebModuleDebugArrows.debugVector2 = herror;
                             Debug.Log("Lateral Fine HError Mag:" + distanceToTarget.ToString("F0"));
 
-                            // Do not declare CORRECT while Ap / closest is still past the pad.
-                            if (InterceptPastDestination(deltaDistance, tUT))
+                            // Do not declare CORRECT while ApA is still past the pad.
+                            if (ApoapsisPastDestination(targetPos))
                             {
                                 LateralFineCount = throttleCount;
                                 throttleCount = 0;
