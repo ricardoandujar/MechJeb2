@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using KSP.Localization;
 using MechJebLib.Functions;
 using MuMech.LandingAutopilot;
@@ -267,14 +267,18 @@ namespace MuMech
             }
 
 
-            // ClosestPoint after the pad, or finite Ap still ahead of the intercept:
-            // ApA / ballistic high point is past the destination. Keep burning retrograde.
-            bool InterceptPastDestination(double deltaDistance, double closestUT)
+            // ClosestPoint after the pad, or (near/at pad) finite Ap still after the intercept.
+            // Do NOT use the Ap clause when ClosestPoint is still short — that wrongly forces
+            // retrograde while STATE_LATERAL still needs prograde stretch.
+            private bool InterceptPastDestination(double deltaDistanceArg, double closestUT)
             {
-                if (!double.IsNaN(deltaDistance) && !double.IsInfinity(deltaDistance) && deltaDistance > 1000)
+                if (!double.IsNaN(deltaDistanceArg) && !double.IsInfinity(deltaDistanceArg) && deltaDistanceArg > 1000)
                     return true;
 
-                if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
+                // Only when ClosestPoint is near or past the pad: Ap after intercept means
+                // we are still climbing through / past the destination.
+                if (!double.IsNaN(deltaDistanceArg) && !double.IsInfinity(deltaDistanceArg) && deltaDistanceArg > -2000
+                    && MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
                 {
                     double now = Planetarium.GetUniversalTime();
                     double tAp = VesselState.orbitTimeToAp;
