@@ -127,6 +127,13 @@ namespace MuMech
             private const bool LOG_LANDING_TICK = false; // Unity Debug.Log on the physics thread freezes the mouse
             private const double HOP_STRIP_BOOST = 20; // m/s remaining V: full strip above this
             private const double HOP_REARM_RATIO = 1.5; // re-arm in-progress hop only if new dV is well above remaining and the armed peak
+            // PredictAvoid clearance for departure climb-out / coast-clear (not pad).
+            // Was 1500: with long localRimLook it held vertical-first past the rim.
+            private const double AVOID_MIN_ALTITUDE = 900.0;
+            // Soft leftover-V dump band (desired V ~ 0 cruise). Hard cut at +2 slammed
+            // vertical command on/off as V oscillated around that threshold.
+            private const double DUMP_V_FULL_EXCESS = 5.0; // m/s above desired: full pitch-over dump
+            private const double DUMP_V_START_EXCESS = 0.25; // begin fading dump above desired
 
             // True when MoveToTarget may safely hand off to TargetSubOrbit: no armed collision
             // hop and the hop predictor (trajectory + heading rims) reports clear. Keeps hop
@@ -146,7 +153,7 @@ namespace MuMech
                     _coastClearResult = true;
                 else
                 {
-                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
+                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, AVOID_MIN_ALTITUDE);
                     _coastClearResult = !(willCrash || deltaV > 0);
                 }
                 return _coastClearResult;
@@ -697,13 +704,30 @@ namespace MuMech
                 // Collision hop wins while armed: remainingBoost decays under actual +V and the
                 // dump was pitching over into the hop. Between hops, dump may still bleed leftover.
                 bool hopArmed = (hopBlend > 0) || (vCollisionCounter > 0);
-                bool needDumpV = !hopArmed && (VesselState.speedVertical > desiredVerticalSpeed + 2.0);
+                // Soft dump: fade pitch-over authority over DUMP_V_* instead of a hard
+                // on/off at desired+2 (that pulsed the vertical vector around +2 m/s).
+                // Hop armed still suppresses dump into terrain.
+                double dumpBlend = 0.0;
+                if (!hopArmed && (desiredVerticalSpeed >= 0))
+                {
+                    double excessV = VesselState.speedVertical - desiredVerticalSpeed;
+                    if (excessV > DUMP_V_START_EXCESS)
+                    {
+                        double span = DUMP_V_FULL_EXCESS - DUMP_V_START_EXCESS;
+                        dumpBlend = (span > 1e-6) ? Math.Min(1.0, (excessV - DUMP_V_START_EXCESS) / span) : 1.0;
+                    }
+                }
                 bool allowPitchOver = (Core.Landing.g <= Core.Landing.LOW_GRAVITY) && (VesselState.altitudeTrue >= 30)
                     && !hopArmed
-                    && ((desiredVerticalSpeed < 0) || needDumpV);
+                    && ((desiredVerticalSpeed < 0) || (dumpBlend > 0));
                 double avFinal = Vector3d.Dot(accel, up);
-                if ((allowPitchOver == false) && (avFinal < 0))
-                    accel -= up * avFinal;
+                if (avFinal < 0)
+                {
+                    if (allowPitchOver == false)
+                        accel -= up * avFinal;
+                    else if ((desiredVerticalSpeed >= 0) && (dumpBlend < 1.0))
+                        accel -= up * avFinal * (1.0 - dumpBlend);
+                }
 
                 Vector3d rawAccel = accel;
                 double maxA = Math.Max(1e-6, VesselState.limitedMaxThrustAccel);
@@ -784,7 +808,7 @@ namespace MuMech
                 // Hop-phase collision: LOCAL rim/terrain vs our ASL.
                 // Arm/hold/re-arm from PredictAvoid only -- never from distance to the
                 // landing site. hTargetError <= 5 km is pad false-fire protection only
-                // (predictor wants 1500 m AGL on the pad). Departure-crater climb-out
+                // (predictor AVOID_MIN_ALTITUDE on the pad; near-pad hop is suppressed). Departure-crater climb-out
                 // with a far target must still hop on local rim clearance.
                 // An in-progress tail keeps decaying after we later cross 5 km; cutting
                 // it off restored H mid-hop. The 30s ignore is load-bearing for hops
@@ -806,7 +830,7 @@ namespace MuMech
                     // so a far landing site cannot skip departure-crater climb-out.
                     if (nearLandingSite == false)
                     {
-                        (deltaV, willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
+                        (deltaV, willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, AVOID_MIN_ALTITUDE);
                     }
 
                     double newRequired = (deltaV > 0) ? deltaV : ((willCrash == true) ? 500.0 : 0.0);
@@ -968,12 +992,19 @@ namespace MuMech
                             : (VesselState.altitudeTrue >= Math.Max(Core.Landing.TgtAlt, ASCENT_AOA_MIN_ALT));
                         if (apoapsisHighEnough)
                         {
-                            desiredVerticalSpeed = 0;
+                            // Soft stop-climb: pull desired V toward 0 via current leftover V
+                            // instead of snapping to 0 (that fought the old +2 dump gate).
+                            if (desiredVerticalSpeed > 0)
+                                desiredVerticalSpeed = Math.Max(0.0, Math.Min(desiredVerticalSpeed, VesselState.speedVertical * 0.35));
+                            else
+                                desiredVerticalSpeed = 0;
                             // Low-g far: end increaseVertical so stopIncrease can hand off to
                             // TargetSubOrbit once the collision coast is clear, instead of
                             // sitting at desired V = 0 and pitch-over-dumping leftover +V forever.
                             if ((Core.Landing.g <= Core.Landing.LOW_GRAVITY)
-                                && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT))
+                                && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT)
+                                && (desiredVerticalSpeed <= 0.5)
+                                && (VesselState.speedVertical <= DUMP_V_FULL_EXCESS))
                             {
                                 stopIncrease = true;
                             }

@@ -1,4 +1,4 @@
-﻿extern alias JetBrainsAnnotations;
+extern alias JetBrainsAnnotations;
 using System;
 //using System.Collections.Specialized;
 //using Contracts.Agents.Mentalities;
@@ -1363,12 +1363,13 @@ namespace MuMech
             // that look and broke the first climb when the target was hundreds of km out.
             double lookRange = Math.Max(4000.0, 8.0 * Math.Max(50.0, VesselState.altitudeTrue));
             lookRange = Math.Max(lookRange, VesselState.speedSurfaceHorizontal * Math.Max(lookAheadSec, 15.0));
-            // Floor AGL ~50-100 m makes the AGL*8 term ~4 km and misses wide crater
-            // walls. Body-scaled local rim look (tens of km on Vesta-class) -- still
-            // independent of landing-site distance.
-            double localRimLook = Math.Min(80000.0, Math.Max(20000.0, body.Radius * 0.15));
+            // Was max(20 km, 0.15*R) capped at 80 km + callers' minAltitude 1500:
+            // cleared the floor but held vertical-first / over-hopped past the rim.
+            // Dialed: max(10 km, 0.08*R) capped at 40 km. Still local-only (no
+            // hTargetError). Callers use a lower minAltitude so H returns sooner.
+            double localRimLook = Math.Min(40000.0, Math.Max(10000.0, body.Radius * 0.08));
             lookRange = Math.Max(lookRange, localRimLook);
-            lookRange = Math.Min(lookRange, Math.Max(40000.0, localRimLook));
+            lookRange = Math.Min(lookRange, Math.Max(25000.0, localRimLook));
 
             void SampleHeading(Vector3d dir)
             {
