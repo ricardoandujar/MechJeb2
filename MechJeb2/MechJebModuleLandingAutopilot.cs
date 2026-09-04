@@ -1,4 +1,4 @@
-extern alias JetBrainsAnnotations;
+﻿extern alias JetBrainsAnnotations;
 using System;
 //using System.Collections.Specialized;
 //using Contracts.Agents.Mentalities;
@@ -106,6 +106,12 @@ namespace MuMech
         private double _avoidCacheMinAlt;
         private double _avoidCacheDV;
         private bool _avoidCacheCrash;
+
+        // Same-UT reuse for intercept-path terrain samples (not per-tick hitch).
+        private bool _pathClearCacheValid;
+        private double _pathClearCacheNow;
+        private double _pathClearCacheMinAlt;
+        private bool _pathClearCacheResult;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public readonly EditableDouble TouchdownSpeed = 0.5;
@@ -1417,6 +1423,152 @@ namespace MuMech
             _avoidCacheDV = reqV;
             _avoidCacheCrash = willCrash;
             return (reqV, willCrash);
+        }
+        // Pad false-fire: same 5 km band as MoveToTarget CoastClear / hop suppress.
+        private const double LANDING_BURN_PAD_FALSE_FIRE_M = 5000.0;
+        // Match MoveToTarget AVOID_MIN_ALTITUDE for suborbit path terrain.
+        private const double SUBORBIT_PATH_MIN_ALTITUDE = 900.0;
+
+        /// <summary>
+        /// True when the coast from now to ClosestPoint does not clip terrain before the
+        /// pad. Local PredictAvoid is unchanged (no hTargetError in lookRange). Samples
+        /// within 5 km of the pad are ignored. Near-pad overall is treated clear.
+        /// Cached once per UT.
+        /// </summary>
+        public bool SubOrbitPathClearToTarget(double minAltitude = -1)
+        {
+            if (minAltitude < 0) minAltitude = SUBORBIT_PATH_MIN_ALTITUDE;
+            return SubOrbitPathClearToTargetUncached(minAltitude);
+        }
+
+        private bool SubOrbitPathClearToTargetUncached(double minAltitude)
+        {
+            ClosestPointToSurfaceTarget(out Vector3d closestPos, out double tUT, out double distanceToTarget, out Vector3d surfaceVel);
+            Vector3d targetPos = Core.Target.GetPositionTargetPosition();
+            GetRangeVectorsToSurfaceTarget(Vessel, VesselState, targetPos, tUT, out Vector3d downrangeVec, out Vector3d crossrangeVec, out Vector3d horizontalVec);
+            if (horizontalVec.magnitude <= LANDING_BURN_PAD_FALSE_FIRE_M)
+                return true;
+
+            (double deltaV, bool willCrash) = PredictAvoidCollisionDeltaV(15, minAltitude);
+            if (willCrash || deltaV > 0)
+                return false;
+
+            return FarInterceptPathClear(tUT, targetPos, minAltitude);
+        }
+
+        // Keplerian samples along the intercept only (PredictAvoid already did local).
+        private bool FarInterceptPathClear(double tUT, Vector3d targetPos, double minAltitude)
+        {
+            double now = Planetarium.GetUniversalTime();
+            if (_pathClearCacheValid
+                && now == _pathClearCacheNow
+                && minAltitude == _pathClearCacheMinAlt)
+                return _pathClearCacheResult;
+
+            bool result = FarInterceptPathClearUncached(tUT, targetPos, minAltitude, now);
+            _pathClearCacheValid = true;
+            _pathClearCacheNow = now;
+            _pathClearCacheMinAlt = minAltitude;
+            _pathClearCacheResult = result;
+            return result;
+        }
+
+        private bool FarInterceptPathClearUncached(double tUT, Vector3d targetPos, double minAltitude, double now)
+        {
+            if (double.IsNaN(tUT) || double.IsInfinity(tUT) || tUT <= now + 1.0)
+                return true;
+
+            CelestialBody body = Vessel.mainBody;
+            Orbit orbit = Vessel.orbit;
+            if (orbit == null) return true;
+
+            double endUT = Math.Min(tUT, now + 900.0);
+            const int nSamples = 10;
+            double span = endUT - now;
+            if (span < 1.0) return true;
+
+            for (int i = 1; i <= nSamples; i++)
+            {
+                double ut = now + span * i / nSamples;
+                Vector3d pos = orbit.getPositionAtUT(ut);
+                if (!IsFiniteVec(pos)) continue;
+
+                Vector3d posBody = pos - body.position;
+                Vector3d tgtNow = targetPos - body.position;
+                Vector3d tgtAtUt = RotateRelativePosition(tgtNow, ut - now);
+                if (!IsFiniteVec(posBody) || !IsFiniteVec(tgtAtUt)) continue;
+
+                double arcToPad = ArcDistance(posBody, tgtAtUt, body.Radius);
+                if (arcToPad <= LANDING_BURN_PAD_FALSE_FIRE_M)
+                    continue;
+
+                double posASL = body.GetAltitude(pos);
+                double terrainASL = body.TerrainAltitude(pos);
+                if (double.IsNaN(posASL) || double.IsInfinity(posASL)
+                    || double.IsNaN(terrainASL) || double.IsInfinity(terrainASL))
+                    continue;
+
+                if ((posASL - terrainASL) < minAltitude)
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// LandingBurn ZEM/ZEV assumes descending into the pad (v_down = Max(0,-vy)).
+        /// Allow entry only when descending and ClosestPoint is still ahead of the ship
+        /// (not an overhead pass with Ap / intercept past the destination).
+        /// localTerrainBlocked: near-term PredictAvoid wants a hop (MoveToTarget).
+        /// pathTerrainBlocked: intercept samples clip before the pad (stay, raise path).
+        /// </summary>
+        public bool LandingBurnEntryAllowed(out bool localTerrainBlocked, out bool pathTerrainBlocked)
+        {
+            localTerrainBlocked = false;
+            pathTerrainBlocked = false;
+
+            // Do not teach LandingBurn to burn while ascending into the pad.
+            if (!(VesselState.speedVertical < 0))
+                return false;
+
+            ClosestPointToSurfaceTarget(out Vector3d closestPos, out double tUT, out double distanceToTarget, out Vector3d surfaceVel);
+            double now = Planetarium.GetUniversalTime();
+
+            // Overhead pass: closest approach already behind us.
+            if (!double.IsNaN(tUT) && !double.IsInfinity(tUT) && tUT < now - 1.0)
+                return false;
+
+            // Finite Ap still ahead of the intercept: ApA is after the destination.
+            if (ApoapsisIsFinite(Vessel.orbit))
+            {
+                double tAp = VesselState.orbitTimeToAp;
+                if (!double.IsNaN(tAp) && !double.IsInfinity(tAp) && tAp > 0 && tAp < 600
+                    && !double.IsNaN(tUT) && !double.IsInfinity(tUT)
+                    && tUT < now + tAp)
+                {
+                    return false;
+                }
+            }
+
+            Vector3d targetPos = Core.Target.GetPositionTargetPosition();
+            GetRangeVectorsToSurfaceTarget(Vessel, VesselState, targetPos, tUT, out Vector3d downrangeVec, out Vector3d crossrangeVec, out Vector3d horizontalVec);
+            if (horizontalVec.magnitude <= LANDING_BURN_PAD_FALSE_FIRE_M)
+                return true;
+
+            (double deltaV, bool willCrash) = PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE);
+            if (willCrash || deltaV > 0)
+            {
+                localTerrainBlocked = true;
+                return false;
+            }
+
+            if (!FarInterceptPathClear(tUT, targetPos, SUBORBIT_PATH_MIN_ALTITUDE))
+            {
+                pathTerrainBlocked = true;
+                return false;
+            }
+
+            return true;
         }
     }
 

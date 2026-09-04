@@ -114,7 +114,43 @@ namespace MuMech
                     }
                 }
 
-                if ( step != Step.STATE_CORRECT )
+                // STATE_CORRECT: only hand to LandingBurn when descending into the pad
+                // with intercept still ahead and suborbit path clear of terrain. Do not
+                // teach LandingBurn to burn while ascending into / past the pad.
+                if (step == Step.STATE_CORRECT)
+                {
+                    Core.Thrust.ThrustOff();
+                    if ((ProgradeCount >= 4) || (RetrogradeCount >= 4) || (LateralFineCount >= 4))
+                    {
+                        return new MoveToTarget(Core);
+                    }
+
+                    if (Core.Landing.LandingBurnEntryAllowed(out bool localTerrainBlocked, out bool pathTerrainBlocked))
+                    {
+                        return new LandingBurn(Core);
+                    }
+
+                    // Local rim/crash look: MoveToTarget collision hop already climbs out.
+                    if (localTerrainBlocked)
+                    {
+                        return new MoveToTarget(Core);
+                    }
+
+                    // Far intercept clips terrain before the pad: raise the suborbit path.
+                    if (pathTerrainBlocked)
+                    {
+                        step = Step.STATE_PROGRADE;
+                        throttleCount = 0;
+                    }
+                    else
+                    {
+                        // Still climbing or ClosestPoint/Ap past destination after overhead:
+                        // stay in TargetSubOrbit and re-select pro/retro/lateral.
+                        step = Step.STATE_LATERAL;
+                        throttleCount = 0;
+                    }
+                }
+
                 {
                     double desiredVerticalSpeed = 0; // for now just set to zero vertical velocity
 
@@ -150,13 +186,6 @@ namespace MuMech
 
                     return this;
                 }
-
-                Core.Thrust.ThrustOff();
-                if ((ProgradeCount >= 4) || (RetrogradeCount >= 4) || (LateralFineCount >= 4))
-                {
-                    return new MoveToTarget(Core);
-                }
-                return new LandingBurn(Core);
             }
 
             // SetPathToTarget 
