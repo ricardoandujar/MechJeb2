@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using KSP.Localization;
 using MechJebLib.Functions;
 using MuMech.LandingAutopilot;
@@ -19,6 +19,8 @@ namespace MuMech
             private const double TARGET_FAR_DISTANCE_THRESHOLD = 2.5*50000; // Distance to target at which to switch from prograde/retrograde burn to fine lateral control to target before final landing burn. This is used to avoid overshooting the target when doing a prograde or retrograde burn and allow for more precise targeting of the final landing burn.
             private const double TARGET_DISTANCE_THRESHOLD = 300; // Final Distance to target at which to switch to final landing burn.   
             private const double DELTA_TARGET_ALT_THRESHOLD = 600; // Threshold for switching between prograde and retrograde burn when close to target - if the target altitude is above the current altitude by this amount then we will do a prograde burn, if it's below then we will do a retrograde burn, if it's close then we will do a lateral burn to fine tune the approach to target before the final burn.
+            // ClosestPoint past pad (positive deltaDistance). Exit RETROGRADE only when below this.
+            private const double INTERCEPT_PAST_PAD_M = 1000;
             private double hFarCorrectionAngle;             // far horizontal distance overshoot angle
             private double velaccum = 0;                    // Integral velocity error accumulator for PI Controller
             private double limitedMaxThrustAccel = 0;       // Limited thrust acceleration used to calculate TWR and overshoot angle + scale max speed
@@ -145,9 +147,11 @@ namespace MuMech
                     }
                     else
                     {
-                        // Still climbing or ApA past the pad after overhead:
-                        // pull Ap back if past; ClosestPoint/intercept past dest is allowed.
-                        if (ApoapsisPastDestination(Core.Target.GetPositionTargetPosition()))
+                        // Still climbing, ApA past pad, or ClosestPoint still past pad:
+                        // keep dumping. Ap-ahead with ClosestPoint past (descending overshoot)
+                        // was exiting to LATERAL once height crossed (9/4 9:19 Vesta).
+                        if (ApoapsisPastDestination(Core.Target.GetPositionTargetPosition())
+                            || deltaDistance > INTERCEPT_PAST_PAD_M)
                             step = Step.STATE_RETROGRADE;
                         else
                             step = Step.STATE_LATERAL;
@@ -419,6 +423,8 @@ namespace MuMech
                                 step = Step.STATE_RETROGRADE;
                             else if (ApoapsisPastDestination(targetPos))
                                 step = Step.STATE_RETROGRADE; // ApA past pad: pull energy back
+                            else if (deltaDistance > INTERCEPT_PAST_PAD_M)
+                                step = Step.STATE_RETROGRADE; // ClosestPoint past pad: dump until intercept not past
                             else if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
                                 step = Step.STATE_RETROGRADE;
                             else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < 2000))
@@ -464,8 +470,8 @@ namespace MuMech
                             Debug.Log(" prograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
                             // Switch to fine lateral control when close to target or if periapsis is above half target altitude
-                            // Past pad: do not fine-tune / CORRECT — pull Ap back first.
-                            if (ApoapsisPastDestination(targetPos))
+                            // Past pad: do not fine-tune / CORRECT - pull Ap back first.
+                            if (ApoapsisPastDestination(targetPos) || deltaDistance > INTERCEPT_PAST_PAD_M)
                             {
                                 ProgradeCount = throttleCount;
                                 throttleCount = 0;
@@ -505,9 +511,12 @@ namespace MuMech
                             herror = -retroMag * downrangeVec.normalized;
                             rc = 100; // we only want horizontal thrust here
 
-                            // Height near TgtAlt is not enough if ApA is still past the pad -
-                            // keep retrograde until Ap is at or before dest (intercept past is OK).
-                            if (!pastDest && ((throttleCount >= 4) || (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD)))
+                            // Height near TgtAlt is not enough if ApA is still past the pad,
+                            // or ClosestPoint is still past (Ap may already be before pad on a
+                            // descending overshoot - 9/4 9:19: height +725 with deltaDistance +47 km).
+                            // Keep dumping until Ap not past AND ClosestPoint not significantly past.
+                            bool interceptPast = deltaDistance > INTERCEPT_PAST_PAD_M;
+                            if (!pastDest && !interceptPast && ((throttleCount >= 4) || (deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD)))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
@@ -526,8 +535,8 @@ namespace MuMech
                             MechJebModuleDebugArrows.debugVector2 = herror;
                             Debug.Log("Lateral Fine HError Mag:" + distanceToTarget.ToString("F0"));
 
-                            // Do not declare CORRECT while ApA is still past the pad.
-                            if (ApoapsisPastDestination(targetPos))
+                            // Do not declare CORRECT while ApA or ClosestPoint is still past the pad.
+                            if (ApoapsisPastDestination(targetPos) || deltaDistance > INTERCEPT_PAST_PAD_M)
                             {
                                 LateralFineCount = throttleCount;
                                 throttleCount = 0;
