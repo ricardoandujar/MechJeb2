@@ -1357,18 +1357,28 @@ namespace MuMech
             // Heading samples: compare OUR ASL to terrain ASL ahead. A wall higher
             // than we are is a hop even if t+15s is still over the hole with AGL
             // above minAltitude. Do not mark willCrash here: a distant rim is climbable.
+            // LOCAL terrain only: never scale/cap lookRange with hTargetError (distance
+            // to the landing site). Climb-out from the departure crater must see the
+            // current rim from the floor; coupling to a far pad collapsed or skewed
+            // that look and broke the first climb when the target was hundreds of km out.
             double lookRange = Math.Max(4000.0, 8.0 * Math.Max(50.0, VesselState.altitudeTrue));
             lookRange = Math.Max(lookRange, VesselState.speedSurfaceHorizontal * Math.Max(lookAheadSec, 15.0));
-            lookRange = Math.Min(lookRange, 40000.0);
-            double hErr = targetingResult.hTargetError;
-            if (hErr > 100.0) lookRange = Math.Min(lookRange, hErr);
+            // Floor AGL ~50-100 m makes the AGL*8 term ~4 km and misses wide crater
+            // walls. Body-scaled local rim look (tens of km on Vesta-class) -- still
+            // independent of landing-site distance.
+            double localRimLook = Math.Min(80000.0, Math.Max(20000.0, body.Radius * 0.15));
+            lookRange = Math.Max(lookRange, localRimLook);
+            lookRange = Math.Min(lookRange, Math.Max(40000.0, localRimLook));
 
             void SampleHeading(Vector3d dir)
             {
                 if (dir.sqrMagnitude < 1e-6) return;
                 dir.Normalize();
+                // Geometric steps from 250 m; allow enough doublings to reach localRimLook
+                // (8 steps tops out ~32 km).
                 double d = 250.0;
-                for (int i = 0; i < 8 && d <= lookRange + 1.0; i++, d *= 2.0)
+                int maxSamples = lookRange > 40000.0 ? 12 : 8;
+                for (int i = 0; i < maxSamples && d <= lookRange + 1.0; i++, d *= 2.0)
                 {
                     Vector3d sampleWorld = vesselWorld + dir * d;
                     if (!IsFiniteVec(sampleWorld)) continue;

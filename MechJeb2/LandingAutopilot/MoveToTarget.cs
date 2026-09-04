@@ -131,20 +131,24 @@ namespace MuMech
             // True when MoveToTarget may safely hand off to TargetSubOrbit: no armed collision
             // hop and the hop predictor (trajectory + heading rims) reports clear. Keeps hop
             // in charge over irregular terrain until the coast is actually clear.
+            // nearLandingSite (hTargetError <= 5 km): pad path only -- do not require
+            // terrain clear for suborbit handoff near the pad. Away from the pad,
+            // clear means LOCAL rim/terrain PredictAvoid is clear (not "far from pad").
             private bool CoastClearForSubOrbitHandOff(double hTargetError)
             {
                 if (_coastClearThisDrive)
                     return _coastClearResult;
                 _coastClearThisDrive = true;
+                bool nearLandingSite = hTargetError <= 5000;
                 if ((vCollisionCounter > 0) || (hopBlend > 0))
                     _coastClearResult = false;
-                else if (hTargetError > 5000)
+                else if (nearLandingSite)
+                    _coastClearResult = true;
+                else
                 {
                     (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
                     _coastClearResult = !(willCrash || deltaV > 0);
                 }
-                else
-                    _coastClearResult = true;
                 return _coastClearResult;
             }
 
@@ -777,20 +781,18 @@ namespace MuMech
                     setSubOrbitalHorizontal(ref desiredHorizontalVel, ref herror);
                 }
 
-                // Hop-phase collision (trajectory + heading terrain vs our ASL).
-                // Keplerian-only 15s/1500 m AGL misses a crater rim from the floor.
-                // Predictor still false-fires on the pad, so NEW predictions stay
-                // gated to hTargetError > 5 km.
-                // An in-progress tail (vCollisionCounter > 0) keeps decaying even after we
-                // cross 5 km; cutting it off restored H at full strength mid-hop.
-                // The 30s ignore is load-bearing for hops off the ground: minAltitude is
-                // 1500 m, so a fresh MoveToTarget at 0-100 m would always boost vertical.
+                // Hop-phase collision: LOCAL rim/terrain vs our ASL.
+                // Arm/hold/re-arm from PredictAvoid only -- never from distance to the
+                // landing site. hTargetError <= 5 km is pad false-fire protection only
+                // (predictor wants 1500 m AGL on the pad). Departure-crater climb-out
+                // with a far target must still hop on local rim clearance.
+                // An in-progress tail keeps decaying after we later cross 5 km; cutting
+                // it off restored H mid-hop. The 30s ignore is load-bearing for hops
+                // off the ground near the pad only.
                 collisionHopActive = false;
                 hopBlend = 0;
-                // Pad false-fire: the 30s ignore is for hTargetError <= 5 km.
-                // From a crater hundreds of km out the 5 km gate already protects
-                // the pad; skip ignore so climb-out hop can arm on the first Drive.
-                if (vIgnoreCollision > 0 && hTargetError <= 5000)
+                bool nearLandingSite = hTargetError <= 5000;
+                if (vIgnoreCollision > 0 && nearLandingSite)
                 {
                     vIgnoreCollision--;
                 }
@@ -800,7 +802,9 @@ namespace MuMech
                         vIgnoreCollision = 0;
                     double deltaV = 0;
                     bool willCrash = false;
-                    if (hTargetError > 5000)
+                    // Pad suppress only. Away from the pad always sample local terrain
+                    // so a far landing site cannot skip departure-crater climb-out.
+                    if (nearLandingSite == false)
                     {
                         (deltaV, willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 1500);
                     }
