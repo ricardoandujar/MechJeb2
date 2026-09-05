@@ -19,8 +19,8 @@ namespace MuMech
             private const double TARGET_FAR_DISTANCE_THRESHOLD = 2.5*50000; // Distance to target at which to switch from prograde/retrograde burn to fine lateral control to target before final landing burn. This is used to avoid overshooting the target when doing a prograde or retrograde burn and allow for more precise targeting of the final landing burn.
             private const double TARGET_DISTANCE_THRESHOLD = 300; // Final Distance to target at which to switch to final landing burn.   
             private const double DELTA_TARGET_ALT_THRESHOLD = 600; // Threshold for switching between prograde and retrograde burn when close to target - if the target altitude is above the current altitude by this amount then we will do a prograde burn, if it's below then we will do a retrograde burn, if it's close then we will do a lateral burn to fine tune the approach to target before the final burn.
-            // Ricardo sequence: place Ap ~halfway before pad, coast to Ap, THEN shape overflight.
-            // Avoid mid-coast PROGRADE raise fighting RETROGRADE / hop dumps into terrain.
+            // Ricardo: MoveToTarget owns coast-to-Ap with Ap before pad. TargetSubOrbit shapes after Ap.
+            // Do not own PLACE->COAST_AP here; dump+handback if somehow Ap past.
             private const double AP_HALFWAY_TARGET = 0.50;
             private const double AP_HALFWAY_LO = 0.35;
             private const double AP_HALFWAY_HI = 0.65;
@@ -75,7 +75,7 @@ namespace MuMech
             private int _apPullClearStreak = 0;
             private double _apPullLatchEvalUt = double.NegativeInfinity;
             private double _lastApPullLatchLogUt = double.NegativeInfinity;
-            // Hard sequence: PLACE_AP -> COAST_AP -> SHAPE. Shape burns only after Ap reached.
+            // Shape burns only after real Ap handoff from MoveToTarget (or after dump+handback cycle).
             private bool _apReachedForShape = false;
             private double _lastApPhaseLogUt = double.NegativeInfinity;
             private string _lastApPhaseLogged = "";
@@ -140,11 +140,11 @@ namespace MuMech
                     }
                 }
 
-                // Ricardo sequence: place Ap ~halfway before pad, coast to Ap, THEN shape.
-                // Do not mid-coast raise/PROGRADE fight RETROGRADE or hop dumps into ridges.
+                // Ricardo: MoveToTarget owns coast-to-Ap. Gate dump / handback / shape only.
                 Vector3d tgtPosSeq = Core.Target.GetPositionTargetPosition();
-                if (ApplyApHalfwayThenCoast(tgtPosSeq))
-                    return this;
+                AutopilotStep apGate = ApplyApOwnershipGate(tgtPosSeq);
+                if (apGate != null)
+                    return apGate;
 
                 // STATE_CORRECT: only hand to LandingBurn when descending into the pad
                 // with intercept still ahead and suborbit path clear of terrain. Do not
@@ -194,9 +194,9 @@ namespace MuMech
                         }
                         else
                         {
-                            // Still before Ap: coast/place Ap first (ApplyApHalfwayThenCoast next tick).
-                            step = Step.STATE_COAST_AP;
-                            throttleCount = 0;
+                            // Still before Ap: MoveToTarget owns coast - hand back.
+                            Core.Thrust.ThrustOff();
+                            return new MoveToTarget(Core);
                         }
                     }
                     else
@@ -290,16 +290,11 @@ namespace MuMech
                 // Set the desired Horizontal Velocity to reach target. Error to subtract the vessels current horizontal velocity.
                 double hCorrectionAngle = setHorizontalSpeed(downrangeVec, crossrangeVec, closestPos, targetPos, ref surfaceVel, out Vector3d desiredHorizontalVel, out Vector3d herror);
 
-                // Ap placed: coast (no pro/retro fight this tick). Drive Apply warps next frames.
+                // Legacy COAST_AP: MoveToTarget owns coast. Clear local step; gate may hand back.
                 if (step == Step.STATE_COAST_AP)
                 {
-                    Core.Thrust.ThrustOff();
-                    lastHorizontalThrust = 0;
-                    desiredVerticalSpeed = 0;
-                    desiredThrustVector = VesselState.up;
-                    Status = Localizer.Format("#MechJeb_LandingGuidance_Status17",
-                        "0.0", desiredHorizontalVel.magnitude.ToString("F1"));
-                    return;
+                    Core.Warp.MinimumWarp();
+                    step = Step.STATE_LATERAL;
                 }
 
                 // TgtAlt shapes coast height OVER THE PAD (overflight gate so LandingBurn
@@ -711,13 +706,14 @@ namespace MuMech
 
 
             /// <summary>
-            /// Ricardo hard sequence: PLACE_AP (pro/retro to ~0.5) -> COAST_AP (thrust off,
-            /// warp to Ap) -> SHAPE (TgtAlt / LATERAL / overflight). Owns vehicle until Ap.
-            /// Returns true when Drive should return immediately (coasting).
+            /// Ricardo: MoveToTarget owns coast-to-Ap. TargetSubOrbit only shapes after Ap.
+            /// If somehow entered with Ap past pad: RETROGRADE dump, then hand back to
+            /// MoveToTarget to coast (do not re-implement COAST_AP ownership here).
+            /// Returns non-null when Drive should return that step immediately.
             /// </summary>
-            private bool ApplyApHalfwayThenCoast(Vector3d targetPosBody)
+            private AutopilotStep ApplyApOwnershipGate(Vector3d targetPosBody)
             {
-                // Hyperbola / Inf Ap: cannot place or coast to Ap - keep existing dump path.
+                // Hyperbola / Inf Ap: cannot coast to Ap - keep existing dump path.
                 if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
                 {
                     _establishingAp = ApNeedsPullBack(targetPosBody);
@@ -729,9 +725,15 @@ namespace MuMech
                             step = Step.STATE_RETROGRADE;
                             throttleCount = 0;
                         }
-                        LogApPhase("PLACE", "InfAp RETROGRADE dump");
+                        LogApPhase("DUMP", "InfAp RETROGRADE dump");
                     }
-                    return false;
+                    else
+                    {
+                        // Inf Ap with no pull needed: allow shape (low-g dump path).
+                        _apReachedForShape = true;
+                        LogApPhase("SHAPE", "InfAp shape");
+                    }
+                    return null;
                 }
 
                 bool haveFrac = TryApAlongTrackFraction(targetPosBody, out double frac, out double tAp);
@@ -743,9 +745,7 @@ namespace MuMech
                 }
                 string fracS = haveFrac ? frac.ToString("F2") : "n/a";
 
-                // PLACE_AP: Ap past pad OR frac > ~0.5 (incl. latch). ONLY RETROGRADE.
-                // Must run BEFORE NearOrPastApoapsis - that used to clear _establishingAp
-                // and fall into tooLow->PROGRADE (21:12 frac=2.57). Re-latch clears shape.
+                // Ap past pad / frac>~0.5: RETROGRADE dump only. Never coast/warp here.
                 if (needsPull)
                 {
                     _apReachedForShape = false;
@@ -756,72 +756,36 @@ namespace MuMech
                         throttleCount = 0;
                     }
                     bool past = ApoapsisPastDestination(targetPosBody);
-                    LogApPhase("PLACE", (past ? "RETROGRADE Ap past pad frac=" : "RETROGRADE place Ap halfway frac=") + fracS);
-                    LogApSeq((past ? "RETROGRADE Ap past pad frac=" : "RETROGRADE place Ap halfway frac=") + fracS);
-                    return false;
+                    LogApPhase("DUMP", (past ? "RETROGRADE Ap past pad frac=" : "RETROGRADE pull Ap halfway frac=") + fracS);
+                    LogApSeq((past ? "RETROGRADE Ap past pad frac=" : "RETROGRADE pull Ap halfway frac=") + fracS);
+                    return null;
                 }
 
-                // At/near Ap with Ap at/before halfway: allow TargetSubOrbit shape.
-                // While pull latch held: never arm shape via NearOrPastApoapsis.
-                if (!_apPullLatch && NearOrPastApoapsis())
+                // Pull done / Ap before pad but not yet at Ap: hand back for MoveToTarget coast.
+                if (!NearOrPastApoapsis())
                 {
-                    if (!_apReachedForShape || _establishingAp)
-                        LogApSeq("Ap reached - begin TargetSubOrbit shape frac=" + fracS);
-                    _apReachedForShape = true;
+                    _apReachedForShape = false;
                     _establishingAp = false;
-                    if (step == Step.STATE_COAST_AP)
-                    {
-                        Core.Warp.MinimumWarp();
-                        step = Step.STATE_LATERAL;
-                        throttleCount = 0;
-                    }
-                    LogApPhase("SHAPE", "frac=" + fracS + " step=" + step);
-                    return false;
-                }
-
-                // Still before Ap: Apply owns vehicle - no shaping / LATERAL_FINE / tooLow climb.
-                _apReachedForShape = false;
-
-                // PLACE_AP: push if short of halfway band.
-                if (!_apPullLatch && haveFrac && frac < AP_HALFWAY_LO)
-                {
-                    _establishingAp = true;
-                    if (step != Step.STATE_PROGRADE)
-                    {
-                        step = Step.STATE_PROGRADE;
-                        throttleCount = 0;
-                    }
-                    LogApPhase("PLACE", "PROGRADE place Ap halfway frac=" + fracS);
-                    LogApSeq("PROGRADE place Ap halfway frac=" + fracS);
-                    return false;
-                }
-
-                // Halfway band hit (or already coasting): COAST_AP - thrust off, warp to Ap.
-                // Block all TargetSubOrbit shaping until NearOrPastApoapsis.
-                bool inHalfwayBand = haveFrac && frac >= AP_HALFWAY_LO && frac <= AP_HALFWAY_HI;
-                if (VesselState.speedVertical > 0 && (inHalfwayBand || step == Step.STATE_COAST_AP || ApApproximatelyHalfwayBeforePad(targetPosBody)))
-                {
-                    _establishingAp = false;
-                    step = Step.STATE_COAST_AP;
                     Core.Thrust.ThrustOff();
-                    throttleOn = false;
-                    double now = Planetarium.GetUniversalTime();
-                    if (!haveFrac)
-                        tAp = Vessel.orbit.timeToAp;
-                    double coastUt = now + Math.Max(0.0, tAp - 4.0);
-                    if (Core.Node.Autowarp && !double.IsNaN(tAp) && !double.IsInfinity(tAp) && tAp > AP_COAST_TIMETOAP_S)
-                        Core.Warp.WarpToUT(coastUt);
-                    else
-                        Core.Warp.MinimumWarp();
-                    LogApPhase("COAST", "tAp=" + tAp.ToString("F0") + " frac=" + fracS);
-                    LogApSeq("COAST to Ap tAp=" + tAp.ToString("F0") + " frac=" + fracS);
-                    return true;
+                    Core.Warp.MinimumWarp();
+                    LogApPhase("HANDBACK", "Ap before pad but not at Ap - MoveToTarget coast frac=" + fracS);
+                    LogApSeq("hand back MoveToTarget coast-to-Ap frac=" + fracS);
+                    return new MoveToTarget(Core);
                 }
 
-                // Before Ap but no frac yet / not ascending: keep PLACE ownership, no shape.
-                _establishingAp = true;
-                LogApPhase("PLACE", "waiting Ap place/coast frac=" + fracS);
-                return false;
+                // At/near Ap with Ap before pad: TargetSubOrbit shapes (TgtAlt / LATERAL / pad gate).
+                if (!_apReachedForShape || _establishingAp)
+                    LogApSeq("Ap reached - begin TargetSubOrbit shape frac=" + fracS);
+                _apReachedForShape = true;
+                _establishingAp = false;
+                if (step == Step.STATE_COAST_AP)
+                {
+                    Core.Warp.MinimumWarp();
+                    step = Step.STATE_LATERAL;
+                    throttleCount = 0;
+                }
+                LogApPhase("SHAPE", "frac=" + fracS + " step=" + step);
+                return null;
             }
 
             public double setHorizontalSpeed(Vector3d downrangeVec, Vector3d crossrangeVec, Vector3d closestPos, Vector3d targetPos,
@@ -840,10 +804,12 @@ namespace MuMech
                 switch (step)
                 {
                     case Step.STATE_COAST_AP:
+                        // Legacy enum value only - ApplyApOwnershipGate clears/hands back; no coast ownership.
                         forceHoriz = true;
                         desiredHorizontalVel = Vector3d.zero;
                         herror = Vector3d.zero;
                         rc = 0;
+                        step = Step.STATE_LATERAL;
                         break;
                     default:
                     case Step.STATE_INIT: // Initial run - setup for lateral burn
@@ -932,11 +898,10 @@ namespace MuMech
                             }
                             else if (_establishingAp && ApApproximatelyHalfwayBeforePad(targetPos))
                             {
-                                // Ap ~halfway: stop pushing and coast to Ap (Drive Apply warps).
+                                // Ap ~halfway: stop placing; ApplyApOwnershipGate hands MoveToTarget for coast.
                                 ProgradeCount = throttleCount;
                                 throttleCount = 0;
                                 _establishingAp = false;
-                                step = Step.STATE_COAST_AP;
                             }
                             else if (_establishingAp)
                             {
@@ -1009,7 +974,7 @@ namespace MuMech
                             }
                             else if (_establishingAp && ApApproximatelyHalfwayBeforePad(targetPos))
                             {
-                                // PLACE done: halfway band hit -> coast to Ap (no shaping yet).
+                                // Pull done / halfway: ApplyApOwnershipGate hands MoveToTarget for coast.
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
                                 _establishingAp = false;
@@ -1017,12 +982,11 @@ namespace MuMech
                                 if (nowExit - _lastRetroExitLogUt >= 1.0)
                                 {
                                     _lastRetroExitLogUt = nowExit;
-                                    Debug.Log("RETROGRADE exit -> COAST_AP Ap halfway"
+                                    Debug.Log("RETROGRADE exit -> handback MoveToTarget Ap halfway"
                                         + " frac=" + (double.IsNaN(apFracExit) ? "n/a" : apFracExit.ToString("F2"))
                                         + " deltaHeight=" + deltaHeight.ToString("F0")
                                         + " deltaDistance=" + deltaDistance.ToString("F0"));
                                 }
-                                step = Step.STATE_COAST_AP;
                             }
                             else if (!_apReachedForShape)
                             {
@@ -1069,7 +1033,8 @@ namespace MuMech
                             {
                                 LateralFineCount = throttleCount;
                                 throttleCount = 0;
-                                step = (_apPullLatch || ApNeedsPullBack(targetPos)) ? Step.STATE_RETROGRADE : Step.STATE_COAST_AP;
+                                // Before Ap shape: dump if needed; else stay LATERAL (gate hands MoveToTarget).
+                                step = (_apPullLatch || ApNeedsPullBack(targetPos)) ? Step.STATE_RETROGRADE : Step.STATE_LATERAL;
                                 break;
                             }
 

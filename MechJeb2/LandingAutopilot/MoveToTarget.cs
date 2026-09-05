@@ -122,6 +122,10 @@ namespace MuMech
             // Set when low-g far cruise ended but terrain/hop blocked TargetSubOrbit handoff.
             // Retried each Drive until CoastClearForSubOrbitHandOff, then FineTune.
             private bool pendingSubOrbitHandOff = false;
+            private double _lastHandOffWaitLogUt = double.NegativeInfinity;
+            // Prefer Ap ~halfway before pad before TargetSubOrbit handoff (frac <= this).
+            private const double AP_HAND_OFF_MAX_FRAC = 0.65;
+            private const double AP_HAND_OFF_NEAR_AP_S = 30.0;
             private bool _coastClearThisDrive;
             private bool _coastClearResult;
             private const bool LOG_LANDING_TICK = false; // Unity Debug.Log on the physics thread freezes the mouse
@@ -160,8 +164,9 @@ namespace MuMech
             }
 
             /// <summary>
-            /// Ricardo: hand TargetSubOrbit only near Ap with Ap before the pad.
+            /// Ricardo: hand TargetSubOrbit only near Ap with Ap before the pad (~halfway).
             /// Coast-to-Ap stays in MoveToTarget (TargetSubOrbital warp) until then.
+            /// If Ap is past the pad / beyond preferred halfway, stay here and keep burns.
             /// </summary>
             private bool ReadyForTargetSubOrbitHandOff()
             {
@@ -173,42 +178,84 @@ namespace MuMech
                 if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
                     return true;
 
-                Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
-                Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
-                if (n.sqrMagnitude < 1e-6)
+                // Ap past pad or beyond ~halfway: do NOT hand for shaping yet.
+                if (ApNeedsPullBeforeHandOff(targetPosBody, out _, out _))
                     return false;
-                n.Normalize();
-
-                double angPad = Math.Atan2(
-                    Vector3d.Dot(n.normalized, Vector3d.Cross(Vector3d.Exclude(n, pos).normalized, Vector3d.Exclude(n, targetPosBody).normalized)),
-                    Vector3d.Dot(Vector3d.Exclude(n, pos).normalized, Vector3d.Exclude(n, targetPosBody).normalized));
-                double marginRad = 1000.0 / Math.Max(Vessel.mainBody.Radius, 1.0);
-
-                double tAp = Vessel.orbit.timeToAp;
-                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0)
-                    return VesselState.speedVertical <= 0;
-
-                double now = Planetarium.GetUniversalTime();
-                Vector3d apPos = Vessel.orbit.getPositionAtUT(now + tAp) - Vessel.mainBody.position;
-                if (!MechJebModuleLandingAutopilot.IsFiniteVec(apPos))
-                    return false;
-
-                Vector3d a = Vector3d.Exclude(n, pos);
-                Vector3d b = Vector3d.Exclude(n, apPos);
-                if (a.sqrMagnitude < 1e-12 || b.sqrMagnitude < 1e-12)
-                    return false;
-                a.Normalize();
-                b.Normalize();
-                double angAp = Math.Atan2(Vector3d.Dot(n, Vector3d.Cross(a, b)), Vector3d.Dot(a, b));
-
-                // Ap past pad: hand off so TargetSubOrbit RETROGRADE-places Ap ~halfway.
-                if (angAp > angPad + marginRad)
-                    return true;
 
                 // Near Ap or already descending past Ap.
                 if (VesselState.speedVertical <= 0)
                     return true;
-                return tAp <= 30.0;
+                double tAp = Vessel.orbit.timeToAp;
+                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0)
+                    return VesselState.speedVertical <= 0;
+                return tAp <= AP_HAND_OFF_NEAR_AP_S;
+            }
+
+            /// <summary>
+            /// True when Ap is past the pad or along-track frac is beyond preferred halfway
+            /// (AP_HAND_OFF_MAX_FRAC). MoveToTarget must keep ownership and pull before handoff.
+            /// </summary>
+            private bool ApNeedsPullBeforeHandOff(Vector3d targetPosBody, out double frac, out bool haveFrac)
+            {
+                frac = double.NaN;
+                haveFrac = false;
+
+                Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
+                Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
+                if (n.sqrMagnitude < 1e-6)
+                    return true;
+                n.Normalize();
+
+                Vector3d a = Vector3d.Exclude(n, pos);
+                Vector3d padEx = Vector3d.Exclude(n, targetPosBody);
+                if (a.sqrMagnitude < 1e-12 || padEx.sqrMagnitude < 1e-12)
+                    return true;
+                a.Normalize();
+                padEx.Normalize();
+
+                double angPad = Math.Atan2(Vector3d.Dot(n, Vector3d.Cross(a, padEx)), Vector3d.Dot(a, padEx));
+                double marginRad = 1000.0 / Math.Max(Vessel.mainBody.Radius, 1.0);
+
+                double tAp = Vessel.orbit.timeToAp;
+                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0)
+                {
+                    // No future Ap sample: cannot claim Ap is past for pull-hold.
+                    return false;
+                }
+
+                double now = Planetarium.GetUniversalTime();
+                Vector3d apPos = Vessel.orbit.getPositionAtUT(now + tAp) - Vessel.mainBody.position;
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(apPos))
+                    return true;
+
+                Vector3d b = Vector3d.Exclude(n, apPos);
+                if (b.sqrMagnitude < 1e-12)
+                    return true;
+                b.Normalize();
+                double angAp = Math.Atan2(Vector3d.Dot(n, Vector3d.Cross(a, b)), Vector3d.Dot(a, b));
+
+                // Absolute: Ap along-track past the pad.
+                if (angAp > angPad + marginRad)
+                    return true;
+
+                if (angPad > marginRad)
+                {
+                    frac = angAp / angPad;
+                    haveFrac = !double.IsNaN(frac) && !double.IsInfinity(frac);
+                    // Prefer ~halfway before handoff when measurable.
+                    if (haveFrac && frac > AP_HAND_OFF_MAX_FRAC)
+                        return true;
+                }
+                return false;
+            }
+
+            private void LogHandOffWait(string reason)
+            {
+                double now = Planetarium.GetUniversalTime();
+                if (now - _lastHandOffWaitLogUt < 1.0)
+                    return;
+                _lastHandOffWaitLogUt = now;
+                Debug.Log("MoveToTarget handoff wait: " + reason);
             }
 
             public MoveToTarget(MechJebCore core) : base(core)
@@ -1492,6 +1539,19 @@ namespace MuMech
                 // Move to target strategy
                 move(ref desiredVerticalSpeed, ref desiredThrustVector);
 
+                // After TargetSubOrbit dump->handback: re-arm FineTune so MoveToTarget can
+                // coast-to-Ap (or pull Ap before pad) then hand TargetSubOrbit at Ap again.
+                if (errStep == Ascend2Target.Completed
+                    && Core.Landing.LandingType == 1
+                    && Core.Landing.targetingResult.hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT
+                    && VesselState.altitudeTrue > 5000
+                    && MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
+                    && CoastClearForSubOrbitHandOff(Core.Landing.targetingResult.hTargetError))
+                {
+                    errStep = Ascend2Target.FineTune;
+                    pendingSubOrbitHandOff = true;
+                    trace += 'b';
+                }
                 // Retry deferred low-g far handoff once hop/terrain look-ahead clears.
                 double handoffH = Core.Landing.targetingResult.hTargetError;
                 if (pendingSubOrbitHandOff
@@ -1515,18 +1575,36 @@ namespace MuMech
                     }
                     else if (!ReadyForTargetSubOrbitHandOff())
                     {
-                        // Ap not before pad or still climbing to Ap: coast here (TargetSubOrbital
-                        // warp), then hand TargetSubOrbit at Ap - not mid-coast fighting.
+                        // Stay in MoveToTarget until Ap with Ap before pad (~halfway).
                         pendingSubOrbitHandOff = true;
-                        Core.Thrust.ThrustOff();
-                        double tAp = Vessel.orbit.timeToAp;
-                        if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
-                            && !double.IsNaN(tAp) && !double.IsInfinity(tAp) && tAp > 30.0
-                            && VesselState.speedVertical > 0 && Core.Node.Autowarp)
+                        Vector3d tgtWait = Core.Target.GetPositionTargetPosition();
+                        double waitFrac = double.NaN;
+                        bool haveWaitFrac = false;
+                        bool pullHold = false;
+                        if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
+                            pullHold = ApNeedsPullBeforeHandOff(tgtWait, out waitFrac, out haveWaitFrac);
+                        if (pullHold)
                         {
-                            Core.Warp.WarpToUT(Planetarium.GetUniversalTime() + tAp - 4.0);
+                            // Ap past pad / beyond halfway: keep MoveToTarget burns; do not hand yet.
+                            string fracS = haveWaitFrac ? waitFrac.ToString("F2") : "n/a";
+                            LogHandOffWait("Ap-past-pad hold frac=" + fracS);
+                            trace += 'p';
                         }
-                        trace += 'a'; // wait for Ap
+                        else
+                        {
+                            // Ap before pad, still climbing to Ap: coast here (TargetSubOrbital warp).
+                            Core.Thrust.ThrustOff();
+                            double tAp = Vessel.orbit.timeToAp;
+                            if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
+                                && !double.IsNaN(tAp) && !double.IsInfinity(tAp) && tAp > AP_HAND_OFF_NEAR_AP_S
+                                && VesselState.speedVertical > 0 && Core.Node.Autowarp)
+                            {
+                                Core.Warp.WarpToUT(Planetarium.GetUniversalTime() + tAp - 4.0);
+                            }
+                            string tApS = (double.IsNaN(tAp) || double.IsInfinity(tAp)) ? "n/a" : tAp.ToString("F0");
+                            LogHandOffWait("waiting coast-to-Ap tAp=" + tApS);
+                            trace += 'a'; // wait for Ap
+                        }
                     }
                     else
                     {
