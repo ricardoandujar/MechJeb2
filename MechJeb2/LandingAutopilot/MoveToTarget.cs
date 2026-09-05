@@ -1539,19 +1539,6 @@ namespace MuMech
                 // Move to target strategy
                 move(ref desiredVerticalSpeed, ref desiredThrustVector);
 
-                // After TargetSubOrbit dump->handback: re-arm FineTune so MoveToTarget can
-                // coast-to-Ap (or pull Ap before pad) then hand TargetSubOrbit at Ap again.
-                if (errStep == Ascend2Target.Completed
-                    && Core.Landing.LandingType == 1
-                    && Core.Landing.targetingResult.hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT
-                    && VesselState.altitudeTrue > 5000
-                    && MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
-                    && CoastClearForSubOrbitHandOff(Core.Landing.targetingResult.hTargetError))
-                {
-                    errStep = Ascend2Target.FineTune;
-                    pendingSubOrbitHandOff = true;
-                    trace += 'b';
-                }
                 // Retry deferred low-g far handoff once hop/terrain look-ahead clears.
                 double handoffH = Core.Landing.targetingResult.hTargetError;
                 if (pendingSubOrbitHandOff
