@@ -25,9 +25,9 @@ namespace MuMech
             private const double AP_HALFWAY_LO = 0.35;
             private const double AP_HALFWAY_HI = 0.65;
             private const double AP_COAST_TIMETOAP_S = 30.0;
-            // Once Ap past / frac>~0.5 seen: stay RETROGRADE until frac stably <= target.
-            // Do not clear on one-tick ApoapsisPastDestination / tAp flicker (21:35).
-            private const int AP_PULL_CLEAR_TICKS = 3;
+            // Once Ap past / frac>~0.5 seen: stay RETROGRADE until frac stably in positive
+            // halfway band [LO, TARGET]. Never clear on negative frac (04:13 signed-angle noise).
+            private const int AP_PULL_CLEAR_TICKS = 5;
             private const double TERRAIN_RAISE_STEP_M = 800.0;
             private const double TERRAIN_RAISE_INTERVAL_S = 2.0;
             private const double TERRAIN_RAISE_MAX_TGTALT_M = 25000.0;
@@ -75,6 +75,10 @@ namespace MuMech
             private int _apPullClearStreak = 0;
             private double _apPullLatchEvalUt = double.NegativeInfinity;
             private double _lastApPullLatchLogUt = double.NegativeInfinity;
+            // Hard sequence: PLACE_AP -> COAST_AP -> SHAPE. Shape burns only after Ap reached.
+            private bool _apReachedForShape = false;
+            private double _lastApPhaseLogUt = double.NegativeInfinity;
+            private string _lastApPhaseLogged = "";
             private double minVerticalAngle;
 
             public TargetSubOrbit(MechJebCore core) : base(core)
@@ -164,7 +168,7 @@ namespace MuMech
                     bool gateNeedsPull = ApNeedsPullBack(tgtPosGate);
                     if (TryPadOverflightGate(tgtPosGate, out double padDhCorrect, out _)
                         && padDhCorrect > DELTA_TARGET_ALT_THRESHOLD
-                        && !gateNeedsPull)
+                        && !gateNeedsPull && _apReachedForShape)
                     {
                         step = Step.STATE_PROGRADE;
                         throttleCount = 0;
@@ -182,7 +186,7 @@ namespace MuMech
                             step = Step.STATE_RETROGRADE;
                             throttleCount = 0;
                         }
-                        else if (NearOrPastApoapsis())
+                        else if (_apReachedForShape && NearOrPastApoapsis())
                         {
                             BumpTgtAltForTerrainClear();
                             step = Step.STATE_PROGRADE;
@@ -563,9 +567,9 @@ namespace MuMech
 
             /// <summary>
             /// Once per UT: set latch on Ap past / frac>~0.5; clear only after
-            /// AP_PULL_CLEAR_TICKS consecutive ticks with known frac <= AP_HALFWAY_TARGET.
-            /// Survives one-tick ApoapsisPastDestination / tAp flicker that would otherwise
-            /// clear needsPull and allow tooLow->PROGRADE (21:35 frac=2.54).
+            /// AP_PULL_CLEAR_TICKS consecutive ticks with known frac in [AP_HALFWAY_LO, AP_HALFWAY_TARGET]
+            /// and ApoapsisPastDestination false. Never clear on negative/NaN/frac>0.5 (04:13).
+            /// Survives pastDest / tAp flicker that would otherwise clear and allow tooLow->PROGRADE.
             /// </summary>
             private void UpdateApPullLatch(Vector3d targetPosBody)
             {
@@ -596,8 +600,13 @@ namespace MuMech
                 if (!_apPullLatch)
                     return;
 
-                // Latched: ignore pastDest flicker; require stable frac <= halfway target.
-                if (haveFrac && frac <= AP_HALFWAY_TARGET)
+                // Latched: clear only in positive halfway band AND Ap not past pad.
+                // Negative frac is signed-angle noise, not "Ap halfway" (04:13 CLEAR frac=-2.54).
+                bool pastDest = ApoapsisPastDestination(targetPosBody);
+                bool inClearBand = haveFrac
+                    && frac >= AP_HALFWAY_LO
+                    && frac <= AP_HALFWAY_TARGET;
+                if (!pastDest && inClearBand)
                 {
                     _apPullClearStreak++;
                     if (_apPullClearStreak >= AP_PULL_CLEAR_TICKS)
@@ -609,7 +618,7 @@ namespace MuMech
                 }
                 else
                 {
-                    // Missing frac or still above target: keep latch (flicker-safe).
+                    // Missing/negative/NaN frac, past dest, or still above target: keep latch.
                     _apPullClearStreak = 0;
                 }
             }
@@ -665,14 +674,27 @@ namespace MuMech
                 Debug.Log("TargetSubOrbit ApSeq " + msg);
             }
 
+            private void LogApPhase(string phase, string detail)
+            {
+                double now = Planetarium.GetUniversalTime();
+                if (phase == _lastApPhaseLogged && now - _lastApPhaseLogUt < 1.0)
+                    return;
+                _lastApPhaseLogUt = now;
+                _lastApPhaseLogged = phase;
+                Debug.Log("TargetSubOrbit phase=" + phase
+                    + (string.IsNullOrEmpty(detail) ? "" : (" " + detail)));
+            }
+
             /// <summary>
             /// After Ap only: bump TgtAlt so pad-overflight gate climbs over a ridge.
             /// Do not use mid-coast as a substitute for Ap-halfway + coast.
             /// </summary>
             private void BumpTgtAltForTerrainClear()
             {
-                // Never climb TgtAlt while Ap is past pad or frac > ~0.5 - that fights the dump.
+                // Terrain bump only after Ap reached for shape, and never while pull needed.
                 Vector3d tgt = Core.Target.GetPositionTargetPosition();
+                if (!_apReachedForShape)
+                    return;
                 if (ApNeedsPullBack(tgt))
                     return;
                 double now = Planetarium.GetUniversalTime();
@@ -687,10 +709,11 @@ namespace MuMech
                 }
             }
 
+
             /// <summary>
-            /// Ricardo: Ap ~halfway before pad, then coast to Ap, then shape.
+            /// Ricardo hard sequence: PLACE_AP (pro/retro to ~0.5) -> COAST_AP (thrust off,
+            /// warp to Ap) -> SHAPE (TgtAlt / LATERAL / overflight). Owns vehicle until Ap.
             /// Returns true when Drive should return immediately (coasting).
-            /// Sets step to PROGRADE/RETROGRADE when still establishing Ap.
             /// </summary>
             private bool ApplyApHalfwayThenCoast(Vector3d targetPosBody)
             {
@@ -698,10 +721,15 @@ namespace MuMech
                 if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
                 {
                     _establishingAp = ApNeedsPullBack(targetPosBody);
-                    if (_establishingAp && step != Step.STATE_RETROGRADE)
+                    if (_establishingAp)
                     {
-                        step = Step.STATE_RETROGRADE;
-                        throttleCount = 0;
+                        _apReachedForShape = false;
+                        if (step != Step.STATE_RETROGRADE)
+                        {
+                            step = Step.STATE_RETROGRADE;
+                            throttleCount = 0;
+                        }
+                        LogApPhase("PLACE", "InfAp RETROGRADE dump");
                     }
                     return false;
                 }
@@ -713,12 +741,14 @@ namespace MuMech
                     haveFrac = true;
                     frac = pullFrac;
                 }
+                string fracS = haveFrac ? frac.ToString("F2") : "n/a";
 
-                // While Ap past pad OR along-track frac > ~0.5: ONLY RETROGRADE.
+                // PLACE_AP: Ap past pad OR frac > ~0.5 (incl. latch). ONLY RETROGRADE.
                 // Must run BEFORE NearOrPastApoapsis - that used to clear _establishingAp
-                // and fall into tooLow->PROGRADE (21:12 frac=2.57).
+                // and fall into tooLow->PROGRADE (21:12 frac=2.57). Re-latch clears shape.
                 if (needsPull)
                 {
+                    _apReachedForShape = false;
                     _establishingAp = true;
                     if (step != Step.STATE_RETROGRADE)
                     {
@@ -726,18 +756,18 @@ namespace MuMech
                         throttleCount = 0;
                     }
                     bool past = ApoapsisPastDestination(targetPosBody);
-                    LogApSeq((past ? "RETROGRADE Ap past pad frac=" : "RETROGRADE place Ap halfway frac=")
-                        + (haveFrac ? frac.ToString("F2") : "n/a"));
+                    LogApPhase("PLACE", (past ? "RETROGRADE Ap past pad frac=" : "RETROGRADE place Ap halfway frac=") + fracS);
+                    LogApSeq((past ? "RETROGRADE Ap past pad frac=" : "RETROGRADE place Ap halfway frac=") + fracS);
                     return false;
                 }
 
-                // Already at/past Ap with Ap at/before halfway: overflight shaping only.
-                // While pull latch held: never clear _establishingAp via NearOrPastApoapsis.
+                // At/near Ap with Ap at/before halfway: allow TargetSubOrbit shape.
+                // While pull latch held: never arm shape via NearOrPastApoapsis.
                 if (!_apPullLatch && NearOrPastApoapsis())
                 {
-                    if (_establishingAp)
-                        LogApSeq("Ap placed - begin TargetSubOrbit shape frac="
-                            + (haveFrac ? frac.ToString("F2") : "n/a"));
+                    if (!_apReachedForShape || _establishingAp)
+                        LogApSeq("Ap reached - begin TargetSubOrbit shape frac=" + fracS);
+                    _apReachedForShape = true;
                     _establishingAp = false;
                     if (step == Step.STATE_COAST_AP)
                     {
@@ -745,10 +775,14 @@ namespace MuMech
                         step = Step.STATE_LATERAL;
                         throttleCount = 0;
                     }
+                    LogApPhase("SHAPE", "frac=" + fracS + " step=" + step);
                     return false;
                 }
 
-                // Before Ap: push if short of halfway band. Never PROGRADE while pull latched.
+                // Still before Ap: Apply owns vehicle - no shaping / LATERAL_FINE / tooLow climb.
+                _apReachedForShape = false;
+
+                // PLACE_AP: push if short of halfway band.
                 if (!_apPullLatch && haveFrac && frac < AP_HALFWAY_LO)
                 {
                     _establishingAp = true;
@@ -757,12 +791,15 @@ namespace MuMech
                         step = Step.STATE_PROGRADE;
                         throttleCount = 0;
                     }
-                    LogApSeq("PROGRADE place Ap halfway frac=" + frac.ToString("F2"));
+                    LogApPhase("PLACE", "PROGRADE place Ap halfway frac=" + fracS);
+                    LogApSeq("PROGRADE place Ap halfway frac=" + fracS);
                     return false;
                 }
 
-                // Ap ~halfway before pad: coast to Ap (reuse MoveToTarget-style warp-to-Ap).
-                if (VesselState.speedVertical > 0)
+                // Halfway band hit (or already coasting): COAST_AP - thrust off, warp to Ap.
+                // Block all TargetSubOrbit shaping until NearOrPastApoapsis.
+                bool inHalfwayBand = haveFrac && frac >= AP_HALFWAY_LO && frac <= AP_HALFWAY_HI;
+                if (VesselState.speedVertical > 0 && (inHalfwayBand || step == Step.STATE_COAST_AP || ApApproximatelyHalfwayBeforePad(targetPosBody)))
                 {
                     _establishingAp = false;
                     step = Step.STATE_COAST_AP;
@@ -776,12 +813,14 @@ namespace MuMech
                         Core.Warp.WarpToUT(coastUt);
                     else
                         Core.Warp.MinimumWarp();
-                    LogApSeq("COAST to Ap tAp=" + tAp.ToString("F0")
-                        + " frac=" + (haveFrac ? frac.ToString("F2") : "n/a"));
+                    LogApPhase("COAST", "tAp=" + tAp.ToString("F0") + " frac=" + fracS);
+                    LogApSeq("COAST to Ap tAp=" + tAp.ToString("F0") + " frac=" + fracS);
                     return true;
                 }
 
-                _establishingAp = false;
+                // Before Ap but no frac yet / not ascending: keep PLACE ownership, no shape.
+                _establishingAp = true;
+                LogApPhase("PLACE", "waiting Ap place/coast frac=" + fracS);
                 return false;
             }
 
@@ -903,7 +942,7 @@ namespace MuMech
                             {
                                 // Keep PROGRADE until halfway band â€” do not LATERAL_FINE mid-place.
                             }
-                            else if ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD)))
+                            else if (_apReachedForShape && ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD))))
                             {
                                 ProgradeCount = throttleCount;
                                 throttleCount = 0;
@@ -965,20 +1004,12 @@ namespace MuMech
 
                             if (needsPull || _apPullLatch)
                             {
-                                // Stay RETROGRADE until latch clears (frac stably <= ~0.5).
-                                // No PROGRADE / LATERAL_FINE / tooLow climb while pulling Ap back.
+                                // Stay RETROGRADE while Ap past / latch held. No shape climbs.
                                 _establishingAp = true;
-                            }
-                            else if (tooLow && !_establishingAp && !_apPullLatch)
-                            {
-                                // Below TgtAlt-600: climb/shape via PROGRADE (RETROGRADE won't raise).
-                                // Only after Ap is at/before halfway and pull latch clear.
-                                RetrogradeCount = throttleCount;
-                                throttleCount = 0;
-                                step = Step.STATE_PROGRADE;
                             }
                             else if (_establishingAp && ApApproximatelyHalfwayBeforePad(targetPos))
                             {
+                                // PLACE done: halfway band hit -> coast to Ap (no shaping yet).
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
                                 _establishingAp = false;
@@ -992,6 +1023,18 @@ namespace MuMech
                                         + " deltaDistance=" + deltaDistance.ToString("F0"));
                                 }
                                 step = Step.STATE_COAST_AP;
+                            }
+                            else if (!_apReachedForShape)
+                            {
+                                // Before Ap: Apply owns sequence - never LATERAL_FINE / tooLow PROGRADE.
+                                _establishingAp = true;
+                            }
+                            else if (tooLow && !_establishingAp && !_apPullLatch)
+                            {
+                                // Below TgtAlt-600 after Ap: climb/shape via PROGRADE.
+                                RetrogradeCount = throttleCount;
+                                throttleCount = 0;
+                                step = Step.STATE_PROGRADE;
                             }
                             else if (!_establishingAp && !_apPullLatch && ((throttleCount >= 4) || heightOk))
                             {
@@ -1020,6 +1063,15 @@ namespace MuMech
                             herror = (Vector3d.Angle(VesselState.normalPlus, herror) > 90) ? -VesselState.normalPlus : VesselState.normalPlus;
                             MechJebModuleDebugArrows.debugVector2 = herror;
                             Debug.Log("Lateral Fine HError Mag:" + distanceToTarget.ToString("F0"));
+
+                            // Hard sequence: never fine-tune before Ap reached for shape.
+                            if (!_apReachedForShape)
+                            {
+                                LateralFineCount = throttleCount;
+                                throttleCount = 0;
+                                step = (_apPullLatch || ApNeedsPullBack(targetPos)) ? Step.STATE_RETROGRADE : Step.STATE_COAST_AP;
+                                break;
+                            }
 
                             // Do not declare CORRECT while Ap past pad or frac > ~0.5.
                             if (ApNeedsPullBack(targetPos, out double apFracFine))
