@@ -119,145 +119,16 @@ namespace MuMech
             // V boost / HOP_STRIP_BOOST so the strip drop does not slam aH.
             private bool collisionHopActive = false;
             private double hopBlend = 0;
-            // Set when low-g far cruise ended but terrain/hop blocked TargetSubOrbit handoff.
-            // Retried each Drive until CoastClearForSubOrbitHandOff, then FineTune.
-            private bool pendingSubOrbitHandOff = false;
-            private double _lastHandOffWaitLogUt = double.NegativeInfinity;
-            // Prefer Ap ~halfway before pad before TargetSubOrbit handoff (frac <= this).
-            private const double AP_HAND_OFF_MAX_FRAC = 0.65;
-            private const double AP_HAND_OFF_NEAR_AP_S = 30.0;
-            private bool _coastClearThisDrive;
-            private bool _coastClearResult;
             private const bool LOG_LANDING_TICK = false; // Unity Debug.Log on the physics thread freezes the mouse
             private const double HOP_STRIP_BOOST = 20; // m/s remaining V: full strip above this
             private const double HOP_REARM_RATIO = 1.5; // re-arm in-progress hop only if new dV is well above remaining and the armed peak
-            // PredictAvoid clearance for departure climb-out / coast-clear (not pad).
+            // PredictAvoid clearance for departure climb-out (not pad).
             // Was 1500: with long localRimLook it held vertical-first past the rim.
             private const double AVOID_MIN_ALTITUDE = 900.0;
             // Soft leftover-V dump band (desired V ~ 0 cruise). Hard cut at +2 slammed
             // vertical command on/off as V oscillated around that threshold.
             private const double DUMP_V_FULL_EXCESS = 5.0; // m/s above desired: full pitch-over dump
             private const double DUMP_V_START_EXCESS = 0.25; // begin fading dump above desired
-
-            // True when MoveToTarget may safely hand off to TargetSubOrbit: no armed collision
-            // hop and the hop predictor (trajectory + heading rims) reports clear. Keeps hop
-            // in charge over irregular terrain until the coast is actually clear.
-            // nearLandingSite (hTargetError <= 5 km): pad path only -- do not require
-            // terrain clear for suborbit handoff near the pad. Away from the pad,
-            // clear means LOCAL rim/terrain PredictAvoid is clear (not "far from pad").
-            private bool CoastClearForSubOrbitHandOff(double hTargetError)
-            {
-                if (_coastClearThisDrive)
-                    return _coastClearResult;
-                _coastClearThisDrive = true;
-                bool nearLandingSite = hTargetError <= 5000;
-                if ((vCollisionCounter > 0) || (hopBlend > 0))
-                    _coastClearResult = false;
-                else if (nearLandingSite)
-                    _coastClearResult = true;
-                else
-                {
-                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, AVOID_MIN_ALTITUDE);
-                    _coastClearResult = !(willCrash || deltaV > 0);
-                }
-                return _coastClearResult;
-            }
-
-            /// <summary>
-            /// Ricardo: hand TargetSubOrbit only near Ap with Ap before the pad (~halfway).
-            /// Coast-to-Ap stays in MoveToTarget (TargetSubOrbital warp) until then.
-            /// If Ap is past the pad / beyond preferred halfway, stay here and keep burns.
-            /// </summary>
-            private bool ReadyForTargetSubOrbitHandOff()
-            {
-                Vector3d targetPosBody = Core.Target.GetPositionTargetPosition();
-                if (!MechJebModuleLandingAutopilot.IsFiniteVec(targetPosBody))
-                    return false;
-
-                // Inf Ap: TargetSubOrbit dump path handles it.
-                if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
-                    return true;
-
-                // Ap past pad or beyond ~halfway: do NOT hand for shaping yet.
-                if (ApNeedsPullBeforeHandOff(targetPosBody, out _, out _))
-                    return false;
-
-                // Near Ap or already descending past Ap.
-                if (VesselState.speedVertical <= 0)
-                    return true;
-                double tAp = Vessel.orbit.timeToAp;
-                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0)
-                    return VesselState.speedVertical <= 0;
-                return tAp <= AP_HAND_OFF_NEAR_AP_S;
-            }
-
-            /// <summary>
-            /// True when Ap is past the pad or along-track frac is beyond preferred halfway
-            /// (AP_HAND_OFF_MAX_FRAC). MoveToTarget must keep ownership and pull before handoff.
-            /// </summary>
-            private bool ApNeedsPullBeforeHandOff(Vector3d targetPosBody, out double frac, out bool haveFrac)
-            {
-                frac = double.NaN;
-                haveFrac = false;
-
-                Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
-                Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
-                if (n.sqrMagnitude < 1e-6)
-                    return true;
-                n.Normalize();
-
-                Vector3d a = Vector3d.Exclude(n, pos);
-                Vector3d padEx = Vector3d.Exclude(n, targetPosBody);
-                if (a.sqrMagnitude < 1e-12 || padEx.sqrMagnitude < 1e-12)
-                    return true;
-                a.Normalize();
-                padEx.Normalize();
-
-                double angPad = Math.Atan2(Vector3d.Dot(n, Vector3d.Cross(a, padEx)), Vector3d.Dot(a, padEx));
-                double marginRad = 1000.0 / Math.Max(Vessel.mainBody.Radius, 1.0);
-
-                double tAp = Vessel.orbit.timeToAp;
-                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0)
-                {
-                    // No future Ap sample: cannot claim Ap is past for pull-hold.
-                    return false;
-                }
-
-                double now = Planetarium.GetUniversalTime();
-                Vector3d apPos = Vessel.orbit.getPositionAtUT(now + tAp) - Vessel.mainBody.position;
-                if (!MechJebModuleLandingAutopilot.IsFiniteVec(apPos))
-                    return true;
-
-                Vector3d b = Vector3d.Exclude(n, apPos);
-                if (b.sqrMagnitude < 1e-12)
-                    return true;
-                b.Normalize();
-                double angAp = Math.Atan2(Vector3d.Dot(n, Vector3d.Cross(a, b)), Vector3d.Dot(a, b));
-
-                // Absolute: Ap along-track past the pad.
-                if (angAp > angPad + marginRad)
-                    return true;
-
-                if (angPad > marginRad)
-                {
-                    frac = angAp / angPad;
-                    haveFrac = !double.IsNaN(frac) && !double.IsInfinity(frac);
-                    // Prefer ~halfway before handoff when measurable.
-                    if (haveFrac && frac > AP_HAND_OFF_MAX_FRAC)
-                        return true;
-                }
-                return false;
-            }
-
-            private void LogHandOffWait(string reason)
-            {
-                double now = Planetarium.GetUniversalTime();
-                if (now - _lastHandOffWaitLogUt < 1.0)
-                    return;
-                _lastHandOffWaitLogUt = now;
-                Debug.Log("MoveToTarget handoff wait: " + reason);
-            }
-
             public MoveToTarget(MechJebCore core) : base(core)
             {
                 lastDesiredThrustVector = Vector3d.zero;
@@ -1027,32 +898,22 @@ namespace MuMech
                     Core.Landing.increaseVertical = false; // max ratio is less than max ratio  - no need to increase altitude.
                     Debug.Log("stopIncrease: " + hCurrentError.ToString("F1") + ", " + ratio.ToString("F2"));
 
-                    // If in range of suborbital target then hand off to TargetSubOrbit.
-                    // Low-g far used to stay in MoveToTarget (PeA rarely >= 9000 on small bodies)
-                    // and fight leftover +V with pitch-over forever. Prefer TargetSubOrbit once
-                    // climb is done - but only if collision coast is clear (Vesta-class terrain).
-                    bool lowGFar = (Core.Landing.g <= Core.Landing.LOW_GRAVITY)
-                        && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT);
-                    bool coastClear = CoastClearForSubOrbitHandOff(hTargetError);
+                    // If in range of suborbital target then do retro burn (baseline FineTune handoff).
+                    // TargetSubOrbital owns ascend -> coast/warp-to-Ap -> errStep++ into FineTune.
                     if (((Core.Landing.g > Core.Landing.LOW_GRAVITY) && (hTargetError > Core.Landing.POST_TARGET_THRESHOLD))
-                        || (VesselState.orbitPeA >= 9000)
-                        || (lowGFar && coastClear))
+                        || (VesselState.orbitPeA >= 9000) )
                     {
                         trace += 'f';
                         errStep = Ascend2Target.FineTune;
-                        pendingSubOrbitHandOff = false;
                     }
 
-                    // Otherwise use move to target to get there (incl. low-g far while hop/terrain
-                    // still in the way - keep collision avoidance in charge).
+                    // Otherwise use move to target to get there.
                     else
                     {
                         checkWarp = false;    // Exiting ascent phase at low altitude or due to large periapsis - just move to target
                         trace += 'm';          
                         suppressThrottle = 2;                   // make sure throttle is NOT disabled
                         errStep = Ascend2Target.Completed;      // Set ascent step to completed so it does not start it again.
-                        if (lowGFar && (coastClear == false))
-                            pendingSubOrbitHandOff = true;
                     }
                 }
 
@@ -1083,30 +944,11 @@ namespace MuMech
                     {
                         double vFrac = (MainBody.atmosphere == true )? 0.8:0.2;
                         desiredVerticalSpeed = Math.Min(vFrac * Core.Landing.GetCircularOrbitSpeed(VesselState.altitudeTrue, MainBody), Math.Max(3.0, (ratio - maxRatio) * (1 + hTargetError / ASCENT_H_DISTANCE_DIVISOR)));
-                        // Inf/negative ApA (hyperbola) is not a height. Once at cruise alt, stop
-                        // commanding climb so leftover V can be dumped toward a finite intercept.
-                        bool apaFinite = MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit);
-                        bool apoapsisHighEnough = apaFinite
-                            ? ((Math.Abs(VesselState.orbitApA - Vessel.terrainAltitude) > Math.Min(1.2 * hTargetError, subOrbitalApA)) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
-                            : (VesselState.altitudeTrue >= Math.Max(Core.Landing.TgtAlt, ASCENT_AOA_MIN_ALT));
-                        if (apoapsisHighEnough)
+                        // Baseline: once Ap is high enough, stop commanding climb so TargetSubOrbital
+                        // can suppressThrottle + warp-to-Ap, then errStep++ into FineTune at Ap.
+                        if ((Math.Abs(VesselState.orbitApA - Vessel.terrainAltitude) > Math.Min(1.2 * hTargetError, subOrbitalApA)) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
                         {
-                            // Soft stop-climb: pull desired V toward 0 via current leftover V
-                            // instead of snapping to 0 (that fought the old +2 dump gate).
-                            if (desiredVerticalSpeed > 0)
-                                desiredVerticalSpeed = Math.Max(0.0, Math.Min(desiredVerticalSpeed, VesselState.speedVertical * 0.35));
-                            else
-                                desiredVerticalSpeed = 0;
-                            // Low-g far: end increaseVertical so stopIncrease can hand off to
-                            // TargetSubOrbit once the collision coast is clear, instead of
-                            // sitting at desired V = 0 and pitch-over-dumping leftover +V forever.
-                            if ((Core.Landing.g <= Core.Landing.LOW_GRAVITY)
-                                && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT)
-                                && (desiredVerticalSpeed <= 0.5)
-                                && (VesselState.speedVertical <= DUMP_V_FULL_EXCESS))
-                            {
-                                stopIncrease = true;
-                            }
+                            desiredVerticalSpeed = 0;
                         }
                         ignoreLandingCounter = 0; // reset ignore landing count to allow start from a landing
                     }
@@ -1382,35 +1224,21 @@ namespace MuMech
             public void TargetSubOrbital(ref Vector3d desiredThrustVector)
             {
                 double _hCurrentError = hCurrentError;
-                bool apaFinite = MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit);
-                double timeToAp = VesselState.orbitTimeToAp;
-                bool apTimeFinite = apaFinite && !double.IsNaN(timeToAp) && !double.IsInfinity(timeToAp);
-                double decelerationStartTime = apTimeFinite ? timeToAp - 4 : double.NaN;
+                double decelerationStartTime = VesselState.orbitTimeToAp - 4;
 
                 // Use correction attitude if apoapsis is high enough.
                 // Determine when we can stop burning when target apoapsis has been reached
                 // Once stopped a secondary burn will be performed to reach target
-                // Hyperbolic: there is no apoapsis to wait for or warp to (timeToAp is Inf).
                 if (suppressThrottle == 0)
                 {
-                    if (apTimeFinite)
+                    double checkApa = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
+                    if (Math.Abs(VesselState.orbitApA) >= checkApa)
                     {
-                        double checkApa = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
-                        if (Math.Abs(VesselState.orbitApA) >= checkApa)
+                        if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
                         {
-                            if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
-                            {
-                                suppressThrottle++; // suppress throttle during initial burn
-                                trace += 'S' + 'a';
-                            }
+                            suppressThrottle++; // suppress throttle during initial burn
+                            trace += 'S' + 'a';
                         }
-                    }
-                    else if ((VesselState.altitudeTrue >= Core.Landing.TgtAlt) && (VesselState.speedVertical > 0))
-                    {
-                        stopIncrease = true;
-                        suppressThrottle = 2;
-                        trace += 'H';
-                        errStep++; trace += ((int)errStep).ToString();
                     }
                 }
 
@@ -1418,7 +1246,7 @@ namespace MuMech
                 if (suppressThrottle == 1)
                 {
                     // Hold on until we get to point where we can burn to target.
-                    if (apTimeFinite && (decelerationStartTime > 0) && (VesselState.speedVertical > 0))
+                    if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
                     {
                         Debug.Log("warp");
                         if (Core.Node.Autowarp && (decelerationStartTime > 0))
@@ -1467,7 +1295,6 @@ namespace MuMech
 
             public override AutopilotStep Drive(FlightCtrlState s)
             {
-                _coastClearThisDrive = false;
                 if (checkWarp == true)
                 {
                     return this;
@@ -1538,73 +1365,17 @@ namespace MuMech
 
                 // Move to target strategy
                 move(ref desiredVerticalSpeed, ref desiredThrustVector);
-
-                // Retry deferred low-g far handoff once hop/terrain look-ahead clears.
-                double handoffH = Core.Landing.targetingResult.hTargetError;
-                if (pendingSubOrbitHandOff
-                    && (handoffH > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT)
-                    && CoastClearForSubOrbitHandOff(handoffH))
-                {
-                    errStep = Ascend2Target.FineTune;
-                    pendingSubOrbitHandOff = false;
-                    trace += 'r';
-                }
-
+                // Baseline: TargetSubOrbital advances errStep to FineTune at Ap after coast/warp.
                 if ( (errStep >= Ascend2Target.FineTune) && (errStep < Ascend2Target.Completed))
                 {
-                    // Irregular bodies (Vesta-class): do not leave MoveToTarget while a hop is
-                    // armed or the look-ahead still wants +V / crash avoidance.
-                    if (!CoastClearForSubOrbitHandOff(handoffH))
+                    Core.Thrust.ThrustOff();
+                    if (Core.Landing.LandingType == 1)
                     {
-                        errStep = Ascend2Target.Completed;
-                        pendingSubOrbitHandOff = true;
-                        trace += 't';
-                    }
-                    else if (!ReadyForTargetSubOrbitHandOff())
-                    {
-                        // Stay in MoveToTarget until Ap with Ap before pad (~halfway).
-                        pendingSubOrbitHandOff = true;
-                        Vector3d tgtWait = Core.Target.GetPositionTargetPosition();
-                        double waitFrac = double.NaN;
-                        bool haveWaitFrac = false;
-                        bool pullHold = false;
-                        if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
-                            pullHold = ApNeedsPullBeforeHandOff(tgtWait, out waitFrac, out haveWaitFrac);
-                        if (pullHold)
-                        {
-                            // Ap past pad / beyond halfway: keep MoveToTarget burns; do not hand yet.
-                            string fracS = haveWaitFrac ? waitFrac.ToString("F2") : "n/a";
-                            LogHandOffWait("Ap-past-pad hold frac=" + fracS);
-                            trace += 'p';
-                        }
-                        else
-                        {
-                            // Ap before pad, still climbing to Ap: coast here (TargetSubOrbital warp).
-                            Core.Thrust.ThrustOff();
-                            double tAp = Vessel.orbit.timeToAp;
-                            if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
-                                && !double.IsNaN(tAp) && !double.IsInfinity(tAp) && tAp > AP_HAND_OFF_NEAR_AP_S
-                                && VesselState.speedVertical > 0 && Core.Node.Autowarp)
-                            {
-                                Core.Warp.WarpToUT(Planetarium.GetUniversalTime() + tAp - 4.0);
-                            }
-                            string tApS = (double.IsNaN(tAp) || double.IsInfinity(tAp)) ? "n/a" : tAp.ToString("F0");
-                            LogHandOffWait("waiting coast-to-Ap tAp=" + tApS);
-                            trace += 'a'; // wait for Ap
-                        }
+                        return new TargetSubOrbit(Core);
                     }
                     else
                     {
-                        pendingSubOrbitHandOff = false;
-                        Core.Thrust.ThrustOff();
-                        if (Core.Landing.LandingType == 1)
-                        {
-                            return new TargetSubOrbit(Core);
-                        }
-                        else
-                        {
-                            return new CourseCorrection(Core);
-                        }
+                        return new CourseCorrection(Core);
                     }
                 }
 
