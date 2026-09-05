@@ -25,6 +25,9 @@ namespace MuMech
             private const double AP_HALFWAY_LO = 0.35;
             private const double AP_HALFWAY_HI = 0.65;
             private const double AP_COAST_TIMETOAP_S = 30.0;
+            // Once Ap past / frac>~0.5 seen: stay RETROGRADE until frac stably <= target.
+            // Do not clear on one-tick ApoapsisPastDestination / tAp flicker (21:35).
+            private const int AP_PULL_CLEAR_TICKS = 3;
             private const double TERRAIN_RAISE_STEP_M = 800.0;
             private const double TERRAIN_RAISE_INTERVAL_S = 2.0;
             private const double TERRAIN_RAISE_MAX_TGTALT_M = 25000.0;
@@ -68,6 +71,10 @@ namespace MuMech
             private double _lastApSeqLogUt = double.NegativeInfinity;
             private double _lastTerrainRaiseUt = double.NegativeInfinity;
             private bool _establishingAp = false;
+            private bool _apPullLatch = false;
+            private int _apPullClearStreak = 0;
+            private double _apPullLatchEvalUt = double.NegativeInfinity;
+            private double _lastApPullLatchLogUt = double.NegativeInfinity;
             private double minVerticalAngle;
 
             public TargetSubOrbit(MechJebCore core) : base(core)
@@ -527,13 +534,10 @@ namespace MuMech
             }
 
             /// <summary>
-            /// True while Ap along-track is past the pad or beyond ~halfway to pad.
-            /// While true: ONLY RETROGRADE to pull Ap back toward ~0.5 - never PROGRADE,
-            /// LATERAL_FINE, or terrain TgtAlt climb (21:12 frac=2.57 retro immediately
-            /// flipped to prograde via tooLow pad-gate then LATERAL_FINE).
-            /// ClosestPoint/intercept past is allowed and does not set this.
+            /// Instantaneous Ap-past / frac>~0.5 check (no latch). ClosestPoint/intercept
+            /// past is allowed and does not set this.
             /// </summary>
-            private bool ApNeedsPullBack(Vector3d targetPosBody, out double frac)
+            private bool ApNeedsPullBackRaw(Vector3d targetPosBody, out double frac)
             {
                 frac = double.NaN;
                 if (ApoapsisPastDestination(targetPosBody))
@@ -544,6 +548,91 @@ namespace MuMech
                 if (TryApAlongTrackFraction(targetPosBody, out frac, out _))
                     return frac > AP_HALFWAY_TARGET;
                 return false;
+            }
+
+            private void LogApPullLatch(string action, double frac, bool haveFrac)
+            {
+                double now = Planetarium.GetUniversalTime();
+                if (now - _lastApPullLatchLogUt < 1.0)
+                    return;
+                _lastApPullLatchLogUt = now;
+                Debug.Log("TargetSubOrbit ApPullLatch " + action
+                    + " frac=" + (haveFrac ? frac.ToString("F2") : "n/a")
+                    + " streak=" + _apPullClearStreak);
+            }
+
+            /// <summary>
+            /// Once per UT: set latch on Ap past / frac>~0.5; clear only after
+            /// AP_PULL_CLEAR_TICKS consecutive ticks with known frac <= AP_HALFWAY_TARGET.
+            /// Survives one-tick ApoapsisPastDestination / tAp flicker that would otherwise
+            /// clear needsPull and allow tooLow->PROGRADE (21:35 frac=2.54).
+            /// </summary>
+            private void UpdateApPullLatch(Vector3d targetPosBody)
+            {
+                double now = Planetarium.GetUniversalTime();
+                // Same-UT re-entry from multiple call sites: do not advance clear streak.
+                if (now == _apPullLatchEvalUt)
+                    return;
+                _apPullLatchEvalUt = now;
+
+                bool instant = ApNeedsPullBackRaw(targetPosBody, out double frac);
+                bool haveFrac = !double.IsNaN(frac);
+                if (!haveFrac)
+                    haveFrac = TryApAlongTrackFraction(targetPosBody, out frac, out _);
+
+                if (instant)
+                {
+                    if (!_apPullLatch)
+                    {
+                        _apPullLatch = true;
+                        _apPullClearStreak = 0;
+                        LogApPullLatch("SET", frac, haveFrac);
+                    }
+                    else
+                        _apPullClearStreak = 0;
+                    return;
+                }
+
+                if (!_apPullLatch)
+                    return;
+
+                // Latched: ignore pastDest flicker; require stable frac <= halfway target.
+                if (haveFrac && frac <= AP_HALFWAY_TARGET)
+                {
+                    _apPullClearStreak++;
+                    if (_apPullClearStreak >= AP_PULL_CLEAR_TICKS)
+                    {
+                        _apPullLatch = false;
+                        _apPullClearStreak = 0;
+                        LogApPullLatch("CLEAR", frac, true);
+                    }
+                }
+                else
+                {
+                    // Missing frac or still above target: keep latch (flicker-safe).
+                    _apPullClearStreak = 0;
+                }
+            }
+
+            /// <summary>
+            /// True while Ap along-track is past the pad or beyond ~halfway to pad,
+            /// OR while pull latch is held. While true: ONLY RETROGRADE to pull Ap back
+            /// toward ~0.5 - never PROGRADE, LATERAL_FINE, or terrain TgtAlt climb
+            /// (21:12/21:35 retro immediately flipped to prograde via tooLow then LATERAL_FINE).
+            /// ClosestPoint/intercept past is allowed and does not set this.
+            /// </summary>
+            private bool ApNeedsPullBack(Vector3d targetPosBody, out double frac)
+            {
+                UpdateApPullLatch(targetPosBody);
+                frac = double.NaN;
+                bool haveFrac = TryApAlongTrackFraction(targetPosBody, out frac, out _);
+                if (_apPullLatch)
+                {
+                    if (!haveFrac)
+                        ApNeedsPullBackRaw(targetPosBody, out frac);
+                    return true;
+                }
+                return ApNeedsPullBackRaw(targetPosBody, out frac);
             }
 
             private bool ApNeedsPullBack(Vector3d targetPosBody)
@@ -643,7 +732,8 @@ namespace MuMech
                 }
 
                 // Already at/past Ap with Ap at/before halfway: overflight shaping only.
-                if (NearOrPastApoapsis())
+                // While pull latch held: never clear _establishingAp via NearOrPastApoapsis.
+                if (!_apPullLatch && NearOrPastApoapsis())
                 {
                     if (_establishingAp)
                         LogApSeq("Ap placed - begin TargetSubOrbit shape frac="
@@ -658,8 +748,8 @@ namespace MuMech
                     return false;
                 }
 
-                // Before Ap: push if short of halfway band.
-                if (haveFrac && frac < AP_HALFWAY_LO)
+                // Before Ap: push if short of halfway band. Never PROGRADE while pull latched.
+                if (!_apPullLatch && haveFrac && frac < AP_HALFWAY_LO)
                 {
                     _establishingAp = true;
                     if (step != Step.STATE_PROGRADE)
@@ -873,16 +963,16 @@ namespace MuMech
                                 tooLow = false;
                             }
 
-                            if (needsPull)
+                            if (needsPull || _apPullLatch)
                             {
-                                // Stay RETROGRADE until Ap along-track <= ~0.5. No PROGRADE /
-                                // LATERAL_FINE / tooLow climb while pulling Ap back.
+                                // Stay RETROGRADE until latch clears (frac stably <= ~0.5).
+                                // No PROGRADE / LATERAL_FINE / tooLow climb while pulling Ap back.
                                 _establishingAp = true;
                             }
-                            else if (tooLow && !_establishingAp)
+                            else if (tooLow && !_establishingAp && !_apPullLatch)
                             {
                                 // Below TgtAlt-600: climb/shape via PROGRADE (RETROGRADE won't raise).
-                                // Only after Ap is at/before halfway.
+                                // Only after Ap is at/before halfway and pull latch clear.
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
                                 step = Step.STATE_PROGRADE;
@@ -903,7 +993,7 @@ namespace MuMech
                                 }
                                 step = Step.STATE_COAST_AP;
                             }
-                            else if (!_establishingAp && ((throttleCount >= 4) || heightOk))
+                            else if (!_establishingAp && !_apPullLatch && ((throttleCount >= 4) || heightOk))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
