@@ -159,6 +159,58 @@ namespace MuMech
                 return _coastClearResult;
             }
 
+            /// <summary>
+            /// Ricardo: hand TargetSubOrbit only near Ap with Ap before the pad.
+            /// Coast-to-Ap stays in MoveToTarget (TargetSubOrbital warp) until then.
+            /// </summary>
+            private bool ReadyForTargetSubOrbitHandOff()
+            {
+                Vector3d targetPosBody = Core.Target.GetPositionTargetPosition();
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(targetPosBody))
+                    return false;
+
+                // Inf Ap: TargetSubOrbit dump path handles it.
+                if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
+                    return true;
+
+                Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
+                Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
+                if (n.sqrMagnitude < 1e-6)
+                    return false;
+                n.Normalize();
+
+                double angPad = Math.Atan2(
+                    Vector3d.Dot(n.normalized, Vector3d.Cross(Vector3d.Exclude(n, pos).normalized, Vector3d.Exclude(n, targetPosBody).normalized)),
+                    Vector3d.Dot(Vector3d.Exclude(n, pos).normalized, Vector3d.Exclude(n, targetPosBody).normalized));
+                double marginRad = 1000.0 / Math.Max(Vessel.mainBody.Radius, 1.0);
+
+                double tAp = Vessel.orbit.timeToAp;
+                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0)
+                    return VesselState.speedVertical <= 0;
+
+                double now = Planetarium.GetUniversalTime();
+                Vector3d apPos = Vessel.orbit.getPositionAtUT(now + tAp) - Vessel.mainBody.position;
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(apPos))
+                    return false;
+
+                Vector3d a = Vector3d.Exclude(n, pos);
+                Vector3d b = Vector3d.Exclude(n, apPos);
+                if (a.sqrMagnitude < 1e-12 || b.sqrMagnitude < 1e-12)
+                    return false;
+                a.Normalize();
+                b.Normalize();
+                double angAp = Math.Atan2(Vector3d.Dot(n, Vector3d.Cross(a, b)), Vector3d.Dot(a, b));
+
+                // Ap past pad: hand off so TargetSubOrbit RETROGRADE-places Ap ~halfway.
+                if (angAp > angPad + marginRad)
+                    return true;
+
+                // Near Ap or already descending past Ap.
+                if (VesselState.speedVertical <= 0)
+                    return true;
+                return tAp <= 30.0;
+            }
+
             public MoveToTarget(MechJebCore core) : base(core)
             {
                 lastDesiredThrustVector = Vector3d.zero;
@@ -554,7 +606,7 @@ namespace MuMech
 
                 // Smooth H/L in the landing frame, then rebuild world accel. Averaging the world
                 // horizontal vector (old path) smeared yesterday's H into today's L whenever hDir
-                // rotated — leftover axis fighting after the PID itself was decoupled.
+                // rotated â€” leftover axis fighting after the PID itself was decoupled.
                 // debug96 == 0 must not freeze aHAvg/aLAvg at 0 after a frame reset (that looked
                 // like dead H/L knobs). Treat a near-zero blend as "no smoothing".
                 double blend = Core.Landing.debug96;
@@ -654,7 +706,7 @@ namespace MuMech
 
                 // Keep the old verticalSign filter for logging / envelope, but do NOT replace
                 // vertical acceleration with it. In the axis-independent controller verticalSign
-                // was a direction mix weight (0.05..0.15), not m/s^2 — using it as accel would
+                // was a direction mix weight (0.05..0.15), not m/s^2 â€” using it as accel would
                 // drop lift below hover. Tilt is constrained below via the debug93 cone.
                 double vCmd = Vector3d.Dot(accel, up);
                 verticalSign = System.Math.Min(vMaxAngle, System.Math.Max(vMinAngle, verticalSign * (1 - Core.Landing.debug95) + Core.Landing.debug95 * vError * Math.Abs(vCmd)));
@@ -662,7 +714,7 @@ namespace MuMech
                 Vector3d horizNow = accel - up * vCmd;
 
                 // Upright cone: limit horizontal accel to debug93 * |vertical|. Projection, not a
-                // second loop — this is the knob that stopped the Moon 45-degree tip-over.
+                // second loop â€” this is the knob that stopped the Moon 45-degree tip-over.
                 if ((upright == true) && (Math.Abs(vCmd) > 0.0))
                 {
                     double maxHoriz = Core.Landing.debug93 * Math.Abs(vCmd);
@@ -693,7 +745,7 @@ namespace MuMech
                 // Old mixer zeroed H *throttle* when >50 deg off, but kept H in the attitude vector so
                 // the craft would still slew toward the target. Stripping H from accel here
                 // pointed attitude at +up forever after a vertical ZEM/ZEV handoff (forward ~ up,
-                // H command ~ 90 deg) — no steering. Drive() already cuts throttle beyond
+                // H command ~ 90 deg) â€” no steering. Drive() already cuts throttle beyond
                 // throttleAngle (30 deg).
 
                 // Rockets cannot pull. Allow a downward world component only for low-g pitch-over.
@@ -1461,6 +1513,21 @@ namespace MuMech
                         pendingSubOrbitHandOff = true;
                         trace += 't';
                     }
+                    else if (!ReadyForTargetSubOrbitHandOff())
+                    {
+                        // Ap not before pad or still climbing to Ap: coast here (TargetSubOrbital
+                        // warp), then hand TargetSubOrbit at Ap - not mid-coast fighting.
+                        pendingSubOrbitHandOff = true;
+                        Core.Thrust.ThrustOff();
+                        double tAp = Vessel.orbit.timeToAp;
+                        if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
+                            && !double.IsNaN(tAp) && !double.IsInfinity(tAp) && tAp > 30.0
+                            && VesselState.speedVertical > 0 && Core.Node.Autowarp)
+                        {
+                            Core.Warp.WarpToUT(Planetarium.GetUniversalTime() + tAp - 4.0);
+                        }
+                        trace += 'a'; // wait for Ap
+                    }
                     else
                     {
                         pendingSubOrbitHandOff = false;
@@ -1550,4 +1617,3 @@ namespace MuMech
         }
     }
 }
-

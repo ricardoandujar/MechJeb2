@@ -11,7 +11,7 @@ namespace MuMech
     {
         public class TargetSubOrbit : AutopilotStep
         {
-            enum Step { STATE_INIT, STATE_LATERAL, STATE_PROGRADE, STATE_LATERAL_FINE, STATE_RETROGRADE, STATE_CORRECT };
+            enum Step { STATE_INIT, STATE_LATERAL, STATE_PROGRADE, STATE_LATERAL_FINE, STATE_RETROGRADE, STATE_CORRECT, STATE_COAST_AP };
             Step step = Step.STATE_INIT;
             private const float H_CORRECTION_ANGLE_CONSTANT = 0.4f; // Used to determine horizontal correction angle 
             private const double OVERSHOOT_ANGLE_FRACTION = 0.9; // Small margin to avoid losing vertical control
@@ -19,6 +19,15 @@ namespace MuMech
             private const double TARGET_FAR_DISTANCE_THRESHOLD = 2.5*50000; // Distance to target at which to switch from prograde/retrograde burn to fine lateral control to target before final landing burn. This is used to avoid overshooting the target when doing a prograde or retrograde burn and allow for more precise targeting of the final landing burn.
             private const double TARGET_DISTANCE_THRESHOLD = 300; // Final Distance to target at which to switch to final landing burn.   
             private const double DELTA_TARGET_ALT_THRESHOLD = 600; // Threshold for switching between prograde and retrograde burn when close to target - if the target altitude is above the current altitude by this amount then we will do a prograde burn, if it's below then we will do a retrograde burn, if it's close then we will do a lateral burn to fine tune the approach to target before the final burn.
+            // Ricardo sequence: place Ap ~halfway before pad, coast to Ap, THEN shape overflight.
+            // Avoid mid-coast PROGRADE raise fighting RETROGRADE / hop dumps into terrain.
+            private const double AP_HALFWAY_TARGET = 0.50;
+            private const double AP_HALFWAY_LO = 0.35;
+            private const double AP_HALFWAY_HI = 0.65;
+            private const double AP_COAST_TIMETOAP_S = 30.0;
+            private const double TERRAIN_RAISE_STEP_M = 800.0;
+            private const double TERRAIN_RAISE_INTERVAL_S = 2.0;
+            private const double TERRAIN_RAISE_MAX_TGTALT_M = 25000.0;
             private double hFarCorrectionAngle;             // far horizontal distance overshoot angle
             private double velaccum = 0;                    // Integral velocity error accumulator for PI Controller
             private double limitedMaxThrustAccel = 0;       // Limited thrust acceleration used to calculate TWR and overshoot angle + scale max speed
@@ -56,6 +65,9 @@ namespace MuMech
             private int LateralFineCount = 0;
             private double _lastRetroExitLogUt = double.NegativeInfinity;
             private double _lastApPastBounceLogUt = double.NegativeInfinity;
+            private double _lastApSeqLogUt = double.NegativeInfinity;
+            private double _lastTerrainRaiseUt = double.NegativeInfinity;
+            private bool _establishingAp = false;
             private double minVerticalAngle;
 
             public TargetSubOrbit(MechJebCore core) : base(core)
@@ -117,6 +129,12 @@ namespace MuMech
                     }
                 }
 
+                // Ricardo sequence: place Ap ~halfway before pad, coast to Ap, THEN shape.
+                // Do not mid-coast raise/PROGRADE fight RETROGRADE or hop dumps into ridges.
+                Vector3d tgtPosSeq = Core.Target.GetPositionTargetPosition();
+                if (ApplyApHalfwayThenCoast(tgtPosSeq))
+                    return this;
+
                 // STATE_CORRECT: only hand to LandingBurn when descending into the pad
                 // with intercept still ahead and suborbit path clear of terrain. Do not
                 // teach LandingBurn to burn while ascending into / past the pad.
@@ -148,11 +166,26 @@ namespace MuMech
                     {
                         return new MoveToTarget(Core);
                     }
-                    // Far intercept clips terrain before the pad: raise the suborbit path.
+                    // Far intercept clips before pad: raise TgtAlt only after Ap, else re-sequence.
                     else if (pathTerrainBlocked)
                     {
-                        step = Step.STATE_PROGRADE;
-                        throttleCount = 0;
+                        if (NearOrPastApoapsis() && !ApoapsisPastDestination(tgtPosGate))
+                        {
+                            BumpTgtAltForTerrainClear();
+                            step = Step.STATE_PROGRADE;
+                            throttleCount = 0;
+                        }
+                        else if (ApoapsisPastDestination(tgtPosGate))
+                        {
+                            step = Step.STATE_RETROGRADE;
+                            throttleCount = 0;
+                        }
+                        else
+                        {
+                            // Still before Ap: coast/place Ap first (ApplyApHalfwayThenCoast next tick).
+                            step = Step.STATE_COAST_AP;
+                            throttleCount = 0;
+                        }
                     }
                     else
                     {
@@ -244,6 +277,18 @@ namespace MuMech
 
                 // Set the desired Horizontal Velocity to reach target. Error to subtract the vessels current horizontal velocity.
                 double hCorrectionAngle = setHorizontalSpeed(downrangeVec, crossrangeVec, closestPos, targetPos, ref surfaceVel, out Vector3d desiredHorizontalVel, out Vector3d herror);
+
+                // Ap placed: coast (no pro/retro fight this tick). Drive Apply warps next frames.
+                if (step == Step.STATE_COAST_AP)
+                {
+                    Core.Thrust.ThrustOff();
+                    lastHorizontalThrust = 0;
+                    desiredVerticalSpeed = 0;
+                    desiredThrustVector = VesselState.up;
+                    Status = Localizer.Format("#MechJeb_LandingGuidance_Status17",
+                        "0.0", desiredHorizontalVel.magnitude.ToString("F1"));
+                    return;
+                }
 
                 // TgtAlt shapes coast height OVER THE PAD (overflight gate so LandingBurn
                 // has ZEM-ZEV room). Do not match height at ClosestPoint when that point is
@@ -433,6 +478,192 @@ namespace MuMech
                 return alongTrack < -1000.0;
             }
 
+            /// <summary>
+            /// Along-track fraction of apoapsis toward the pad (angAp/angPad).
+            /// ~0.5 = halfway before pad. >1 = Ap past pad. False if unavailable.
+            /// </summary>
+            private bool TryApAlongTrackFraction(Vector3d targetPosBody, out double fraction, out double timeToAp)
+            {
+                fraction = double.NaN;
+                timeToAp = double.NaN;
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(targetPosBody))
+                    return false;
+                if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
+                    return false;
+
+                Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
+                Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
+                if (n.sqrMagnitude < 1e-6)
+                    return false;
+                n.Normalize();
+
+                double angPad = SignedOrbitAngle(pos, targetPosBody, n);
+                double marginRad = 1000.0 / Math.Max(Vessel.mainBody.Radius, 1.0);
+                if (angPad <= marginRad)
+                    return false;
+
+                double tAp = Vessel.orbit.timeToAp;
+                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0)
+                    return false;
+                timeToAp = tAp;
+
+                double now = Planetarium.GetUniversalTime();
+                Vector3d apPos = Vessel.orbit.getPositionAtUT(now + tAp) - Vessel.mainBody.position;
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(apPos))
+                    return false;
+
+                double angAp = SignedOrbitAngle(pos, apPos, n);
+                fraction = angAp / angPad;
+                return !double.IsNaN(fraction) && !double.IsInfinity(fraction);
+            }
+
+            private bool ApApproximatelyHalfwayBeforePad(Vector3d targetPosBody)
+            {
+                if (!TryApAlongTrackFraction(targetPosBody, out double frac, out _))
+                    return false;
+                return frac >= AP_HALFWAY_LO && frac <= AP_HALFWAY_HI;
+            }
+
+            /// <summary>
+            /// True at/near Ap or already on the descending leg (speedVertical <= 0).
+            /// Descending after a good Ap is when overflight shaping should run.
+            /// </summary>
+            private bool NearOrPastApoapsis()
+            {
+                if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
+                    return VesselState.speedVertical <= 0;
+                double tAp = Vessel.orbit.timeToAp;
+                if (double.IsNaN(tAp) || double.IsInfinity(tAp))
+                    return VesselState.speedVertical <= 0;
+                if (VesselState.speedVertical <= 0)
+                    return true;
+                return tAp <= AP_COAST_TIMETOAP_S;
+            }
+
+            private void LogApSeq(string msg)
+            {
+                double now = Planetarium.GetUniversalTime();
+                if (now - _lastApSeqLogUt < 1.0)
+                    return;
+                _lastApSeqLogUt = now;
+                Debug.Log("TargetSubOrbit ApSeq " + msg);
+            }
+
+            /// <summary>
+            /// After Ap only: bump TgtAlt so pad-overflight gate climbs over a ridge.
+            /// Do not use mid-coast as a substitute for Ap-halfway + coast.
+            /// </summary>
+            private void BumpTgtAltForTerrainClear()
+            {
+                double now = Planetarium.GetUniversalTime();
+                if (now - _lastTerrainRaiseUt < TERRAIN_RAISE_INTERVAL_S)
+                    return;
+                _lastTerrainRaiseUt = now;
+                double raised = Math.Min(TERRAIN_RAISE_MAX_TGTALT_M, Core.Landing.TgtAlt + TERRAIN_RAISE_STEP_M);
+                if (raised > Core.Landing.TgtAlt)
+                {
+                    Core.Landing.TgtAlt = raised;
+                    LogApSeq("terrain-after-Ap raise TgtAlt=" + Core.Landing.TgtAlt.ToString("F0"));
+                }
+            }
+
+            /// <summary>
+            /// Ricardo: Ap ~halfway before pad, then coast to Ap, then shape.
+            /// Returns true when Drive should return immediately (coasting).
+            /// Sets step to PROGRADE/RETROGRADE when still establishing Ap.
+            /// </summary>
+            private bool ApplyApHalfwayThenCoast(Vector3d targetPosBody)
+            {
+                // Hyperbola / Inf Ap: cannot place or coast to Ap - keep existing dump path.
+                if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
+                {
+                    _establishingAp = ApoapsisPastDestination(targetPosBody);
+                    return false;
+                }
+
+                bool haveFrac = TryApAlongTrackFraction(targetPosBody, out double frac, out double tAp);
+                bool past = ApoapsisPastDestination(targetPosBody);
+
+                // Ap past pad always dumps first (ascending or descending).
+                if (past)
+                {
+                    _establishingAp = true;
+                    if (step != Step.STATE_RETROGRADE)
+                    {
+                        step = Step.STATE_RETROGRADE;
+                        throttleCount = 0;
+                    }
+                    LogApSeq("RETROGRADE Ap past pad frac=" + (haveFrac ? frac.ToString("F2") : "n/a"));
+                    return false;
+                }
+
+                // Already at/past Ap with Ap before pad: overflight shaping only.
+                // Do not pull for frac>HI here - that fought post-Ap TgtAlt raises.
+                if (NearOrPastApoapsis())
+                {
+                    if (_establishingAp)
+                        LogApSeq("Ap placed - begin TargetSubOrbit shape frac="
+                            + (haveFrac ? frac.ToString("F2") : "n/a"));
+                    _establishingAp = false;
+                    if (step == Step.STATE_COAST_AP)
+                    {
+                        Core.Warp.MinimumWarp();
+                        step = Step.STATE_LATERAL;
+                        throttleCount = 0;
+                    }
+                    return false;
+                }
+
+                // Before Ap: pull if well beyond halfway toward pad.
+                if (haveFrac && frac > AP_HALFWAY_HI)
+                {
+                    _establishingAp = true;
+                    if (step != Step.STATE_RETROGRADE)
+                    {
+                        step = Step.STATE_RETROGRADE;
+                        throttleCount = 0;
+                    }
+                    LogApSeq("RETROGRADE place Ap halfway frac=" + frac.ToString("F2"));
+                    return false;
+                }
+
+                // Before Ap: push if short of halfway.
+                if (haveFrac && frac < AP_HALFWAY_LO)
+                {
+                    _establishingAp = true;
+                    if (step != Step.STATE_PROGRADE)
+                    {
+                        step = Step.STATE_PROGRADE;
+                        throttleCount = 0;
+                    }
+                    LogApSeq("PROGRADE place Ap halfway frac=" + frac.ToString("F2"));
+                    return false;
+                }
+
+                // Ap ~halfway before pad: coast to Ap (reuse MoveToTarget-style warp-to-Ap).
+                if (VesselState.speedVertical > 0)
+                {
+                    _establishingAp = false;
+                    step = Step.STATE_COAST_AP;
+                    Core.Thrust.ThrustOff();
+                    throttleOn = false;
+                    double now = Planetarium.GetUniversalTime();
+                    if (!haveFrac)
+                        tAp = Vessel.orbit.timeToAp;
+                    double coastUt = now + Math.Max(0.0, tAp - 4.0);
+                    if (Core.Node.Autowarp && !double.IsNaN(tAp) && !double.IsInfinity(tAp) && tAp > AP_COAST_TIMETOAP_S)
+                        Core.Warp.WarpToUT(coastUt);
+                    else
+                        Core.Warp.MinimumWarp();
+                    LogApSeq("COAST to Ap tAp=" + tAp.ToString("F0")
+                        + " frac=" + (haveFrac ? frac.ToString("F2") : "n/a"));
+                    return true;
+                }
+
+                _establishingAp = false;
+                return false;
+            }
+
             public double setHorizontalSpeed(Vector3d downrangeVec, Vector3d crossrangeVec, Vector3d closestPos, Vector3d targetPos,
                  ref Vector3d surfaceVel, out Vector3d desiredHorizontalVel, out Vector3d herror)
             {
@@ -448,6 +679,12 @@ namespace MuMech
 
                 switch (step)
                 {
+                    case Step.STATE_COAST_AP:
+                        forceHoriz = true;
+                        desiredHorizontalVel = Vector3d.zero;
+                        herror = Vector3d.zero;
+                        rc = 0;
+                        break;
                     default:
                     case Step.STATE_INIT: // Initial run - setup for lateral burn
                         forceHoriz = true; // Force horizontal thrust
@@ -533,6 +770,18 @@ namespace MuMech
                                 throttleCount = 0;
                                 step = Step.STATE_RETROGRADE;
                             }
+                            else if (_establishingAp && ApApproximatelyHalfwayBeforePad(targetPos))
+                            {
+                                // Ap ~halfway: stop pushing and coast to Ap (Drive Apply warps).
+                                ProgradeCount = throttleCount;
+                                throttleCount = 0;
+                                _establishingAp = false;
+                                step = Step.STATE_COAST_AP;
+                            }
+                            else if (_establishingAp)
+                            {
+                                // Keep PROGRADE until halfway band â€” do not LATERAL_FINE mid-place.
+                            }
                             else if ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD)))
                             {
                                 ProgradeCount = throttleCount;
@@ -592,14 +841,30 @@ namespace MuMech
                                 heightOk = false;
                                 tooLow = false;
                             }
-                            if (!pastDest && tooLow)
+                            if (!pastDest && tooLow && !_establishingAp)
                             {
                                 // Below TgtAlt-600: climb/shape via PROGRADE (RETROGRADE won't raise).
+                                // Skip while placing Ap halfway - height shaping waits until after Ap.
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
                                 step = Step.STATE_PROGRADE;
                             }
-                            else if (!pastDest && ((throttleCount >= 4) || heightOk))
+                            else if (!pastDest && _establishingAp && ApApproximatelyHalfwayBeforePad(targetPos))
+                            {
+                                RetrogradeCount = throttleCount;
+                                throttleCount = 0;
+                                _establishingAp = false;
+                                double nowExit = Planetarium.GetUniversalTime();
+                                if (nowExit - _lastRetroExitLogUt >= 1.0)
+                                {
+                                    _lastRetroExitLogUt = nowExit;
+                                    Debug.Log("RETROGRADE exit -> COAST_AP Ap halfway"
+                                        + " deltaHeight=" + deltaHeight.ToString("F0")
+                                        + " deltaDistance=" + deltaDistance.ToString("F0"));
+                                }
+                                step = Step.STATE_COAST_AP;
+                            }
+                            else if (!pastDest && !_establishingAp && ((throttleCount >= 4) || heightOk))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
