@@ -898,20 +898,36 @@ namespace MuMech
                     Core.Landing.increaseVertical = false; // max ratio is less than max ratio  - no need to increase altitude.
                     Debug.Log("stopIncrease: " + hCurrentError.ToString("F1") + ", " + ratio.ToString("F2"));
 
-                    // If in range of suborbital target then do retro burn (baseline FineTune handoff).
-                    // TargetSubOrbital owns ascend -> coast/warp-to-Ap -> errStep++ into FineTune.
-                    if (((Core.Landing.g > Core.Landing.LOW_GRAVITY) && (hTargetError > Core.Landing.POST_TARGET_THRESHOLD))
+                    // TargetSubOrbital may have just advanced errStep to FineTune at Ap.
+                    // Never downgrade that to Completed (low-g PeA rarely hits 9000).
+                    if ((errStep >= Ascend2Target.FineTune) && (errStep < Ascend2Target.Completed))
+                    {
+                        trace += 'f';
+                        Debug.Log("stopIncrease: keep FineTune from TargetSubOrbital Ap handoff");
+                    }
+                    // High-g far / high PeA: baseline FineTune (TargetSubOrbital may not have fired yet).
+                    else if (((Core.Landing.g > Core.Landing.LOW_GRAVITY) && (hTargetError > Core.Landing.POST_TARGET_THRESHOLD))
                         || (VesselState.orbitPeA >= 9000) )
                     {
                         trace += 'f';
                         errStep = Ascend2Target.FineTune;
                     }
-
+                    // Low-g Ground Track long hop: keep InitialBurn so TargetSubOrbital can
+                    // suppressThrottle + warp-to-Ap, then errStep++ into FineTune. Do not Completed.
+                    else if ((Core.Landing.LandingType == 1)
+                        && (Core.Landing.g <= Core.Landing.LOW_GRAVITY)
+                        && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT))
+                    {
+                        if (errStep <= Ascend2Target.Disabled)
+                            errStep = Ascend2Target.InitialBurn;
+                        trace += 'A';
+                        Debug.Log("stopIncrease: keep InitialBurn for low-g TargetSubOrbital Ap coast");
+                    }
                     // Otherwise use move to target to get there.
                     else
                     {
                         checkWarp = false;    // Exiting ascent phase at low altitude or due to large periapsis - just move to target
-                        trace += 'm';          
+                        trace += 'm';
                         suppressThrottle = 2;                   // make sure throttle is NOT disabled
                         errStep = Ascend2Target.Completed;      // Set ascent step to completed so it does not start it again.
                     }
@@ -1013,8 +1029,12 @@ namespace MuMech
                 // If horizontal herror is really large set desired horizontal velocity based on reaching target
                 // If target within reach then avoid changing the horizontal velocity.
                 Vector3d hSurfaceVelocity = Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
-                if ((Core.Landing.g > Core.Landing.LOW_GRAVITY) && (Core.Landing.increaseVertical == true) &&
-                    (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT) && (ratio > 0.5*maxRatio))
+                // High-g far climb OR low-g Ground Track far climb: start TargetSubOrbital (InitialBurn).
+                bool subOrbitalAscend = (Core.Landing.increaseVertical == true)
+                    && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT) && (ratio > 0.5 * maxRatio)
+                    && ((Core.Landing.g > Core.Landing.LOW_GRAVITY)
+                        || (Core.Landing.LandingType == 1)); // low-g: enable TargetSubOrbital Ap sequence
+                if (subOrbitalAscend)
                 {
                     // Set horizontal velocity to reach predicted target
                     // Use max expected velocity and scale it based on  
@@ -1058,7 +1078,22 @@ namespace MuMech
                 {
                     if (Core.Landing.increaseVertical == false)
                     {
-                        hCurrentError = 0; // Dont allow fine tune when landing.
+                        // Keep hCurrentError while low-g TargetSubOrbital is still coasting to Ap
+                        // (InitialBurn). Zeroing it would skip TargetSubOrbital and strand the hop.
+                        if ((Core.Landing.LandingType == 1)
+                            && (Core.Landing.g <= Core.Landing.LOW_GRAVITY)
+                            && (errStep > Ascend2Target.Disabled)
+                            && (errStep < Ascend2Target.FineTune)
+                            && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT))
+                        {
+                            hCurrentError = (Core.Landing.targetingResult.distanceToTarget > 0)
+                                ? Core.Landing.targetingResult.distanceToTarget
+                                : hTargetError;
+                        }
+                        else
+                        {
+                            hCurrentError = 0; // Dont allow fine tune when landing.
+                        }
                     }
 
                     // When the target is really close then perform then amplify the horizontal error to aggressively eliminate horizontal motion.
@@ -1238,6 +1273,17 @@ namespace MuMech
                         {
                             suppressThrottle++; // suppress throttle during initial burn
                             trace += 'S' + 'a';
+                        }
+                        else
+                        {
+                            // Ap already high and at/past Ap: skip warp, hand FineTune now.
+                            // Without this, suppressThrottle stays 0 forever when climb ends first.
+                            stopIncrease = true;
+                            suppressThrottle = 2;
+                            trace += 'U';
+                            if (errStep < Ascend2Target.FineTune)
+                                errStep = Ascend2Target.FineTune;
+                            Debug.Log("TargetSubOrbital: Ap ready, already at/past Ap -> FineTune");
                         }
                     }
                 }
