@@ -54,6 +54,8 @@ namespace MuMech
             private int ProgradeCount = 0;
             private int RetrogradeCount = 0;
             private int LateralFineCount = 0;
+            private double _lastRetroExitLogUt = double.NegativeInfinity;
+            private double _lastApPastBounceLogUt = double.NegativeInfinity;
             private double minVerticalAngle;
 
             public TargetSubOrbit(MechJebCore core) : base(core)
@@ -310,18 +312,15 @@ namespace MuMech
             }
 
             /// <summary>
-            /// True when finite ApA is still past the landing target along-track
-            /// (timeToAp ahead of pad overflight, or Ap ground-track past dest).
+            /// True when apoapsis ground-track is still past the landing target along-track.
             /// ClosestPoint / intercept past dest is allowed and must NOT force RETROGRADE.
+            /// Hyperbolic / Inf Ap: pad still ahead counts as Ap-past (must dump).
+            /// Do not gate on timeToAp<600 - small-body approaches (20:18 ~110 km out)
+            /// have Ap still past the pad with timeToAp well over 10 minutes.
             /// </summary>
             private bool ApoapsisPastDestination(Vector3d targetPosBody)
             {
-                if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
-                    return false;
-
-                double now = Planetarium.GetUniversalTime();
-                double tAp = VesselState.orbitTimeToAp;
-                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0 || tAp >= 600)
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(targetPosBody))
                     return false;
 
                 Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
@@ -330,15 +329,26 @@ namespace MuMech
                     return false;
                 n.Normalize();
 
-                Vector3d apPos = Vessel.orbit.getPositionAtUT(now + tAp) - Vessel.mainBody.position;
-                if (!MechJebModuleLandingAutopilot.IsFiniteVec(apPos)
-                    || !MechJebModuleLandingAutopilot.IsFiniteVec(targetPosBody))
-                    return false;
-
                 double angPad = SignedOrbitAngle(pos, targetPosBody, n);
-                double angAp = SignedOrbitAngle(pos, apPos, n);
                 // ~1 km along-track margin at body radius
                 double marginRad = 1000.0 / Math.Max(Vessel.mainBody.Radius, 1.0);
+
+                // Inf Ap / hyperbola: no apoapsis to place before the pad - dump while pad ahead.
+                if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
+                    return angPad > marginRad;
+
+                double now = Planetarium.GetUniversalTime();
+                // Prefer raw orbit.timeToAp (not VesselState MovingAverage) for geometry.
+                double tAp = Vessel.orbit.timeToAp;
+                // Do NOT reject tAp >= 600 (was false-negative at 20:18 while Ap still past pad).
+                if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0)
+                    return false;
+
+                Vector3d apPos = Vessel.orbit.getPositionAtUT(now + tAp) - Vessel.mainBody.position;
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(apPos))
+                    return false;
+
+                double angAp = SignedOrbitAngle(pos, apPos, n);
                 return angAp > angPad + marginRad;
             }
 
@@ -378,7 +388,9 @@ namespace MuMech
                 double dt = alongTrack / hOrbSpeed;
                 if (dt < 5.0)
                     dt = 5.0;
-                if (dt > 600.0)
+                // Allow long pad-overflight horizons on small bodies (20:18 ~110 km /
+                // low hOrbSpeed exceeded the old 600s cap and fell through to ClosestPoint).
+                if (dt > 3600.0)
                     return false;
 
                 double now = Planetarium.GetUniversalTime();
@@ -573,8 +585,12 @@ namespace MuMech
                                 heightOk = false;
                             else
                             {
-                                heightOk = Math.Abs(deltaHeight) <= DELTA_TARGET_ALT_THRESHOLD;
-                                tooLow = deltaHeight > DELTA_TARGET_ALT_THRESHOLD;
+                                // Pad ahead but overflight gate unavailable: do NOT treat
+                                // ClosestPoint |deltaHeight| as OK - that point may be tens of
+                                // km past the pad while Ap is still past (20:18: dh -599 with
+                                // deltaDistance +45 km). Keep other exits (throttleCount>=4).
+                                heightOk = false;
+                                tooLow = false;
                             }
                             if (!pastDest && tooLow)
                             {
@@ -587,6 +603,15 @@ namespace MuMech
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
+                                double nowExit = Planetarium.GetUniversalTime();
+                                if (nowExit - _lastRetroExitLogUt >= 1.0)
+                                {
+                                    _lastRetroExitLogUt = nowExit;
+                                    Debug.Log("RETROGRADE exit -> LATERAL_FINE heightOk=" + heightOk
+                                        + " throttleCount=" + RetrogradeCount
+                                        + " deltaHeight=" + deltaHeight.ToString("F0")
+                                        + " deltaDistance=" + deltaDistance.ToString("F0"));
+                                }
                                 // Now will perform final correction step.
                                 step = Step.STATE_LATERAL_FINE;
                             }
@@ -607,6 +632,14 @@ namespace MuMech
                             {
                                 LateralFineCount = throttleCount;
                                 throttleCount = 0;
+                                double nowBounce = Planetarium.GetUniversalTime();
+                                if (nowBounce - _lastApPastBounceLogUt >= 1.0)
+                                {
+                                    _lastApPastBounceLogUt = nowBounce;
+                                    Debug.Log("LATERAL_FINE bounce -> RETROGRADE Ap past pad"
+                                        + " deltaHeight=" + deltaHeight.ToString("F0")
+                                        + " deltaDistance=" + deltaDistance.ToString("F0"));
+                                }
                                 step = Step.STATE_RETROGRADE;
                             }
                             else if ((throttleCount >= 4) || (distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero) )
