@@ -152,11 +152,12 @@ namespace MuMech
                     }
 
                     // Too low for ZEM-ZEV room: shape climb before terrain / CORRECT hop.
-                    // LandingBurnEntryAllowed already refused padDh > 600; keep PROGRADE until gate rises.
+                    // Never PROGRADE / terrain bump while Ap past or frac > ~0.5.
                     Vector3d tgtPosGate = Core.Target.GetPositionTargetPosition();
+                    bool gateNeedsPull = ApNeedsPullBack(tgtPosGate);
                     if (TryPadOverflightGate(tgtPosGate, out double padDhCorrect, out _)
                         && padDhCorrect > DELTA_TARGET_ALT_THRESHOLD
-                        && !ApoapsisPastDestination(tgtPosGate))
+                        && !gateNeedsPull)
                     {
                         step = Step.STATE_PROGRADE;
                         throttleCount = 0;
@@ -169,15 +170,15 @@ namespace MuMech
                     // Far intercept clips before pad: raise TgtAlt only after Ap, else re-sequence.
                     else if (pathTerrainBlocked)
                     {
-                        if (NearOrPastApoapsis() && !ApoapsisPastDestination(tgtPosGate))
+                        if (gateNeedsPull)
+                        {
+                            step = Step.STATE_RETROGRADE;
+                            throttleCount = 0;
+                        }
+                        else if (NearOrPastApoapsis())
                         {
                             BumpTgtAltForTerrainClear();
                             step = Step.STATE_PROGRADE;
-                            throttleCount = 0;
-                        }
-                        else if (ApoapsisPastDestination(tgtPosGate))
-                        {
-                            step = Step.STATE_RETROGRADE;
                             throttleCount = 0;
                         }
                         else
@@ -189,10 +190,10 @@ namespace MuMech
                     }
                     else
                     {
-                        // ApA past pad: dump. Pad already behind: hop recover via MoveToTarget.
+                        // Ap past / frac>~0.5: dump. Pad already behind: hop recover via MoveToTarget.
                         // ClosestPoint/intercept past is allowed (do not force RETROGRADE on it).
                         Vector3d tgtPosCorrect = Core.Target.GetPositionTargetPosition();
-                        if (ApoapsisPastDestination(tgtPosCorrect))
+                        if (ApNeedsPullBack(tgtPosCorrect))
                         {
                             step = Step.STATE_RETROGRADE;
                             throttleCount = 0;
@@ -385,10 +386,11 @@ namespace MuMech
                 double now = Planetarium.GetUniversalTime();
                 // Prefer raw orbit.timeToAp (not VesselState MovingAverage) for geometry.
                 double tAp = Vessel.orbit.timeToAp;
-                // Do NOT reject tAp >= 600 (was false-negative at 20:18 while Ap still past pad).
+                // At/just past Ap (tAp<=0) or glitched tAp: vessel is at the Ap ground-track.
+                // If pad is already behind, that Ap was past the pad - keep dumping.
+                // (21:12: tAp flicker cleared pastDest and tooLow hopped PROGRADE at frac=2.57.)
                 if (double.IsNaN(tAp) || double.IsInfinity(tAp) || tAp <= 0)
-                    return false;
-
+                    return angPad < -marginRad;
                 Vector3d apPos = Vessel.orbit.getPositionAtUT(now + tAp) - Vessel.mainBody.position;
                 if (!MechJebModuleLandingAutopilot.IsFiniteVec(apPos))
                     return false;
@@ -525,6 +527,31 @@ namespace MuMech
             }
 
             /// <summary>
+            /// True while Ap along-track is past the pad or beyond ~halfway to pad.
+            /// While true: ONLY RETROGRADE to pull Ap back toward ~0.5 - never PROGRADE,
+            /// LATERAL_FINE, or terrain TgtAlt climb (21:12 frac=2.57 retro immediately
+            /// flipped to prograde via tooLow pad-gate then LATERAL_FINE).
+            /// ClosestPoint/intercept past is allowed and does not set this.
+            /// </summary>
+            private bool ApNeedsPullBack(Vector3d targetPosBody, out double frac)
+            {
+                frac = double.NaN;
+                if (ApoapsisPastDestination(targetPosBody))
+                {
+                    TryApAlongTrackFraction(targetPosBody, out frac, out _);
+                    return true;
+                }
+                if (TryApAlongTrackFraction(targetPosBody, out frac, out _))
+                    return frac > AP_HALFWAY_TARGET;
+                return false;
+            }
+
+            private bool ApNeedsPullBack(Vector3d targetPosBody)
+            {
+                return ApNeedsPullBack(targetPosBody, out _);
+            }
+
+            /// <summary>
             /// True at/near Ap or already on the descending leg (speedVertical <= 0).
             /// Descending after a good Ap is when overflight shaping should run.
             /// </summary>
@@ -555,6 +582,10 @@ namespace MuMech
             /// </summary>
             private void BumpTgtAltForTerrainClear()
             {
+                // Never climb TgtAlt while Ap is past pad or frac > ~0.5 - that fights the dump.
+                Vector3d tgt = Core.Target.GetPositionTargetPosition();
+                if (ApNeedsPullBack(tgt))
+                    return;
                 double now = Planetarium.GetUniversalTime();
                 if (now - _lastTerrainRaiseUt < TERRAIN_RAISE_INTERVAL_S)
                     return;
@@ -577,15 +608,27 @@ namespace MuMech
                 // Hyperbola / Inf Ap: cannot place or coast to Ap - keep existing dump path.
                 if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
                 {
-                    _establishingAp = ApoapsisPastDestination(targetPosBody);
+                    _establishingAp = ApNeedsPullBack(targetPosBody);
+                    if (_establishingAp && step != Step.STATE_RETROGRADE)
+                    {
+                        step = Step.STATE_RETROGRADE;
+                        throttleCount = 0;
+                    }
                     return false;
                 }
 
                 bool haveFrac = TryApAlongTrackFraction(targetPosBody, out double frac, out double tAp);
-                bool past = ApoapsisPastDestination(targetPosBody);
+                bool needsPull = ApNeedsPullBack(targetPosBody, out double pullFrac);
+                if (needsPull && !haveFrac && !double.IsNaN(pullFrac))
+                {
+                    haveFrac = true;
+                    frac = pullFrac;
+                }
 
-                // Ap past pad always dumps first (ascending or descending).
-                if (past)
+                // While Ap past pad OR along-track frac > ~0.5: ONLY RETROGRADE.
+                // Must run BEFORE NearOrPastApoapsis - that used to clear _establishingAp
+                // and fall into tooLow->PROGRADE (21:12 frac=2.57).
+                if (needsPull)
                 {
                     _establishingAp = true;
                     if (step != Step.STATE_RETROGRADE)
@@ -593,12 +636,13 @@ namespace MuMech
                         step = Step.STATE_RETROGRADE;
                         throttleCount = 0;
                     }
-                    LogApSeq("RETROGRADE Ap past pad frac=" + (haveFrac ? frac.ToString("F2") : "n/a"));
+                    bool past = ApoapsisPastDestination(targetPosBody);
+                    LogApSeq((past ? "RETROGRADE Ap past pad frac=" : "RETROGRADE place Ap halfway frac=")
+                        + (haveFrac ? frac.ToString("F2") : "n/a"));
                     return false;
                 }
 
-                // Already at/past Ap with Ap before pad: overflight shaping only.
-                // Do not pull for frac>HI here - that fought post-Ap TgtAlt raises.
+                // Already at/past Ap with Ap at/before halfway: overflight shaping only.
                 if (NearOrPastApoapsis())
                 {
                     if (_establishingAp)
@@ -614,20 +658,7 @@ namespace MuMech
                     return false;
                 }
 
-                // Before Ap: pull if well beyond halfway toward pad.
-                if (haveFrac && frac > AP_HALFWAY_HI)
-                {
-                    _establishingAp = true;
-                    if (step != Step.STATE_RETROGRADE)
-                    {
-                        step = Step.STATE_RETROGRADE;
-                        throttleCount = 0;
-                    }
-                    LogApSeq("RETROGRADE place Ap halfway frac=" + frac.ToString("F2"));
-                    return false;
-                }
-
-                // Before Ap: push if short of halfway.
+                // Before Ap: push if short of halfway band.
                 if (haveFrac && frac < AP_HALFWAY_LO)
                 {
                     _establishingAp = true;
@@ -716,8 +747,8 @@ namespace MuMech
                                 step = Step.STATE_RETROGRADE;
                             else if (hyperbolic && (VesselState.speedVertical > 1) && (deltaDistance < -1000))
                                 step = Step.STATE_RETROGRADE;
-                            else if (ApoapsisPastDestination(targetPos))
-                                step = Step.STATE_RETROGRADE; // ApA past pad: pull energy back
+                            else if (ApNeedsPullBack(targetPos))
+                                step = Step.STATE_RETROGRADE; // Ap past / frac>~0.5: pull back
                             else if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
                                 step = Step.STATE_RETROGRADE;
                             else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < 2000))
@@ -763,8 +794,8 @@ namespace MuMech
                             Debug.Log(" prograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
                             // Switch to fine lateral control when close to target or if periapsis is above half target altitude
-                            // ApA past pad: do not fine-tune / CORRECT - pull Ap back first.
-                            if (ApoapsisPastDestination(targetPos))
+                            // Ap past / frac>~0.5: do not fine-tune / CORRECT - pull Ap back first.
+                            if (ApNeedsPullBack(targetPos))
                             {
                                 ProgradeCount = throttleCount;
                                 throttleCount = 0;
@@ -804,12 +835,14 @@ namespace MuMech
                             // Burn retrograde until height at closest position is close to target altitude, but only if it's crosses at a higher altitude.
                             Debug.Log(" retrograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
-                            bool pastDest = ApoapsisPastDestination(targetPos);
+                            // Ap past pad or frac > ~0.5: hard-hold RETROGRADE (21:12 tooLow
+                            // hopped PROGRADE one tick after ApSeq frac=2.57, undoing the dump).
+                            bool needsPull = ApNeedsPullBack(targetPos, out double apFracExit);
 
                             // Always anti-downrange in RETROGRADE. Signed deltaHeight became
                             // prograde once height crossed, which left Ap past the pad.
                             double retroMag = Math.Abs(deltaHeight);
-                            if (pastDest)
+                            if (needsPull)
                                 retroMag = Math.Max(retroMag, 2000.0);
                             else if (retroMag < 1.0)
                                 retroMag = 1.0;
@@ -818,15 +851,13 @@ namespace MuMech
 
                             // Exit on pad-overflight height gate when pad still ahead.
                             // Band around TgtAlt (|padDh| <= 600): low side required so
-                            // LandingBurn ZEM-ZEV has room - do not exit while heightOverPad
-                            // < TgtAlt-600. Keep dumping while ApoapsisPastDestination;
-                            // intercept past allowed. Pad behind: never treat ClosestPoint match as OK.
+                            // LandingBurn ZEM-ZEV has room. Keep dumping while ApNeedsPullBack;
+                            // ClosestPoint/intercept past allowed. Pad behind: never OK.
                             bool heightOk;
                             bool tooLow = false;
                             if (TryPadOverflightGate(targetPos, out double padDhExit, out _))
                             {
                                 // Band: TgtAlt-600 <= heightOverPad <= TgtAlt+600 (|padDh| <= 600).
-                                // Low side required so LandingBurn ZEM-ZEV has room.
                                 heightOk = Math.Abs(padDhExit) <= DELTA_TARGET_ALT_THRESHOLD;
                                 tooLow = padDhExit > DELTA_TARGET_ALT_THRESHOLD;
                             }
@@ -841,15 +872,22 @@ namespace MuMech
                                 heightOk = false;
                                 tooLow = false;
                             }
-                            if (!pastDest && tooLow && !_establishingAp)
+
+                            if (needsPull)
+                            {
+                                // Stay RETROGRADE until Ap along-track <= ~0.5. No PROGRADE /
+                                // LATERAL_FINE / tooLow climb while pulling Ap back.
+                                _establishingAp = true;
+                            }
+                            else if (tooLow && !_establishingAp)
                             {
                                 // Below TgtAlt-600: climb/shape via PROGRADE (RETROGRADE won't raise).
-                                // Skip while placing Ap halfway - height shaping waits until after Ap.
+                                // Only after Ap is at/before halfway.
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
                                 step = Step.STATE_PROGRADE;
                             }
-                            else if (!pastDest && _establishingAp && ApApproximatelyHalfwayBeforePad(targetPos))
+                            else if (_establishingAp && ApApproximatelyHalfwayBeforePad(targetPos))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
@@ -859,12 +897,13 @@ namespace MuMech
                                 {
                                     _lastRetroExitLogUt = nowExit;
                                     Debug.Log("RETROGRADE exit -> COAST_AP Ap halfway"
+                                        + " frac=" + (double.IsNaN(apFracExit) ? "n/a" : apFracExit.ToString("F2"))
                                         + " deltaHeight=" + deltaHeight.ToString("F0")
                                         + " deltaDistance=" + deltaDistance.ToString("F0"));
                                 }
                                 step = Step.STATE_COAST_AP;
                             }
-                            else if (!pastDest && !_establishingAp && ((throttleCount >= 4) || heightOk))
+                            else if (!_establishingAp && ((throttleCount >= 4) || heightOk))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
@@ -892,8 +931,8 @@ namespace MuMech
                             MechJebModuleDebugArrows.debugVector2 = herror;
                             Debug.Log("Lateral Fine HError Mag:" + distanceToTarget.ToString("F0"));
 
-                            // Do not declare CORRECT while ApA is still past the pad.
-                            if (ApoapsisPastDestination(targetPos))
+                            // Do not declare CORRECT while Ap past pad or frac > ~0.5.
+                            if (ApNeedsPullBack(targetPos, out double apFracFine))
                             {
                                 LateralFineCount = throttleCount;
                                 throttleCount = 0;
@@ -901,7 +940,8 @@ namespace MuMech
                                 if (nowBounce - _lastApPastBounceLogUt >= 1.0)
                                 {
                                     _lastApPastBounceLogUt = nowBounce;
-                                    Debug.Log("LATERAL_FINE bounce -> RETROGRADE Ap past pad"
+                                    Debug.Log("LATERAL_FINE bounce -> RETROGRADE Ap needs pull"
+                                        + " frac=" + (double.IsNaN(apFracFine) ? "n/a" : apFracFine.ToString("F2"))
                                         + " deltaHeight=" + deltaHeight.ToString("F0")
                                         + " deltaDistance=" + deltaDistance.ToString("F0"));
                                 }
