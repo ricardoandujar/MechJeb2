@@ -970,8 +970,36 @@ namespace MuMech
                     }
                     else
                     {
-                        desiredVerticalSpeed = 3.0; // give it a little boost to get going and avoid stalling at low altitude with low vertical speed.
-                        if (VesselState.altitudeTrue > 15) stopIncrease = true; // Trigger STOP vertical increase
+                        // Low-g Ground Track long hop still in InitialBurn: ratio can improve
+                        // before Ap is high enough. stopIncrease would clear increaseVertical and
+                        // strand TargetSubOrbital (morning log: stopIncrease hCurrentError=0, never
+                        // TargetSubOrbit). Keep climbing until Ap is ready for suppressThrottle.
+                        bool lowGSubOrbitalClimb = (Core.Landing.LandingType == 1)
+                            && (Core.Landing.g <= Core.Landing.LOW_GRAVITY)
+                            && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT)
+                            && (errStep > Ascend2Target.Disabled)
+                            && (errStep < Ascend2Target.FineTune)
+                            && (suppressThrottle == 0);
+                        if (lowGSubOrbitalClimb)
+                        {
+                            double checkApaClimb = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
+                            if ((Math.Abs(VesselState.orbitApA) >= checkApaClimb) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
+                            {
+                                desiredVerticalSpeed = 0; // Ap ready - TargetSubOrbital arms coast/warp
+                                Debug.Log("setVerticalSpeed: low-g Ap ready, hold climb for TargetSubOrbital coast ApA="
+                                    + VesselState.orbitApA.ToString("F0") + " check=" + checkApaClimb.ToString("F0"));
+                            }
+                            else
+                            {
+                                desiredVerticalSpeed = Math.Max(3.0, desiredVerticalSpeed);
+                                // do NOT stopIncrease - TargetSubOrbital owns Ap handoff
+                            }
+                        }
+                        else
+                        {
+                            desiredVerticalSpeed = 3.0; // give it a little boost to get going and avoid stalling at low altitude with low vertical speed.
+                            if (VesselState.altitudeTrue > 15) stopIncrease = true; // Trigger STOP vertical increase
+                        }
                     }
                 }
                 else
@@ -1311,6 +1339,11 @@ namespace MuMech
                         trace += 'U';
                         Core.Warp.MinimumWarp();
                         errStep++; trace += ((int)errStep).ToString();
+                        Debug.Log("TargetSubOrbital: coast/warp reached Ap -> FineTune ApA="
+                            + VesselState.orbitApA.ToString("F0")
+                            + " tAp=" + VesselState.orbitTimeToAp.ToString("F1")
+                            + " alt=" + VesselState.altitudeTrue.ToString("F0")
+                            + " errStep=" + ((int)errStep).ToString());
                     }
                 }
             }
@@ -1417,6 +1450,12 @@ namespace MuMech
                     Core.Thrust.ThrustOff();
                     if (Core.Landing.LandingType == 1)
                     {
+                        Debug.Log("MoveToTarget: Ap handoff -> TargetSubOrbit ApA="
+                            + VesselState.orbitApA.ToString("F0")
+                            + " tAp=" + VesselState.orbitTimeToAp.ToString("F1")
+                            + " alt=" + VesselState.altitudeTrue.ToString("F0")
+                            + " TgtAlt=" + Core.Landing.TgtAlt.ToString("F0")
+                            + " hErr=" + hCurrentError.ToString("F0"));
                         return new TargetSubOrbit(Core);
                     }
                     else

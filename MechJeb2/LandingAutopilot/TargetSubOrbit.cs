@@ -130,10 +130,15 @@ namespace MuMech
                 if (ratio == 0)                    
                 {
                     ratio = Core.Landing.getHDistanceToTarget() / VesselState.altitudeTrue;
-                    if ( ((ratio < 0.4) && (VesselState.altitudeTrue <= 1.1*Core.Landing.TargetAltitude)) ||
-                        (VesselState.altitudeTrue <= 5000) )
+                    // Near-pad only: do NOT bounce on altitudeTrue<=5000 alone.
+                    // Low-g Ap handoff can be under 5 km when _subOrbitalApA latched early;
+                    // that used to exit TargetSubOrbit->MoveToTarget and skip pad@TgtAlt shaping.
+                    if ((ratio < 0.4) && (VesselState.altitudeTrue <= 1.1 * Core.Landing.TargetAltitude))
                     {
-                        Debug.Log("exit TargetSubOrbit to MoveToTarget");
+                        Debug.Log("exit TargetSubOrbit to MoveToTarget near-pad ratio="
+                            + ratio.ToString("F2")
+                            + " alt=" + VesselState.altitudeTrue.ToString("F0")
+                            + " tgtAlt=" + Core.Landing.TargetAltitude.ToString("F0"));
                         Core.Thrust.ThrustOff();
                         return new MoveToTarget(Core);
                     }
