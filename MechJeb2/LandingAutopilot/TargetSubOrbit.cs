@@ -131,14 +131,23 @@ namespace MuMech
                         return new LandingBurn(Core);
                     }
 
+                    // Too low for ZEM-ZEV room: shape climb before terrain / CORRECT hop.
+                    // LandingBurnEntryAllowed already refused padDh > 600; keep PROGRADE until gate rises.
+                    Vector3d tgtPosGate = Core.Target.GetPositionTargetPosition();
+                    if (TryPadOverflightGate(tgtPosGate, out double padDhCorrect, out _)
+                        && padDhCorrect > DELTA_TARGET_ALT_THRESHOLD
+                        && !ApoapsisPastDestination(tgtPosGate))
+                    {
+                        step = Step.STATE_PROGRADE;
+                        throttleCount = 0;
+                    }
                     // Local rim/crash look: MoveToTarget collision hop already climbs out.
-                    if (localTerrainBlocked)
+                    else if (localTerrainBlocked)
                     {
                         return new MoveToTarget(Core);
                     }
-
                     // Far intercept clips terrain before the pad: raise the suborbit path.
-                    if (pathTerrainBlocked)
+                    else if (pathTerrainBlocked)
                     {
                         step = Step.STATE_PROGRADE;
                         throttleCount = 0;
@@ -547,17 +556,34 @@ namespace MuMech
                             rc = 100; // we only want horizontal thrust here
 
                             // Exit on pad-overflight height gate when pad still ahead.
-                            // If pad is already behind, do NOT treat ClosestPoint deltaHeight
-                            // match as OK (9/4 9:19: height +725 with pad still behind).
-                            // Keep dumping while ApoapsisPastDestination; intercept past allowed.
+                            // Band around TgtAlt (|padDh| <= 600): low side required so
+                            // LandingBurn ZEM-ZEV has room - do not exit while heightOverPad
+                            // < TgtAlt-600. Keep dumping while ApoapsisPastDestination;
+                            // intercept past allowed. Pad behind: never treat ClosestPoint match as OK.
                             bool heightOk;
+                            bool tooLow = false;
                             if (TryPadOverflightGate(targetPos, out double padDhExit, out _))
-                                heightOk = padDhExit >= -DELTA_TARGET_ALT_THRESHOLD;
+                            {
+                                // Band: TgtAlt-600 <= heightOverPad <= TgtAlt+600 (|padDh| <= 600).
+                                // Low side required so LandingBurn ZEM-ZEV has room.
+                                heightOk = Math.Abs(padDhExit) <= DELTA_TARGET_ALT_THRESHOLD;
+                                tooLow = padDhExit > DELTA_TARGET_ALT_THRESHOLD;
+                            }
                             else if (PadOverflightBehind(targetPos))
                                 heightOk = false;
                             else
-                                heightOk = deltaHeight >= -DELTA_TARGET_ALT_THRESHOLD;
-                            if (!pastDest && ((throttleCount >= 4) || heightOk))
+                            {
+                                heightOk = Math.Abs(deltaHeight) <= DELTA_TARGET_ALT_THRESHOLD;
+                                tooLow = deltaHeight > DELTA_TARGET_ALT_THRESHOLD;
+                            }
+                            if (!pastDest && tooLow)
+                            {
+                                // Below TgtAlt-600: climb/shape via PROGRADE (RETROGRADE won't raise).
+                                RetrogradeCount = throttleCount;
+                                throttleCount = 0;
+                                step = Step.STATE_PROGRADE;
+                            }
+                            else if (!pastDest && ((throttleCount >= 4) || heightOk))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;

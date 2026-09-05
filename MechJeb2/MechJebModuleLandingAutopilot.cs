@@ -1,4 +1,4 @@
-﻿extern alias JetBrainsAnnotations;
+extern alias JetBrainsAnnotations;
 using System;
 //using System.Collections.Specialized;
 //using Contracts.Agents.Mentalities;
@@ -1522,6 +1522,69 @@ namespace MuMech
         /// localTerrainBlocked: near-term PredictAvoid wants a hop (MoveToTarget).
         /// pathTerrainBlocked: intercept samples clip before the pad (stay, raise path).
         /// </summary>
+        // Match TargetSubOrbit DELTA_TARGET_ALT_THRESHOLD: low-side TgtAlt margin for ZEM-ZEV.
+        private const double LANDING_BURN_TGTALT_LOW_MARGIN_M = 600.0;
+
+        /// <summary>
+        /// Estimated coast height delta at pad overflight: padDh = TgtAlt - heightOverPad.
+        /// Same orbit-normal along-track approach as TargetSubOrbit.TryPadOverflightGate.
+        /// </summary>
+        public bool TryPadOverflightDeltaHeight(out double padDh, out double padDt)
+        {
+            padDh = double.NaN;
+            padDt = double.NaN;
+
+            Vector3d targetPosBody = Core.Target.GetPositionTargetPosition();
+            if (!IsFiniteVec(targetPosBody))
+                return false;
+
+            Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
+            Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
+            if (n.sqrMagnitude < 1e-6)
+                return false;
+            n.Normalize();
+
+            double r = pos.magnitude;
+            if (double.IsNaN(r) || r < 1.0)
+                return false;
+
+            double hOrbSpeed = Vector3d.Exclude(VesselState.up, VesselState.orbitalVelocity).magnitude;
+            if (hOrbSpeed < 10.0)
+                return false;
+
+            Vector3d a = Vector3d.Exclude(n, pos);
+            Vector3d b = Vector3d.Exclude(n, targetPosBody);
+            if (a.sqrMagnitude < 1e-12 || b.sqrMagnitude < 1e-12)
+                return false;
+            a.Normalize();
+            b.Normalize();
+            double sin = Vector3d.Dot(n, Vector3d.Cross(a, b));
+            double cos = Vector3d.Dot(a, b);
+            double angPad = Math.Atan2(sin, cos);
+            double alongTrack = angPad * r;
+            if (alongTrack <= 0.0)
+                return false;
+
+            double dt = alongTrack / hOrbSpeed;
+            if (dt < 5.0)
+                dt = 5.0;
+            if (dt > 600.0)
+                return false;
+
+            double nowUt = Planetarium.GetUniversalTime();
+            Vector3d atPad = Vessel.orbit.getPositionAtUT(nowUt + dt) - Vessel.mainBody.position;
+            if (!IsFiniteVec(atPad))
+                return false;
+
+            double heightOverPad = atPad.magnitude - targetPosBody.magnitude;
+            if (double.IsNaN(heightOverPad) || double.IsInfinity(heightOverPad))
+                return false;
+
+            padDh = TgtAlt - heightOverPad;
+            padDt = dt;
+            return !double.IsNaN(padDh) && !double.IsInfinity(padDh);
+        }
+
         public bool LandingBurnEntryAllowed(out bool localTerrainBlocked, out bool pathTerrainBlocked)
         {
             localTerrainBlocked = false;
@@ -1548,6 +1611,14 @@ namespace MuMech
                 {
                     return false;
                 }
+            }
+
+            // Low-side TgtAlt margin: do not enter while heightOverPad < TgtAlt-600 (padDh > 600).
+            // ZEM-ZEV needs room as LandingBurn reduces height over pad.
+            if (TryPadOverflightDeltaHeight(out double padDhEntry, out _))
+            {
+                if (padDhEntry > LANDING_BURN_TGTALT_LOW_MARGIN_M)
+                    return false;
             }
 
             Vector3d targetPos = Core.Target.GetPositionTargetPosition();
