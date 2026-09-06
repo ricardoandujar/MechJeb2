@@ -179,11 +179,40 @@ namespace MuMech
                 Vector3d hVel = Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
                 double toward = Vector3d.Dot(hVel, toTargetFlat.normalized);
                 double need = MIN_DOWNRANGE_H_TOWARD_TARGET;
-                double circ = Core.Landing.GetCircularOrbitSpeed(Math.Max(VesselState.altitudeTrue, 1000.0), MainBody);
-                if (!double.IsNaN(circ) && !double.IsInfinity(circ) && circ > need)
+                // Use circular speed at cruise/Ap *target* altitude (subOrbitalApA), not current
+                // altitude. Current multi-Mm Ap alt made the H gate wrong while waiting to tilt.
+                double cruiseAlt = Math.Max(1000.0, (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA);
+                double circ = Core.Landing.GetCircularOrbitSpeed(cruiseAlt, MainBody);
+                if (!double.IsNaN(circ) && !double.IsInfinity(circ) && circ > 0)
                     need = Math.Max(need, 0.25 * circ);
 
                 return toward >= need;
+            }
+
+            /// <summary>
+            /// Vacuum far hop: once ApA is at/above the suborbital cruise target, stop raising Ap.
+            /// Keep building H via tilt/horizontal only. Soft-dump V if Ap already way overshot
+            /// (never climb toward escape while waiting for downrange H).
+            /// </summary>
+            private void HoldApWhileBuildingDownrangeH(ref double desiredVerticalSpeed, double checkApa)
+            {
+                double apa = Math.Abs(VesselState.orbitApA);
+                double targetApa = (checkApa > 0) ? checkApa : subOrbitalApA;
+                if (targetApa > 0 && apa > 2.0 * targetApa)
+                {
+                    // Already hugely overshot: light V dump + horizontal tilt (soft dump also helps).
+                    desiredVerticalSpeed = -Math.Min(5.0, VesselState.speedVertical * 0.25);
+                    Debug.Log("setVerticalSpeed: vacuum Ap overshot, dump V while building H ApA="
+                        + VesselState.orbitApA.ToString("F0") + " target=" + targetApa.ToString("F0")
+                        + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1"));
+                }
+                else
+                {
+                    desiredVerticalSpeed = 0; // hold Ap; pitch/tilt builds H toward pad
+                    Debug.Log("setVerticalSpeed: vacuum Ap ready, hold climb build H toward pad ApA="
+                        + VesselState.orbitApA.ToString("F0") + " target=" + targetApa.ToString("F0")
+                        + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1"));
+                }
             }
 
             public MoveToTarget(MechJebCore core) : base(core)
@@ -1047,9 +1076,9 @@ namespace MuMech
                         {
                             if ((MainBody.atmosphere == false) && !HasMeaningfulDownrangeTowardTarget())
                             {
-                                // Keep climbing/tilting until H toward pad exists (avoid Ap over start).
-                                Debug.Log("setVerticalSpeed: vacuum Ap high but wait downrange H before coast H="
-                                    + VesselState.speedSurfaceHorizontal.ToString("F1"));
+                                // Ap high enough: stop raising Ap; tilt/horizontal builds H toward pad.
+                                double checkApaHold = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
+                                HoldApWhileBuildingDownrangeH(ref desiredVerticalSpeed, checkApaHold);
                             }
                             else
                             {
@@ -1077,10 +1106,8 @@ namespace MuMech
                             {
                                 if ((MainBody.atmosphere == false) && !HasMeaningfulDownrangeTowardTarget())
                                 {
-                                    // Ap height alone is not enough: keep climb/tilt to build H toward pad.
-                                    desiredVerticalSpeed = Math.Max(3.0, desiredVerticalSpeed);
-                                    Debug.Log("setVerticalSpeed: low-g Ap high but wait downrange H before coast H="
-                                        + VesselState.speedSurfaceHorizontal.ToString("F1"));
+                                    // Ap ready: hold/dump Ap energy; horizontal path builds H toward pad.
+                                    HoldApWhileBuildingDownrangeH(ref desiredVerticalSpeed, checkApaClimb);
                                 }
                                 else
                                 {
@@ -1183,7 +1210,11 @@ namespace MuMech
                         {
                             if (_subOrbitalApA == 0)
                             {
-                                _subOrbitalApA = VesselState.orbitApA;
+                                // Cap latch to ~2x baseline subOrbitalApA so a prior runaway Ap
+                                // cannot become the cruise/coast target (vacuum far hops).
+                                double apaLatch = Math.Abs(VesselState.orbitApA);
+                                double apaCap = Math.Max(subOrbitalApA, 2.0 * subOrbitalApA);
+                                _subOrbitalApA = Math.Min(apaLatch, apaCap);
                             }
                         }
                         else
