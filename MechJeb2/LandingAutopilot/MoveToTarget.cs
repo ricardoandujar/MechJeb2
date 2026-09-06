@@ -522,9 +522,25 @@ namespace MuMech
                         Debug.Log("collision hop: blend=" + hopBlend.ToString("F2"));
                 }
 
+                // Final settle (<=~200 mm): fade H/L accel authority so attitude stays near
+                // vertical. Blends with the setHorizontalSpeed settle (0.2..0.80 m). Tiny
+                // residual authority allows pad micro-adjustments without lean overcompensation.
+                const double finalSettleM = 0.2;
+                const double nearPadAggressiveM = 0.80;
+                double settleAuthority = 1.0;
+                if (hTargetError <= finalSettleM)
+                    settleAuthority = 0.05;
+                else if (hTargetError < nearPadAggressiveM)
+                    settleAuthority = 0.05 + 0.95 * (hTargetError - finalSettleM) / (nearPadAggressiveM - finalSettleM);
+                if (settleAuthority < 1.0)
+                {
+                    aH *= settleAuthority;
+                    aL *= settleAuthority;
+                }
+
                 // Smooth H/L in the landing frame, then rebuild world accel. Averaging the world
                 // horizontal vector (old path) smeared yesterday's H into today's L whenever hDir
-                // rotated â€” leftover axis fighting after the PID itself was decoupled.
+                // rotated ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â leftover axis fighting after the PID itself was decoupled.
                 // debug96 == 0 must not freeze aHAvg/aLAvg at 0 after a frame reset (that looked
                 // like dead H/L knobs). Treat a near-zero blend as "no smoothing".
                 double blend = Core.Landing.debug96;
@@ -624,7 +640,7 @@ namespace MuMech
 
                 // Keep the old verticalSign filter for logging / envelope, but do NOT replace
                 // vertical acceleration with it. In the axis-independent controller verticalSign
-                // was a direction mix weight (0.05..0.15), not m/s^2 â€” using it as accel would
+                // was a direction mix weight (0.05..0.15), not m/s^2 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â using it as accel would
                 // drop lift below hover. Tilt is constrained below via the debug93 cone.
                 double vCmd = Vector3d.Dot(accel, up);
                 verticalSign = System.Math.Min(vMaxAngle, System.Math.Max(vMinAngle, verticalSign * (1 - Core.Landing.debug95) + Core.Landing.debug95 * vError * Math.Abs(vCmd)));
@@ -632,10 +648,18 @@ namespace MuMech
                 Vector3d horizNow = accel - up * vCmd;
 
                 // Upright cone: limit horizontal accel to debug93 * |vertical|. Projection, not a
-                // second loop â€” this is the knob that stopped the Moon 45-degree tip-over.
+                // second loop ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â this is the knob that stopped the Moon 45-degree tip-over.
                 if ((upright == true) && (Math.Abs(vCmd) > 0.0))
                 {
                     double maxHoriz = Core.Landing.debug93 * Math.Abs(vCmd);
+                    // Tighten cone toward vertical in the same settle band as setHorizontalSpeed.
+                    // At <=200 mm maxHoriz -> 0 (no lean); blend out by 0.80 m.
+                    if (hTargetError < nearPadAggressiveM)
+                    {
+                        double coneScale = (hTargetError <= finalSettleM) ? 0.0
+                            : (hTargetError - finalSettleM) / (nearPadAggressiveM - finalSettleM);
+                        maxHoriz *= coneScale;
+                    }
                     if (horizNow.magnitude > maxHoriz)
                     {
                         double hratio = (horizNow.magnitude > 1e-12) ? maxHoriz / horizNow.magnitude : 0;
@@ -663,7 +687,7 @@ namespace MuMech
                 // Old mixer zeroed H *throttle* when >50 deg off, but kept H in the attitude vector so
                 // the craft would still slew toward the target. Stripping H from accel here
                 // pointed attitude at +up forever after a vertical ZEM/ZEV handoff (forward ~ up,
-                // H command ~ 90 deg) â€” no steering. Drive() already cuts throttle beyond
+                // H command ~ 90 deg) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no steering. Drive() already cuts throttle beyond
                 // throttleAngle (30 deg).
 
                 // Rockets cannot pull. Allow a downward world component only for low-g pitch-over.
@@ -1124,12 +1148,26 @@ namespace MuMech
                         }
                     }
 
-                    // When the target is really close then perform then amplify the horizontal error to aggressively eliminate horizontal motion.
-                    if (hTargetError < 0.80)
+                    // Near-pad (<0.80 m): aggressive chase still useful down to ~200 mm, then
+                    // blend into final settle. Under ~200 mm the sqrt pad-chase desired H vel
+                    // overcompensates through the unified 3D PID + debug93 cone (lean angles
+                    // when H should already be ~0). Settle: no pad-chase velocity; only damp
+                    // residual horizontal surface speed. Blend so it does not cliff at 0.2 m.
+                    const double finalSettleM = 0.2;
+                    const double nearPadAggressiveM = 0.80;
+                    if (hTargetError < nearPadAggressiveM)
                     {
-                        desiredHorizontalVel = (Math.Sqrt((1 + Core.Landing.g) * hTargetError * maxHThrust / divisor) * 2.0 / 1.5) * courseCorrection.normalized;
+                        double hForSqrt = Math.Max(hTargetError, 1e-6);
+                        Vector3d aggressiveDesired = (Math.Sqrt((1 + Core.Landing.g) * hForSqrt * maxHThrust / divisor) * 2.0 / 1.5) * courseCorrection.normalized;
+                        Vector3d aggressiveHerror = 0.25 * aggressiveDesired - hSurfaceVelocity;
 
-                        herror = 0.25 * desiredHorizontalVel - hSurfaceVelocity;
+                        Vector3d settleDesired = Vector3d.zero;
+                        Vector3d settleHerror = -hSurfaceVelocity;
+
+                        double settleFactor = Math.Max(0.0, Math.Min(1.0,
+                            (nearPadAggressiveM - hTargetError) / (nearPadAggressiveM - finalSettleM)));
+                        desiredHorizontalVel = Vector3d.Lerp(aggressiveDesired, settleDesired, settleFactor);
+                        herror = Vector3d.Lerp(aggressiveHerror, settleHerror, settleFactor);
                     }
 
                     // Use the correction vector and a calculated max horizontal speed. Clamp the max to the orbital speed at the current altitude to avoid overshooting the target.
