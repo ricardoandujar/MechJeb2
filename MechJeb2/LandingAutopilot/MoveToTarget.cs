@@ -127,6 +127,8 @@ namespace MuMech
             // Vacuum far hop: do not arm TargetSubOrbital coast/warp until H toward pad
             // is established (avoids Ap over the launch site / frac~0).
             private const double MIN_DOWNRANGE_H_TOWARD_TARGET = 50.0; // m/s along-track toward pad
+            private const double DOWNRANGE_H_LOG_INTERVAL = 2.0; // seconds between wait/hold spam logs
+            private double _lastDownrangeHLogUT = double.NegativeInfinity;
             private const bool LOG_LANDING_TICK = false; // Unity Debug.Log on the physics thread freezes the mouse
             private const double HOP_STRIP_BOOST = 20; // m/s remaining V: full strip above this
             private const double HOP_REARM_RATIO = 1.5; // re-arm in-progress hop only if new dV is well above remaining and the armed peak
@@ -166,6 +168,28 @@ namespace MuMech
             /// Vacuum far hop: horizontal velocity toward the pad must exist before arming
             /// TargetSubOrbital suppressThrottle/warp. Pure vertical Ap leaves Ap over start.
             /// </summary>
+            /// <summary>
+            /// Design cruise Ap for vacuum far hops. Prefer latched _subOrbitalApA but never above
+            /// 2x baseline (a runaway latch must not become the coast/H-need target).
+            /// </summary>
+            private double CruiseApaTarget()
+            {
+                double baseline = Math.Max(1000.0, subOrbitalApA);
+                double cap = 2.0 * baseline;
+                if (_subOrbitalApA > 0)
+                    return Math.Min(_subOrbitalApA, cap);
+                return baseline;
+            }
+
+            private void LogDownrangeH(string msg)
+            {
+                double ut = VesselState.time;
+                if ((ut - _lastDownrangeHLogUT) < DOWNRANGE_H_LOG_INTERVAL)
+                    return;
+                _lastDownrangeHLogUT = ut;
+                Debug.Log(msg);
+            }
+
             private bool HasMeaningfulDownrangeTowardTarget()
             {
                 Vector3d targetPos = Core.Target.GetPositionTargetPosition();
@@ -179,9 +203,9 @@ namespace MuMech
                 Vector3d hVel = Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
                 double toward = Vector3d.Dot(hVel, toTargetFlat.normalized);
                 double need = MIN_DOWNRANGE_H_TOWARD_TARGET;
-                // Use circular speed at cruise/Ap *target* altitude (subOrbitalApA), not current
-                // altitude. Current multi-Mm Ap alt made the H gate wrong while waiting to tilt.
-                double cruiseAlt = Math.Max(1000.0, (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA);
+                // Always size H need from design cruise (baseline subOrbitalApA), not a runaway
+                // latched Ap. Midnight log: latched multi-Mm Ap inflated need so H=60 still waited.
+                double cruiseAlt = Math.Max(1000.0, subOrbitalApA);
                 double circ = Core.Landing.GetCircularOrbitSpeed(cruiseAlt, MainBody);
                 if (!double.IsNaN(circ) && !double.IsInfinity(circ) && circ > 0)
                     need = Math.Max(need, 0.25 * circ);
@@ -197,19 +221,19 @@ namespace MuMech
             private void HoldApWhileBuildingDownrangeH(ref double desiredVerticalSpeed, double checkApa)
             {
                 double apa = Math.Abs(VesselState.orbitApA);
-                double targetApa = (checkApa > 0) ? checkApa : subOrbitalApA;
+                double targetApa = (checkApa > 0) ? checkApa : CruiseApaTarget();
                 if (targetApa > 0 && apa > 2.0 * targetApa)
                 {
                     // Already hugely overshot: light V dump + horizontal tilt (soft dump also helps).
                     desiredVerticalSpeed = -Math.Min(5.0, VesselState.speedVertical * 0.25);
-                    Debug.Log("setVerticalSpeed: vacuum Ap overshot, dump V while building H ApA="
+                    LogDownrangeH("setVerticalSpeed: vacuum Ap overshot, dump V while building H ApA="
                         + VesselState.orbitApA.ToString("F0") + " target=" + targetApa.ToString("F0")
                         + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1"));
                 }
                 else
                 {
                     desiredVerticalSpeed = 0; // hold Ap; pitch/tilt builds H toward pad
-                    Debug.Log("setVerticalSpeed: vacuum Ap ready, hold climb build H toward pad ApA="
+                    LogDownrangeH("setVerticalSpeed: vacuum Ap ready, hold climb build H toward pad ApA="
                         + VesselState.orbitApA.ToString("F0") + " target=" + targetApa.ToString("F0")
                         + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1"));
                 }
@@ -1077,7 +1101,7 @@ namespace MuMech
                             if ((MainBody.atmosphere == false) && !HasMeaningfulDownrangeTowardTarget())
                             {
                                 // Ap high enough: stop raising Ap; tilt/horizontal builds H toward pad.
-                                double checkApaHold = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
+                                double checkApaHold = CruiseApaTarget();
                                 HoldApWhileBuildingDownrangeH(ref desiredVerticalSpeed, checkApaHold);
                             }
                             else
@@ -1101,7 +1125,7 @@ namespace MuMech
                             && (suppressThrottle == 0);
                         if (lowGSubOrbitalClimb)
                         {
-                            double checkApaClimb = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
+                            double checkApaClimb = CruiseApaTarget();
                             if ((Math.Abs(VesselState.orbitApA) >= checkApaClimb) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
                             {
                                 if ((MainBody.atmosphere == false) && !HasMeaningfulDownrangeTowardTarget())
@@ -1445,15 +1469,16 @@ namespace MuMech
                 // Once stopped a secondary burn will be performed to reach target
                 if (suppressThrottle == 0)
                 {
-                    double checkApa = (_subOrbitalApA > 0) ? _subOrbitalApA : subOrbitalApA;
+                    double checkApa = CruiseApaTarget();
                     if (Math.Abs(VesselState.orbitApA) >= checkApa)
                     {
                         // Vacuum: do not arm coast/warp on ApA height alone - need H toward pad.
                         if ((MainBody.atmosphere == false) && !HasMeaningfulDownrangeTowardTarget())
                         {
-                            Debug.Log("TargetSubOrbital: wait downrange H before coast/warp H="
+                            LogDownrangeH("TargetSubOrbital: wait downrange H before coast/warp H="
                                 + VesselState.speedSurfaceHorizontal.ToString("F1")
-                                + " ApA=" + VesselState.orbitApA.ToString("F0"));
+                                + " ApA=" + VesselState.orbitApA.ToString("F0")
+                                + " cruise=" + checkApa.ToString("F0"));
                         }
                         else if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
                         {
