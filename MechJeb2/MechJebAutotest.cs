@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Globalization;
 using System.IO;
@@ -12,7 +12,9 @@ namespace MuMech
     /// GameData/MechJeb2/autotest.cfg exists. Dev-branch only.
     ///
     /// Load path mirrors stock Resume Game:
-    /// MAINMENU (settle) → LoadGame → SPACECENTER (settle) → StartAndFocusVessel → Flight (ready + settle) → engage.
+    /// MAINMENU (settle) → LoadGame → SPACECENTER (settle) →
+    /// re-LoadGame(named save) → StartAndFocusVessel → Flight → engage.
+    /// Re-load at SpaceCentre so we never inherit persistent.sfs from a prior hop.
     /// </summary>
     [KSPAddon(KSPAddon.Startup.MainMenu, false)]
     public class MechJebAutotestMenuLoader : MonoBehaviour
@@ -42,30 +44,22 @@ namespace MuMech
                 "[MechJebAutotest] MainMenu: settling {0:F1}s before stock load path", MenuSettleSeconds));
             yield return new WaitForSecondsRealtime(MenuSettleSeconds);
 
-            if (!MechJebAutotest.TryReadCfg(out string saveFolder, out string saveName, out float timeout,
-                    out bool hasTarget, out double lat, out double lon, out string body))
+            if (!MechJebAutotest.TryReadCfg(out MechJebAutotestConfigData cfg))
             {
                 Debug.LogError("[MechJebAutotest] Failed to parse autotest.cfg");
                 yield break;
             }
 
-            MechJebAutotestConfig.TimeoutSec = timeout;
-            MechJebAutotestConfig.HasTarget  = hasTarget;
-            MechJebAutotestConfig.TargetLat  = lat;
-            MechJebAutotestConfig.TargetLon  = lon;
-            MechJebAutotestConfig.TargetBody = body ?? "";
-            MechJebAutotestConfig.SaveFolder = saveFolder;
-            MechJebAutotestConfig.SaveName   = saveName;
-            MechJebAutotestConfig.Ready      = true;
+            MechJebAutotestConfig.Apply(cfg);
 
             Debug.Log(string.Format(CultureInfo.InvariantCulture,
                 "[MechJebAutotest] MainMenu: LoadGame('{0}', '{1}') → SPACECENTER",
-                saveName, saveFolder));
+                cfg.SaveName, cfg.SaveFolder));
 
             Game game;
             try
             {
-                game = GamePersistence.LoadGame(saveName, saveFolder, true, false);
+                game = GamePersistence.LoadGame(cfg.SaveName, cfg.SaveFolder, true, false);
             }
             catch (Exception e)
             {
@@ -77,15 +71,14 @@ namespace MuMech
             if (game == null || game.flightState == null)
             {
                 Debug.LogError("[MechJebAutotest] LoadGame returned null/empty flightState for " +
-                               saveFolder + "/" + saveName);
+                               cfg.SaveFolder + "/" + cfg.SaveName);
                 yield break;
             }
 
             HighLogic.CurrentGame = game;
-            HighLogic.SaveFolder  = saveFolder;
+            HighLogic.SaveFolder  = cfg.SaveFolder;
             game.startScene       = GameScenes.SPACECENTER;
             MechJebAutotestSession.PendingSpaceCenterToFlight = true;
-            MechJebAutotestSession.ActiveVesselIdx = game.flightState.activeVesselIdx;
 
             // Stock Resume path goes through the space center first; do not jump straight to FLIGHT.
             HighLogic.LoadScene(GameScenes.SPACECENTER);
@@ -121,17 +114,62 @@ namespace MuMech
             if (!MechJebAutotestSession.PendingSpaceCenterToFlight)
                 yield break;
 
-            Game game = HighLogic.CurrentGame;
-            if (game == null || game.flightState == null)
+            // Re-load the named quicksave here. Entering SPACECENTER can leave
+            // HighLogic.CurrentGame pointing at persistent.sfs from a prior hop.
+            string saveFolder = MechJebAutotestConfig.SaveFolder;
+            string saveName   = MechJebAutotestConfig.SaveName;
+            if (string.IsNullOrEmpty(saveName))
             {
-                Debug.LogError("[MechJebAutotest] SpaceCentre: CurrentGame/flightState missing - cannot start flight.");
+                Debug.LogError("[MechJebAutotest] SpaceCentre: saveName missing - cannot start flight.");
                 MechJebAutotestSession.PendingSpaceCenterToFlight = false;
                 yield break;
             }
 
-            int idx = MechJebAutotestSession.ActiveVesselIdx;
-            if (idx < 0)
-                idx = game.flightState.activeVesselIdx;
+            Game game;
+            try
+            {
+                game = GamePersistence.LoadGame(saveName, saveFolder, true, false);
+            }
+            catch (Exception e)
+            {
+                Debug.LogException(e);
+                Debug.LogError("[MechJebAutotest] SpaceCentre LoadGame exception: " + e.Message);
+                MechJebAutotestSession.PendingSpaceCenterToFlight = false;
+                yield break;
+            }
+
+            if (game == null || game.flightState == null)
+            {
+                Debug.LogError("[MechJebAutotest] SpaceCentre: LoadGame returned null/empty flightState.");
+                MechJebAutotestSession.PendingSpaceCenterToFlight = false;
+                yield break;
+            }
+
+            HighLogic.CurrentGame = game;
+            HighLogic.SaveFolder  = saveFolder;
+
+            int idx = MechJebAutotest.ResolveVesselIndex(game,
+                MechJebAutotestConfig.VesselName,
+                MechJebAutotestConfig.VesselIndex);
+            if (idx < 0 || idx >= game.flightState.protoVessels.Count)
+            {
+                Debug.LogError(string.Format(CultureInfo.InvariantCulture,
+                    "[MechJebAutotest] SpaceCentre: vessel index {0} out of range (count={1})",
+                    idx, game.flightState.protoVessels.Count));
+                MechJebAutotestSession.PendingSpaceCenterToFlight = false;
+                yield break;
+            }
+
+            ProtoVessel pv = game.flightState.protoVessels[idx];
+            Debug.Log(string.Format(CultureInfo.InvariantCulture,
+                "[MechJebAutotest] SpaceCentre: focusing idx={0} name='{1}' lat={2:F5} lon={3:F5} alt={4:F1} sit={5} (activeVesselIdx={6})",
+                idx,
+                pv != null ? pv.vesselName : "?",
+                pv != null ? pv.latitude : 0,
+                pv != null ? pv.longitude : 0,
+                pv != null ? pv.altitude : 0,
+                pv != null ? pv.situation.ToString() : "?",
+                game.flightState.activeVesselIdx));
 
             MechJebAutotestSession.PendingSpaceCenterToFlight = false;
             Debug.Log(string.Format(CultureInfo.InvariantCulture,
@@ -155,6 +193,8 @@ namespace MuMech
         private const string CfgRelativePath = "GameData/MechJeb2/autotest.cfg";
         private const string LogDirRelative  = "GameData/MechJeb2/autotest";
         private const float  FlightSettleSeconds = 5f;
+        private const double MinAirborneSeconds  = 10.0;
+        private const double MinTerrainAltForLiftoff = 50.0;
 
         private enum Phase
         {
@@ -176,7 +216,8 @@ namespace MuMech
         private string  _optBody = "";
         private string  _outcome;
         private bool    _subscribed;
-        private bool    _wasAirborne;
+        private bool    _liftoffQualified;
+        private double  _airborneStartUt = -1;
         private float   _readyRealtime = -1f;
 
         public static string CfgPath =>
@@ -184,35 +225,74 @@ namespace MuMech
 
         public static bool CfgExists() => File.Exists(CfgPath);
 
-        public static bool TryReadCfg(out string saveFolder, out string saveName, out float timeout,
-            out bool hasTarget, out double lat, out double lon, out string body)
+        internal static bool TryReadCfg(out MechJebAutotestConfigData cfg)
         {
-            saveFolder = "ksp-mechjeb";
-            saveName   = "";
-            timeout    = 1800f;
-            hasTarget  = false;
-            lat        = 0;
-            lon        = 0;
-            body       = "";
+            cfg = new MechJebAutotestConfigData();
 
             ConfigNode root = ConfigNode.Load(CfgPath);
             if (root == null)
                 return false;
 
             ConfigNode node = root.GetNode("MechJebAutotest") ?? root;
-            node.TryGetValue("saveFolder", ref saveFolder);
-            node.TryGetValue("saveName", ref saveName);
-            node.TryGetValue("timeoutSeconds", ref timeout);
+            node.TryGetValue("saveFolder", ref cfg.SaveFolder);
+            node.TryGetValue("saveName", ref cfg.SaveName);
+            node.TryGetValue("timeoutSeconds", ref cfg.TimeoutSec);
+            node.TryGetValue("vesselName", ref cfg.VesselName);
+
+            int vesselIndex = -1;
+            if (node.TryGetValue("vesselIndex", ref vesselIndex))
+                cfg.VesselIndex = vesselIndex;
 
             if (node.HasValue("targetLatitude") && node.HasValue("targetLongitude"))
             {
-                hasTarget = true;
-                node.TryGetValue("targetLatitude", ref lat);
-                node.TryGetValue("targetLongitude", ref lon);
-                node.TryGetValue("targetBody", ref body);
+                cfg.HasTarget = true;
+                node.TryGetValue("targetLatitude", ref cfg.TargetLat);
+                node.TryGetValue("targetLongitude", ref cfg.TargetLon);
+                node.TryGetValue("targetBody", ref cfg.TargetBody);
             }
 
-            return !string.IsNullOrEmpty(saveName);
+            return !string.IsNullOrEmpty(cfg.SaveName);
+        }
+
+        /// <summary>
+        /// Resolve which protoVessel to focus:
+        /// vesselIndex cfg override &gt; vesselName match &gt; flightState.activeVesselIdx.
+        /// </summary>
+        public static int ResolveVesselIndex(Game game, string vesselName, int vesselIndexOverride)
+        {
+            if (game == null || game.flightState == null || game.flightState.protoVessels == null)
+                return -1;
+
+            var list = game.flightState.protoVessels;
+
+            if (vesselIndexOverride >= 0)
+            {
+                Debug.Log(string.Format(CultureInfo.InvariantCulture,
+                    "[MechJebAutotest] vesselIndex override={0}", vesselIndexOverride));
+                return vesselIndexOverride;
+            }
+
+            if (!string.IsNullOrEmpty(vesselName))
+            {
+                for (int i = 0; i < list.Count; i++)
+                {
+                    ProtoVessel pv = list[i];
+                    if (pv == null || string.IsNullOrEmpty(pv.vesselName))
+                        continue;
+                    if (string.Equals(pv.vesselName, vesselName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Debug.Log(string.Format(CultureInfo.InvariantCulture,
+                            "[MechJebAutotest] vesselName '{0}' matched idx={1}", vesselName, i));
+                        return i;
+                    }
+                }
+
+                Debug.LogWarning(string.Format(CultureInfo.InvariantCulture,
+                    "[MechJebAutotest] vesselName '{0}' not found; falling back to activeVesselIdx",
+                    vesselName));
+            }
+
+            return game.flightState.activeVesselIdx;
         }
 
         private void Start()
@@ -226,21 +306,13 @@ namespace MuMech
             if (!MechJebAutotestConfig.Ready)
             {
                 // Flight started without going through our loader (user loaded save manually with cfg present).
-                if (!TryReadCfg(out string saveFolder, out string saveName, out float timeout,
-                        out bool hasTarget, out double lat, out double lon, out string body))
+                if (!TryReadCfg(out MechJebAutotestConfigData cfg))
                 {
                     enabled = false;
                     return;
                 }
 
-                MechJebAutotestConfig.TimeoutSec = timeout;
-                MechJebAutotestConfig.HasTarget  = hasTarget;
-                MechJebAutotestConfig.TargetLat  = lat;
-                MechJebAutotestConfig.TargetLon  = lon;
-                MechJebAutotestConfig.TargetBody = body ?? "";
-                MechJebAutotestConfig.SaveFolder = saveFolder;
-                MechJebAutotestConfig.SaveName   = saveName;
-                MechJebAutotestConfig.Ready      = true;
+                MechJebAutotestConfig.Apply(cfg);
             }
 
             _timeoutSec     = MechJebAutotestConfig.TimeoutSec;
@@ -254,7 +326,7 @@ namespace MuMech
             Directory.CreateDirectory(logDir);
             string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
             _csvPath = Path.Combine(logDir, stamp + ".csv");
-            _csv     = new StreamWriter(_csvPath, false, Encoding.UTF8);
+            _csv = new StreamWriter(_csvPath, false, Encoding.UTF8);
             _csv.WriteLine(
                 "time,autopilot_state,altitude,terrain_altitude,vertical_speed,horizontal_speed,distance_to_target,ApA,apoapsis_past_pad,frac,throttle,pitch");
             _csv.Flush();
@@ -309,8 +381,12 @@ namespace MuMech
             {
                 _readyRealtime = Time.realtimeSinceStartup;
                 Debug.Log(string.Format(CultureInfo.InvariantCulture,
-                    "[MechJebAutotest] FlightGlobals.ready + vessel loaded/unpacked; settling {0:F1}s",
-                    FlightSettleSeconds));
+                    "[MechJebAutotest] FlightGlobals.ready + vessel loaded/unpacked; settling {0:F1}s  name='{1}' lat={2:F5} lon={3:F5} alt={4:F1}",
+                    FlightSettleSeconds,
+                    vessel.vesselName,
+                    vessel.latitude,
+                    vessel.longitude,
+                    vessel.altitude));
             }
 
             if (Time.realtimeSinceStartup - _readyRealtime < FlightSettleSeconds)
@@ -344,9 +420,12 @@ namespace MuMech
                     core.Target.SetPositionTarget(body, _optLat, _optLon);
                     if (vessel.LandedOrSplashed)
                         core.Landing.hop = true;
+                    double dist = double.NaN;
+                    try { dist = core.Landing.getHDistanceToTarget(); }
+                    catch (Exception) { /* ignore */ }
                     Debug.Log(string.Format(CultureInfo.InvariantCulture,
-                        "[MechJebAutotest] Set position target {0} lat={1} lon={2}",
-                        body.bodyName, _optLat, _optLon));
+                        "[MechJebAutotest] Set position target {0} lat={1} lon={2}  vessel='{3}' dist={4:F1}m",
+                        body.bodyName, _optLat, _optLon, vessel.vesselName, dist));
                 }
                 else if (!core.Target.PositionTargetExists)
                 {
@@ -390,10 +469,9 @@ namespace MuMech
                     return;
                 }
 
-                if (!vessel.LandedOrSplashed)
-                    _wasAirborne = true;
+                UpdateLiftoffGate(vessel, core, ut);
 
-                if (_wasAirborne && vessel.LandedOrSplashed)
+                if (_liftoffQualified && vessel.LandedOrSplashed)
                 {
                     Finish("landed");
                     return;
@@ -410,6 +488,45 @@ namespace MuMech
                     LogSample(vessel, core, ut);
                     _nextLogUt = (float)ut + 1f;
                 }
+            }
+        }
+
+        private void UpdateLiftoffGate(Vessel vessel, MechJebCore core, double ut)
+        {
+            if (_liftoffQualified)
+                return;
+
+            double terrainAlt = 0;
+            try
+            {
+                if (core != null && core.VesselState != null)
+                    terrainAlt = core.VesselState.altitudeTrue;
+                else
+                    terrainAlt = vessel.altitude - vessel.terrainAltitude;
+            }
+            catch (Exception)
+            {
+                terrainAlt = 0;
+            }
+
+            bool airborne = !vessel.LandedOrSplashed;
+            if (airborne)
+            {
+                if (_airborneStartUt < 0)
+                    _airborneStartUt = ut;
+
+                if ((ut - _airborneStartUt) >= MinAirborneSeconds || terrainAlt >= MinTerrainAltForLiftoff)
+                {
+                    _liftoffQualified = true;
+                    Debug.Log(string.Format(CultureInfo.InvariantCulture,
+                        "[MechJebAutotest] Liftoff gate armed (airborne={0:F1}s terrainAlt={1:F1}m)",
+                        ut - _airborneStartUt, terrainAlt));
+                }
+            }
+            else
+            {
+                // Still on the pad / brief unpack flicker — keep waiting.
+                _airborneStartUt = -1;
             }
         }
 
@@ -525,7 +642,9 @@ namespace MuMech
         {
             if (string.IsNullOrEmpty(s))
                 return "";
-            if (s.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0)
+            // Flatten newlines/tabs so one sample stays on one CSV row.
+            s = s.Replace("\r\n", " ").Replace("\n", " ").Replace("\r", " ").Replace("\t", " ");
+            if (s.IndexOfAny(new[] { ',', '"' }) >= 0)
                 return "\"" + s.Replace("\"", "\"\"") + "\"";
             return s;
         }
@@ -540,7 +659,6 @@ namespace MuMech
         private static bool _menuLoadClaimed;
 
         public static bool PendingSpaceCenterToFlight;
-        public static int  ActiveVesselIdx = -1;
 
         public static bool TryClaimMenuLoad()
         {
@@ -549,6 +667,20 @@ namespace MuMech
             _menuLoadClaimed = true;
             return true;
         }
+    }
+
+    /// <summary>Mutable values parsed from autotest.cfg for one run.</summary>
+    internal sealed class MechJebAutotestConfigData
+    {
+        public string SaveFolder  = "ksp-mechjeb";
+        public string SaveName    = "";
+        public float  TimeoutSec  = 1800f;
+        public bool   HasTarget;
+        public double TargetLat;
+        public double TargetLon;
+        public string TargetBody  = "";
+        public string VesselName  = "";
+        public int    VesselIndex = -1;
     }
 
     internal static class MechJebAutotestConfig
@@ -561,5 +693,21 @@ namespace MuMech
         public static string TargetBody = "";
         public static string SaveFolder = "";
         public static string SaveName   = "";
+        public static string VesselName = "";
+        public static int    VesselIndex = -1;
+
+        public static void Apply(MechJebAutotestConfigData cfg)
+        {
+            TimeoutSec  = cfg.TimeoutSec;
+            HasTarget   = cfg.HasTarget;
+            TargetLat   = cfg.TargetLat;
+            TargetLon   = cfg.TargetLon;
+            TargetBody  = cfg.TargetBody ?? "";
+            SaveFolder  = cfg.SaveFolder ?? "";
+            SaveName    = cfg.SaveName ?? "";
+            VesselName  = cfg.VesselName ?? "";
+            VesselIndex = cfg.VesselIndex;
+            Ready       = true;
+        }
     }
 }
