@@ -1,0 +1,22 @@
+﻿// Sample autotest harness config.
+// To run: copy this file to the live KSP install as:
+//   <KSP>/GameData/MechJeb2/autotest.cfg
+// and stage the built MechJeb2.dll into GameData/MechJeb2/Plugins/.
+// Harness is idle unless that live autotest.cfg exists.
+MechJebAutotest
+{
+    // Save game folder under <KSP>/saves/
+    saveFolder = ksp-mechjeb
+    // Quicksave / .sfs name without extension.
+    // Chosen from saves matching both "vesta" and "crater" (case-insensitive).
+    // Other matches on this PC: vesta-crater-landed, vesta-landed-crater2,
+    // vesta-landed-crater3, vesta-landed-sourtherncrater.
+    saveName = vesta-landed-bigcrater
+    // Wall-clock timeout for the hop (seconds of universal time from engage).
+    timeoutSeconds = 1800
+    // Optional: set a position target if the save does not already have one.
+    // Leave commented out when the save's TARGET / MechJeb position target is set.
+    // targetBody = Vesta
+    // targetLatitude = 0
+    // targetLongitude = 0
+}
