@@ -20,6 +20,10 @@ namespace MuMech
             private const double TARGET_DISTANCE_THRESHOLD = 300; // Final Distance to target at which to switch to final landing burn.   
             private const double SHAPE_TO_PAD_GROUND_RANGE_M = 5000.0; // Few-km ground range required before LATERAL_FINE->CORRECT / pad-ready handoff
             private const double DELTA_TARGET_ALT_THRESHOLD = 600; // Threshold for switching between prograde and retrograde burn when close to target - if the target altitude is above the current altitude by this amount then we will do a prograde burn, if it's below then we will do a retrograde burn, if it's close then we will do a lateral burn to fine tune the approach to target before the final burn.
+            // Hysteresis / dwell: enter CORRECT at |padDh|<=600; reshape again only when
+            // |padDh| > 600+PAD_BAND_HYST_M so PROGRADE/RETROGRADE <-> CORRECT does not chatter.
+            private const double PAD_BAND_HYST_M = 200.0;
+            private const double MIN_STEP_DWELL_S = 2.5; // min time in PRO/RETRO/LATERAL_FINE/CORRECT before flipping
             // Ricardo: MoveToTarget owns initial coast-to-Ap handoff only. Once in TargetSubOrbit,
             // stay here and shape pad overflight to TgtAlt. Ap past => RETROGRADE dump in place (no handback).
             private const double AP_HALFWAY_TARGET = 0.50;
@@ -80,6 +84,7 @@ namespace MuMech
             private double _lastApPhaseLogUt = double.NegativeInfinity;
             private string _lastApPhaseLogged = "";
             private double minVerticalAngle;
+            private double _stepEnteredUt = double.NegativeInfinity;
 
             public TargetSubOrbit(MechJebCore core) : base(core)
             {
@@ -151,73 +156,80 @@ namespace MuMech
                 if (apGate != null)
                     return apGate;
 
-                // STATE_CORRECT: only hand to LandingBurn when descending into the pad
-                // with intercept still ahead and suborbit path clear of terrain. Do not
-                // teach LandingBurn to burn while ascending into / past the pad.
+                // STATE_CORRECT: idle only while pad overflight is inside TgtAlt +/-600.
+                // Outside the band keep shaping in TSO (RETROGRADE if too high, PROGRADE if
+                // too low). No MoveToTarget handback from here.
                 if (step == Step.STATE_CORRECT)
                 {
-                    Core.Thrust.ThrustOff();
-                    if ((ProgradeCount >= 4) || (RetrogradeCount >= 4) || (LateralFineCount >= 4))
-                    {
-                        return new MoveToTarget(Core);
-                    }
-
                     if (Core.Landing.LandingBurnEntryAllowed(out bool localTerrainBlocked, out bool pathTerrainBlocked))
                     {
                         return new LandingBurn(Core);
                     }
 
-                    // Too low for ZEM-ZEV room: shape climb before terrain / CORRECT hop.
-                    // Never PROGRADE / terrain bump while Ap past or frac > ~0.5.
                     Vector3d tgtPosGate = Core.Target.GetPositionTargetPosition();
                     bool gateNeedsPull = ApNeedsPullBack(tgtPosGate);
-                    if (TryPadOverflightGate(tgtPosGate, out double padDhCorrect, out _)
-                        && padDhCorrect > DELTA_TARGET_ALT_THRESHOLD
-                        && !gateNeedsPull && _apReachedForShape)
+                    bool havePad = TryPadOverflightGate(tgtPosGate, out double padDhCorrect, out _);
+                    // Hysteresis: once in CORRECT, only leave to reshape when |padDh| > 600+hyst.
+                    // LATERAL_FINE only enters CORRECT at |padDh|<=600, so the 600..800 deadband
+                    // stops PROGRADE/RETROGRADE <-> CORRECT chatter.
+                    double reshapeAbs = DELTA_TARGET_ALT_THRESHOLD + PAD_BAND_HYST_M;
+                    bool tooLow = havePad && padDhCorrect > reshapeAbs;
+                    bool tooHigh = havePad && padDhCorrect < -reshapeAbs;
+
+                    if (gateNeedsPull)
                     {
-                        step = Step.STATE_PROGRADE;
-                        throttleCount = 0;
+                        TryEnterStep(Step.STATE_RETROGRADE, force: true);
                     }
-                    // Local rim/crash look: MoveToTarget collision hop already climbs out.
-                    else if (localTerrainBlocked)
+                    else if (tooHigh && _apReachedForShape)
                     {
-                        return new MoveToTarget(Core);
+                        // Path crosses pad above TgtAlt+600: dump energy with RETROGRADE.
+                        TryEnterStep(Step.STATE_RETROGRADE);
                     }
-                    // Far intercept clips before pad: raise TgtAlt only after Ap, else re-sequence.
+                    else if (tooLow && _apReachedForShape)
+                    {
+                        // Path crosses pad below TgtAlt-600: raise with PROGRADE.
+                        TryEnterStep(Step.STATE_PROGRADE);
+                    }
                     else if (pathTerrainBlocked)
                     {
                         if (gateNeedsPull)
-                        {
-                            step = Step.STATE_RETROGRADE;
-                            throttleCount = 0;
-                        }
+                            TryEnterStep(Step.STATE_RETROGRADE, force: true);
                         else
                         {
-                            // Stay in TargetSubOrbit: bump TgtAlt and climb - no Ap/coast handback.
                             BumpTgtAltForTerrainClear();
-                            step = Step.STATE_PROGRADE;
-                            throttleCount = 0;
+                            TryEnterStep(Step.STATE_PROGRADE);
                         }
+                    }
+                    else if (localTerrainBlocked)
+                    {
+                        // Stay in TSO: bump cruise alt and climb — no MoveToTarget handback.
+                        BumpTgtAltForTerrainClear();
+                        TryEnterStep(Step.STATE_PROGRADE);
+                    }
+                    else if (PadOverflightBehind(tgtPosGate))
+                    {
+                        // Pad already behind: keep dumping if Ap past, else fine lateral. No handback.
+                        TryEnterStep(gateNeedsPull ? Step.STATE_RETROGRADE : Step.STATE_LATERAL_FINE, force: gateNeedsPull);
+                    }
+                    else if (havePad)
+                    {
+                        // In band or 600..800 hyst deadband: engines off, wait LB / reshape.
+                        Core.Thrust.ThrustOff();
+                        Status = "TargetSubOrbit CORRECT: pad dh=" + padDhCorrect.ToString("F0")
+                            + " waiting LandingBurn";
+                        return this;
                     }
                     else
                     {
-                        // Ap past / frac>~0.5: dump. Pad already behind: hop recover via MoveToTarget.
-                        // ClosestPoint/intercept past is allowed (do not force RETROGRADE on it).
-                        Vector3d tgtPosCorrect = Core.Target.GetPositionTargetPosition();
-                        if (ApNeedsPullBack(tgtPosCorrect))
-                        {
-                            step = Step.STATE_RETROGRADE;
-                            throttleCount = 0;
-                        }
-                        else if (PadOverflightBehind(tgtPosCorrect))
-                        {
-                            return new MoveToTarget(Core);
-                        }
-                        else
-                        {
-                            step = Step.STATE_LATERAL;
-                            throttleCount = 0;
-                        }
+                        // Gate unavailable: keep shaping laterally, do not idle ThrustOff.
+                        TryEnterStep(Step.STATE_LATERAL);
+                    }
+
+                    // If TryEnterStep held us in CORRECT (dwell), idle safely.
+                    if (step == Step.STATE_CORRECT)
+                    {
+                        Core.Thrust.ThrustOff();
+                        return this;
                     }
                 }
 
@@ -232,7 +244,10 @@ namespace MuMech
                                          * Quaternion.Euler(0, 0, (float)Core.Landing.vesselAngle);
                     Core.Attitude.attitudeTo(targetRot, AttitudeReference.INERTIAL, this);
 
-                    // Disable thrust when not pointing to target attitude
+                    // Disable thrust when not pointing to target attitude.
+                    // Far from pad: still cut throttle for attitude safety, but do NOT
+                    // increment throttleCount — those counts were exiting PROGRADE/RETROGRADE
+                    // after a few swings and leaving engines off (19/1241 thrOn samples).
                     if ((Core.Attitude.attitudeAngleFromTarget() > throttleAngle))
                     {
                         Core.Thrust.RequestActiveThrottle(0);
@@ -240,8 +255,23 @@ namespace MuMech
                         if (throttleOn == true)
                         {
                             throttleOn = false;
-                            throttleCount++;
-                            Debug.Log("step:throttleCount-STOP:" + step+":" + throttleCount + "  angle:" + Core.Attitude.attitudeAngleFromTarget().ToString("F1"));
+                            double groundRangeGate = Core.Landing.getHDistanceToTarget();
+                            bool countTowardExit = groundRangeGate <= SHAPE_TO_PAD_GROUND_RANGE_M
+                                || step == Step.STATE_LATERAL_FINE
+                                || step == Step.STATE_CORRECT;
+                            if (countTowardExit)
+                            {
+                                throttleCount++;
+                                Debug.Log("step:throttleCount-STOP:" + step + ":" + throttleCount
+                                    + "  angle:" + Core.Attitude.attitudeAngleFromTarget().ToString("F1")
+                                    + "  range:" + groundRangeGate.ToString("F0"));
+                            }
+                            else
+                            {
+                                Debug.Log("step:throttle-attitude-hold:" + step
+                                    + "  angle:" + Core.Attitude.attitudeAngleFromTarget().ToString("F1")
+                                    + "  range:" + groundRangeGate.ToString("F0"));
+                            }
                         }
                     }
                     else if ( lastHorizontalThrust > 0)
@@ -666,6 +696,39 @@ namespace MuMech
             }
 
             /// <summary>
+            /// Change shaping step with a minimum dwell so PROGRADE/RETROGRADE/LATERAL_FINE/CORRECT
+            /// do not oscillate every tick. force=true bypasses dwell (Ap pull / emergencies).
+            /// </summary>
+            private void TryEnterStep(Step next, bool force = false)
+            {
+                if (step == next)
+                {
+                    return;
+                }
+
+                double now = Planetarium.GetUniversalTime();
+                bool dwellProtected =
+                    step == Step.STATE_PROGRADE
+                    || step == Step.STATE_RETROGRADE
+                    || step == Step.STATE_LATERAL_FINE
+                    || step == Step.STATE_CORRECT;
+                bool nextProtected =
+                    next == Step.STATE_PROGRADE
+                    || next == Step.STATE_RETROGRADE
+                    || next == Step.STATE_LATERAL_FINE
+                    || next == Step.STATE_CORRECT;
+                if (!force && dwellProtected && nextProtected
+                    && (now - _stepEnteredUt) < MIN_STEP_DWELL_S)
+                {
+                    return;
+                }
+
+                step = next;
+                throttleCount = 0;
+                _stepEnteredUt = now;
+            }
+
+            /// <summary>
             /// While shaping: bump TgtAlt so pad-overflight gate climbs over a ridge.
             /// Never bump while Ap pull/dump is active.
             /// </summary>
@@ -949,7 +1012,7 @@ namespace MuMech
                                 // Pad ahead but overflight gate unavailable: do NOT treat
                                 // ClosestPoint |deltaHeight| as OK - that point may be tens of
                                 // km past the pad while Ap is still past (20:18: dh -599 with
-                                // deltaDistance +45 km). Keep other exits (throttleCount>=4).
+                                // deltaDistance +45 km). Do not exit on throttleCount alone.
                                 heightOk = false;
                                 tooLow = false;
                             }
@@ -991,7 +1054,7 @@ namespace MuMech
                                 throttleCount = 0;
                                 step = Step.STATE_PROGRADE;
                             }
-                            else if (!_establishingAp && !_apPullLatch && ((throttleCount >= 4) || heightOk))
+                            else if (!_establishingAp && !_apPullLatch && heightOk)
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
@@ -1053,13 +1116,12 @@ namespace MuMech
                                 double groundRangeFine = Core.Landing.getHDistanceToTarget();
                                 bool padReadyFine = TryPadOverflightGate(targetPos, out double padDhFine, out _)
                                     && Math.Abs(padDhFine) <= DELTA_TARGET_ALT_THRESHOLD;
-                                bool closeEnough = groundRangeFine <= SHAPE_TO_PAD_GROUND_RANGE_M
-                                    || distanceToTarget < TARGET_DISTANCE_THRESHOLD;
-                                if (padReadyFine && closeEnough && ((throttleCount >= 4) || (distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero)))
+                                bool closeEnough = groundRangeFine <= SHAPE_TO_PAD_GROUND_RANGE_M;
+                                if (padReadyFine && closeEnough && ((throttleCount >= 4) || (herror == Vector3d.zero)))
                                 {
                                     LateralFineCount = throttleCount;
-                                    throttleCount = 0;
-                                    step = Step.STATE_CORRECT;
+                                    TryEnterStep(Step.STATE_CORRECT);
+                                    // throttleCount cleared inside TryEnterStep
                                 }
                             }
                             rc = 100; // we only want horizontal thrust here
