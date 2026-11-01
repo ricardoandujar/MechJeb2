@@ -24,6 +24,9 @@ namespace MuMech
             // |padDh| > 600+PAD_BAND_HYST_M so PROGRADE/RETROGRADE <-> CORRECT does not chatter.
             private const double PAD_BAND_HYST_M = 200.0;
             private const double MIN_STEP_DWELL_S = 2.5; // min time in PRO/RETRO/LATERAL_FINE/CORRECT before flipping
+            // Burn-completion attitude gate: wider far so shaping burns can start; tighter near pad.
+            private const double THROTTLE_ANGLE_FAR_DEG = 55.0;
+            private const double THROTTLE_ANGLE_NEAR_DEG = 18.0;
             // Ricardo: MoveToTarget owns initial coast-to-Ap handoff only. Once in TargetSubOrbit,
             // stay here and shape pad overflight to TgtAlt. Ap past => RETROGRADE dump in place (no handback).
             private const double AP_HALFWAY_TARGET = 0.50;
@@ -85,6 +88,8 @@ namespace MuMech
             private string _lastApPhaseLogged = "";
             private double minVerticalAngle;
             private double _stepEnteredUt = double.NegativeInfinity;
+            private double _lastTerrainGuardLogUt = double.NegativeInfinity;
+            private bool _terrainGuardRaising = false;
 
             public TargetSubOrbit(MechJebCore core) : base(core)
             {
@@ -155,6 +160,12 @@ namespace MuMech
                 AutopilotStep apGate = ApplyApOwnershipGate(tgtPosSeq);
                 if (apGate != null)
                     return apGate;
+
+                // Terrain guard every Drive: if coast/intercept clips terrain before the pad,
+                // raise the path in TSO (PROGRADE / bump TgtAlt). No MoveToTarget handback.
+                ApplyTerrainGuardRaise();
+                if (_terrainGuardRaising)
+                    Status = "TSO terrain guard: raising path (PROGRADE/+V)";
 
                 // STATE_CORRECT: idle only while pad overflight is inside TgtAlt +/-600.
                 // Outside the band keep shaping in TSO (RETROGRADE if too high, PROGRADE if
@@ -244,44 +255,53 @@ namespace MuMech
                                          * Quaternion.Euler(0, 0, (float)Core.Landing.vesselAngle);
                     Core.Attitude.attitudeTo(targetRot, AttitudeReference.INERTIAL, this);
 
-                    // Disable thrust when not pointing to target attitude.
-                    // Far from pad: still cut throttle for attitude safety, but do NOT
-                    // increment throttleCount — those counts were exiting PROGRADE/RETROGRADE
-                    // after a few swings and leaving engines off (19/1241 thrOn samples).
-                    if ((Core.Attitude.attitudeAngleFromTarget() > throttleAngle))
+                    // Burn completion: hold attitude toward the commanded burn vector until
+                    // aligned, then burn. Do NOT treat attitude-wait as a completed burn or
+                    // advance throttleCount / change state — that starved shaping (thrOn ~9%).
+                    double groundRangeAtt = Core.Landing.getHDistanceToTarget();
+                    throttleAngle = (groundRangeAtt > SHAPE_TO_PAD_GROUND_RANGE_M)
+                        ? THROTTLE_ANGLE_FAR_DEG
+                        : THROTTLE_ANGLE_NEAR_DEG;
+                    bool burnCommanded = lastHorizontalThrust > 0.01f
+                        || Math.Abs(desiredVerticalSpeed) > 0.5;
+                    double attAngle = Core.Attitude.attitudeAngleFromTarget();
+                    if (attAngle > throttleAngle)
                     {
+                        // Not aligned yet: cut throttle for safety, keep commanded attitude,
+                        // wait. Burn is still in progress until the target is met.
                         Core.Thrust.RequestActiveThrottle(0);
                         velaccum = 0;
-                        if (throttleOn == true)
+                        if (throttleOn)
                         {
                             throttleOn = false;
-                            double groundRangeGate = Core.Landing.getHDistanceToTarget();
-                            bool countTowardExit = groundRangeGate <= SHAPE_TO_PAD_GROUND_RANGE_M
-                                || step == Step.STATE_LATERAL_FINE
-                                || step == Step.STATE_CORRECT;
-                            if (countTowardExit)
-                            {
-                                throttleCount++;
-                                Debug.Log("step:throttleCount-STOP:" + step + ":" + throttleCount
-                                    + "  angle:" + Core.Attitude.attitudeAngleFromTarget().ToString("F1")
-                                    + "  range:" + groundRangeGate.ToString("F0"));
-                            }
-                            else
-                            {
-                                Debug.Log("step:throttle-attitude-hold:" + step
-                                    + "  angle:" + Core.Attitude.attitudeAngleFromTarget().ToString("F1")
-                                    + "  range:" + groundRangeGate.ToString("F0"));
-                            }
+                            Debug.Log("step:throttle-attitude-wait:" + step
+                                + " angle:" + attAngle.ToString("F1")
+                                + " gate:" + throttleAngle.ToString("F0")
+                                + " range:" + groundRangeAtt.ToString("F0")
+                                + " burnCmd:" + burnCommanded
+                                + " thrCmd:" + lastHorizontalThrust.ToString("F2"));
                         }
+                        // Never increment throttleCount here — alignment wait is not completion.
                     }
-                    else if ( lastHorizontalThrust > 0)
+                    else if (burnCommanded)
                     {
-                        if (throttleOn == false)
+                        // Aligned and SetPath already requested throttle — mark burn active.
+                        if (!throttleOn)
                         {
                             throttleOn = true;
-                            Debug.Log("step:throttleCount-START:" + step + ":" + throttleCount + "  angle:" + Core.Attitude.attitudeAngleFromTarget().ToString("F1"));
+                            Debug.Log("step:throttleCount-START:" + step + ":" + throttleCount
+                                + "  angle:" + attAngle.ToString("F1")
+                                + "  gate:" + throttleAngle.ToString("F0"));
                         }
                         throttleOn = true;
+                    }
+                    else if (throttleOn)
+                    {
+                        // Aligned, no thrust commanded: this burn's target is met.
+                        throttleOn = false;
+                        throttleCount++;
+                        Debug.Log("step:throttleCount-STOP-complete:" + step + ":" + throttleCount
+                            + "  angle:" + attAngle.ToString("F1"));
                     }
 
                     return this;
@@ -726,6 +746,52 @@ namespace MuMech
                 step = next;
                 throttleCount = 0;
                 _stepEnteredUt = now;
+            }
+
+            // Coast/intercept terrain guard using existing SubOrbitPathClearToTarget / PredictAvoid.
+            // If the path clips before the pad: raise with PROGRADE (+V / bump TgtAlt).
+            // Keep Ap not past the pad (dump first). Never hand back to MoveToTarget.
+            private void ApplyTerrainGuardRaise()
+            {
+                if (!_apReachedForShape)
+                {
+                    _terrainGuardRaising = false;
+                    return;
+                }
+
+                // Existing helper: PredictAvoid + FarInterceptPathClear under the hood.
+                bool pathClear = Core.Landing.SubOrbitPathClearToTarget();
+                if (pathClear)
+                {
+                    _terrainGuardRaising = false;
+                    return;
+                }
+
+                Vector3d tgt = Core.Target.GetPositionTargetPosition();
+                double range = Core.Landing.getHDistanceToTarget();
+                double now = Planetarium.GetUniversalTime();
+                if (now - _lastTerrainGuardLogUt >= 1.0)
+                {
+                    _lastTerrainGuardLogUt = now;
+                    Debug.Log("TSO terrain guard FIRED path not clear range=" + range.ToString("F0")
+                        + " step=" + step
+                        + " ApNeedsPull=" + ApNeedsPullBack(tgt)
+                        + " altTrue=" + VesselState.altitudeTrue.ToString("F0")
+                        + " TgtAlt=" + Core.Landing.TgtAlt.ToString("F0"));
+                }
+                _terrainGuardRaising = true;
+
+                // Ap past pad: dump in place first so raised Ap does not land beyond target.
+                if (ApNeedsPullBack(tgt))
+                {
+                    TryEnterStep(Step.STATE_RETROGRADE, force: true);
+                    return;
+                }
+
+                // Raise path: bump cruise altitude and burn PROGRADE / +V.
+                // force: path-clear is safety; dwell must not block a terrain raise.
+                BumpTgtAltForTerrainClear();
+                TryEnterStep(Step.STATE_PROGRADE, force: true);
             }
 
             /// <summary>
