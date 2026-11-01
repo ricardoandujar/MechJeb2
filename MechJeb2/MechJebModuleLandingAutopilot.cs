@@ -1524,6 +1524,7 @@ namespace MuMech
         /// </summary>
         // Match TargetSubOrbit DELTA_TARGET_ALT_THRESHOLD: low-side TgtAlt margin for ZEM-ZEV.
         private const double LANDING_BURN_TGTALT_LOW_MARGIN_M = 600.0;
+        private const double LANDING_BURN_FAR_ENTRY_RANGE_M = 8000.0; // Far-hop LandingBurn entry ceiling (few km)
 
         /// <summary>
         /// Estimated coast height delta at pad overflight: padDh = TgtAlt - heightOverPad.
@@ -1613,18 +1614,25 @@ namespace MuMech
                 }
             }
 
-            // Low-side TgtAlt margin: do not enter while heightOverPad < TgtAlt-600 (padDh > 600).
-            // ZEM-ZEV needs room as LandingBurn reduces height over pad.
-            if (TryPadOverflightDeltaHeight(out double padDhEntry, out _))
-            {
-                if (padDhEntry > LANDING_BURN_TGTALT_LOW_MARGIN_M)
-                    return false;
-            }
-
+            // Pad-overflight band + range gate before ZEM-ZEV.
+            // Short hops within LANDING_BURN_PAD_FALSE_FIRE_M keep the close-range allow path.
+            // Far hops must be within a few km AND |padDh| <= 600; TryPadOverflightDeltaHeight
+            // failure (incl. dt>600 too far) fails closed.
             Vector3d targetPos = Core.Target.GetPositionTargetPosition();
             GetRangeVectorsToSurfaceTarget(Vessel, VesselState, targetPos, tUT, out Vector3d downrangeVec, out Vector3d crossrangeVec, out Vector3d horizontalVec);
-            if (horizontalVec.magnitude <= LANDING_BURN_PAD_FALSE_FIRE_M)
+            double rangeNow = horizontalVec.magnitude;
+
+            if (rangeNow <= LANDING_BURN_PAD_FALSE_FIRE_M)
                 return true;
+
+            if (rangeNow > LANDING_BURN_FAR_ENTRY_RANGE_M)
+                return false;
+
+            if (!TryPadOverflightDeltaHeight(out double padDhEntry, out _))
+                return false; // fail closed when overflight estimate unavailable (dt>600, etc.)
+
+            if (Math.Abs(padDhEntry) > LANDING_BURN_TGTALT_LOW_MARGIN_M)
+                return false;
 
             (double deltaV, bool willCrash) = PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE);
             if (willCrash || deltaV > 0)

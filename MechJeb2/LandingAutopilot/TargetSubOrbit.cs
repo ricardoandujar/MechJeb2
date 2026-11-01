@@ -18,6 +18,7 @@ namespace MuMech
             private const double LIMITED_MAX_THRUST_G_RATIO = 3.125; // this is multiplied with Mainbody g
             private const double TARGET_FAR_DISTANCE_THRESHOLD = 2.5*50000; // Distance to target at which to switch from prograde/retrograde burn to fine lateral control to target before final landing burn. This is used to avoid overshooting the target when doing a prograde or retrograde burn and allow for more precise targeting of the final landing burn.
             private const double TARGET_DISTANCE_THRESHOLD = 300; // Final Distance to target at which to switch to final landing burn.   
+            private const double SHAPE_TO_PAD_GROUND_RANGE_M = 5000.0; // Few-km ground range required before LATERAL_FINE->CORRECT / pad-ready handoff
             private const double DELTA_TARGET_ALT_THRESHOLD = 600; // Threshold for switching between prograde and retrograde burn when close to target - if the target altitude is above the current altitude by this amount then we will do a prograde burn, if it's below then we will do a retrograde burn, if it's close then we will do a lateral burn to fine tune the approach to target before the final burn.
             // Ricardo: MoveToTarget owns initial coast-to-Ap handoff only. Once in TargetSubOrbit,
             // stay here and shape pad overflight to TgtAlt. Ap past => RETROGRADE dump in place (no handback).
@@ -879,11 +880,25 @@ namespace MuMech
                             {
                                 // Keep PROGRADE until halfway band ├óΓé¼ΓÇ¥ do not LATERAL_FINE mid-place.
                             }
-                            else if (_apReachedForShape && ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD))))
+                            else if (_apReachedForShape)
                             {
-                                ProgradeCount = throttleCount;
-                                throttleCount = 0;
-                                step = Step.STATE_LATERAL_FINE;
+                                // Keep shaping with real burns until the path crosses the pad
+                                // within +/- DELTA_TARGET_ALT_THRESHOLD of TgtAlt. Do not leave
+                                // PROGRADE on PeA > 0.5*TgtAlt alone while still far away
+                                // (ClosestPoint miss / PeA high left the old path coasting).
+                                double groundRangePro = Core.Landing.getHDistanceToTarget();
+                                bool padInBand = TryPadOverflightGate(targetPos, out double padDhPro, out _)
+                                    && Math.Abs(padDhPro) <= DELTA_TARGET_ALT_THRESHOLD;
+                                bool nearForFine = groundRangePro < TARGET_FAR_DISTANCE_THRESHOLD;
+                                bool legacyNearHigh = (groundRangePro < TARGET_FAR_DISTANCE_THRESHOLD)
+                                    && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD);
+                                // PeA / throttleCount only count once pad overflight is in band and we are not far.
+                                if (padInBand && nearForFine && ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || legacyNearHigh))
+                                {
+                                    ProgradeCount = throttleCount;
+                                    throttleCount = 0;
+                                    step = Step.STATE_LATERAL_FINE;
+                                }
                             }
                             // Calculate horizontal correction angle using horizontal herror.
                             rc = Math.Max(0, Math.Min(_hCorrectionUpAngle, baseGain * H_CORRECTION_ANGLE_CONSTANT * herror.magnitude));
@@ -1030,11 +1045,22 @@ namespace MuMech
                                 }
                                 step = Step.STATE_RETROGRADE;
                             }
-                            else if ((throttleCount >= 4) || (distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero) )
+                            else
                             {
-                                LateralFineCount = throttleCount;
-                                throttleCount = 0;
-                                step = Step.STATE_CORRECT;
+                                // Require real ground range within a few km AND pad-overflight
+                                // height within +/-600 of TgtAlt. Do not advance on ClosestPoint
+                                // miss or throttleCount alone (that coasted with engines off).
+                                double groundRangeFine = Core.Landing.getHDistanceToTarget();
+                                bool padReadyFine = TryPadOverflightGate(targetPos, out double padDhFine, out _)
+                                    && Math.Abs(padDhFine) <= DELTA_TARGET_ALT_THRESHOLD;
+                                bool closeEnough = groundRangeFine <= SHAPE_TO_PAD_GROUND_RANGE_M
+                                    || distanceToTarget < TARGET_DISTANCE_THRESHOLD;
+                                if (padReadyFine && closeEnough && ((throttleCount >= 4) || (distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero)))
+                                {
+                                    LateralFineCount = throttleCount;
+                                    throttleCount = 0;
+                                    step = Step.STATE_CORRECT;
+                                }
                             }
                             rc = 100; // we only want horizontal thrust here
                         }
