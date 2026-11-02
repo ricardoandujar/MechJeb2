@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using MuMech.Landing;
 using UnityEngine;
 using static alglib;
@@ -38,6 +38,17 @@ namespace MuMech.LandingAutopilot
         private double lateralGain = 0.4; // Lateral gain correction
         private double prev_t_go = 0;     // Previous t_go used to force timep step changes for better guidance convergence (not strictly necessary)
         private double lastDesiredAcceleration = 0;
+
+        // Autotest / KSP.log 1 Hz guidance snapshot (no behavior change).
+        private double _lastGuidanceLogUt = double.NegativeInfinity;
+        public double AutotestTgo = double.NaN;
+        public double AutotestPadDh = double.NaN;
+        public bool AutotestBurnStarted = false;
+        public string AutotestBurnAxis = "";
+        public double AutotestZemMag = double.NaN;
+        public double AutotestZevMag = double.NaN;
+        public double AutotestDesiredAccelMag = double.NaN;
+        public double AutotestThrottle = double.NaN;
 
         /// <summary>
         /// Constructor - receives MechJeb core reference.
@@ -375,6 +386,12 @@ namespace MuMech.LandingAutopilot
                     Debug.Log($"[burn] t_go={t_go:F1} alt={alt:F1} vel={Vessel.horizontalSrfSpeed:F1},{vy:F1} t={throttle:F2} {densityAtBurnStart:F3} ");
                     debugCounter = 2;
                 }
+
+                MaybeLogGuidanceTick(t_go, zem, zev_x + zev_y, desired_accel, downrangeVec, alt, vy, throttle);
+            }
+            else
+            {
+                MaybeLogGuidanceTick(t_go, zem, zev_x + zev_y, desired_accel, downrangeVec, alt, vy, 0f);
             }
 
             // Set attitude to point thrust along desired_accel
@@ -383,6 +400,67 @@ namespace MuMech.LandingAutopilot
             Core.Attitude.attitudeTo(targetRot, AttitudeReference.INERTIAL, this);
 
             return recover;
+        }
+
+        private void MaybeLogGuidanceTick(double t_go, Vector3d zem, Vector3d zev, Vector3d desiredAccel,
+            Vector3d downrangeVec, double alt, double vy, float throttle)
+        {
+            double now = Planetarium.GetUniversalTime();
+            double padDh = double.NaN;
+            bool havePad = Core.Landing.TryPadOverflightDeltaHeight(out padDh, out _);
+            string burnAxis = DescribeBurnAxis(desiredAccel, downrangeVec);
+
+            AutotestTgo = t_go;
+            AutotestPadDh = havePad ? padDh : double.NaN;
+            AutotestBurnStarted = shouldBurnStarted;
+            AutotestBurnAxis = burnAxis;
+            AutotestZemMag = zem.magnitude;
+            AutotestZevMag = zev.magnitude;
+            AutotestDesiredAccelMag = desiredAccel.magnitude;
+            AutotestThrottle = throttle;
+
+            if (now - _lastGuidanceLogUt < 1.0)
+                return;
+            _lastGuidanceLogUt = now;
+
+            double dist = double.NaN;
+            try { dist = Core.Landing.getHDistanceToTarget(); } catch { /* ignore */ }
+
+            Debug.Log("[LB-1Hz] burnStarted=" + shouldBurnStarted
+                + " t_go=" + t_go.ToString("F1")
+                + " padDh=" + (havePad ? padDh.ToString("F0") : "n/a")
+                + " dist=" + (double.IsNaN(dist) ? "n/a" : dist.ToString("F0"))
+                + " hSpd=" + VesselState.speedSurfaceHorizontal.ToString("F1")
+                + " vSpd=" + vy.ToString("F1")
+                + " alt=" + alt.ToString("F0")
+                + " ApA=" + VesselState.orbitApA.ToString("F0")
+                + " burn=" + burnAxis
+                + " zem=" + zem.magnitude.ToString("F0")
+                + " zev=" + zev.magnitude.ToString("F1")
+                + " aCmd=" + desiredAccel.magnitude.ToString("F2")
+                + " thr=" + throttle.ToString("F2")
+                + " TgtAlt=" + Core.Landing.TgtAlt.ToString("F0"));
+        }
+
+        private string DescribeBurnAxis(Vector3d desiredAccel, Vector3d downrange)
+        {
+            if (desiredAccel.sqrMagnitude < 1e-12) return "none";
+            Vector3d a = desiredAccel.normalized;
+            double upDot = Vector3d.Dot(a, Vessel.up);
+            Vector3d ah = Vector3d.Exclude(Vessel.up, a);
+            double drDot = 0;
+            if (downrange.sqrMagnitude > 1e-12 && ah.sqrMagnitude > 1e-12)
+                drDot = Vector3d.Dot(ah.normalized, downrange.normalized);
+            Vector3d vel = VesselState.surfaceVelocity;
+            double retroDot = 0;
+            if (vel.sqrMagnitude > 1e-6)
+                retroDot = Vector3d.Dot(a, -vel.normalized);
+            if (retroDot > 0.7) return "retrograde-brake";
+            if (drDot < -0.5) return "anti-downrange";
+            if (drDot > 0.5) return "downrange";
+            if (upDot > 0.7) return "radial-out";
+            if (upDot < -0.7) return "radial-in";
+            return "lateral-mix";
         }
     }
 }

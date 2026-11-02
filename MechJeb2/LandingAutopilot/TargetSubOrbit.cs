@@ -80,6 +80,19 @@ namespace MuMech
             private string _lastApPhaseLogged = "";
             private double minVerticalAngle;
 
+            // Autotest / KSP.log 1 Hz guidance snapshot (no behavior change).
+            private double _lastGuidanceLogUt = double.NegativeInfinity;
+            private Step _prevLoggedStep = Step.STATE_INIT;
+            private Vector3d _lastHerror = Vector3d.zero;
+            private Vector3d _lastDownrange = Vector3d.zero;
+            public string AutotestStepName = "";
+            public double AutotestPadDh = double.NaN;
+            public double AutotestPadDt = double.NaN;
+            public double AutotestApFrac = double.NaN;
+            public bool AutotestApPast = false;
+            public string AutotestBurnAxis = "";
+            public string AutotestHandoff = "";
+
             public TargetSubOrbit(MechJebCore core) : base(core)
             {
                 Core.Warp.MinimumWarp();
@@ -253,6 +266,7 @@ namespace MuMech
                         throttleOn = true;
                     }
 
+                    MaybeLogGuidanceTick(thrustDir);
                     return this;
                 }
             }
@@ -288,6 +302,8 @@ namespace MuMech
 
                 // Set the desired Horizontal Velocity to reach target. Error to subtract the vessels current horizontal velocity.
                 double hCorrectionAngle = setHorizontalSpeed(downrangeVec, crossrangeVec, closestPos, targetPos, ref surfaceVel, out Vector3d desiredHorizontalVel, out Vector3d herror);
+                _lastHerror = herror;
+                _lastDownrange = downrangeVec;
 
                 // Legacy COAST_AP: clear local step; stay in TargetSubOrbit and shape.
                 if (step == Step.STATE_COAST_AP)
@@ -758,6 +774,90 @@ namespace MuMech
                 }
                 LogApPhase("SHAPE", "frac=" + fracS + " step=" + step);
                 return null;
+            }
+
+            private void MaybeLogGuidanceTick(Vector3d thrustDir)
+            {
+                double now = Planetarium.GetUniversalTime();
+                Vector3d targetPos = Core.Target.GetPositionTargetPosition();
+                double padDh = double.NaN, padDt = double.NaN;
+                bool havePad = TryPadOverflightGate(targetPos, out padDh, out padDt);
+                double frac = double.NaN;
+                bool haveFrac = TryApAlongTrackFraction(targetPos, out frac, out _);
+                bool apPast = ApoapsisPastDestination(targetPos);
+                string burnAxis = DescribeBurnAxis(thrustDir, _lastHerror, _lastDownrange);
+
+                AutotestStepName = step.ToString();
+                AutotestPadDh = havePad ? padDh : double.NaN;
+                AutotestPadDt = havePad ? padDt : double.NaN;
+                AutotestApFrac = haveFrac ? frac : double.NaN;
+                AutotestApPast = apPast;
+                AutotestBurnAxis = burnAxis;
+
+                string handoff = "";
+                if (step != _prevLoggedStep)
+                {
+                    handoff = _prevLoggedStep + "->" + step;
+                    AutotestHandoff = handoff;
+                    Debug.Log("[TSO-handoff] " + handoff
+                        + " dist=" + distanceToTarget.ToString("F0")
+                        + " padDh=" + (havePad ? padDh.ToString("F0") : "n/a")
+                        + " frac=" + (haveFrac ? frac.ToString("F2") : "n/a")
+                        + " apPast=" + apPast);
+                    _prevLoggedStep = step;
+                }
+                else
+                {
+                    AutotestHandoff = "";
+                }
+
+                if (now - _lastGuidanceLogUt < 1.0)
+                    return;
+                _lastGuidanceLogUt = now;
+
+                double dist = double.NaN;
+                try { dist = Core.Landing.getHDistanceToTarget(); } catch { dist = distanceToTarget; }
+
+                Debug.Log("[TSO-1Hz] step=" + step
+                    + " padDh=" + (havePad ? padDh.ToString("F0") : "n/a")
+                    + " padDt=" + (havePad ? padDt.ToString("F1") : "n/a")
+                    + " dist=" + (double.IsNaN(dist) ? "n/a" : dist.ToString("F0"))
+                    + " hSpd=" + VesselState.speedSurfaceHorizontal.ToString("F1")
+                    + " vSpd=" + VesselState.speedVertical.ToString("F1")
+                    + " ApA=" + VesselState.orbitApA.ToString("F0")
+                    + " frac=" + (haveFrac ? frac.ToString("F2") : "n/a")
+                    + " apPast=" + apPast
+                    + " burn=" + burnAxis
+                    + " thr=" + lastHorizontalThrust.ToString("F2")
+                    + " TgtAlt=" + Core.Landing.TgtAlt.ToString("F0")
+                    + (string.IsNullOrEmpty(handoff) ? "" : (" handoff=" + handoff)));
+            }
+
+            private string DescribeBurnAxis(Vector3d thrustDir, Vector3d herror, Vector3d downrange)
+            {
+                if (step == Step.STATE_PROGRADE) return "prograde";
+                if (step == Step.STATE_RETROGRADE) return "retrograde";
+                if (step == Step.STATE_CORRECT) return "idle-correct";
+                if (step == Step.STATE_COAST_AP) return "coast-ap";
+                if (step == Step.STATE_LATERAL_FINE)
+                {
+                    double angN = Vector3d.Angle(VesselState.normalPlus, herror == Vector3d.zero ? VesselState.normalPlus : herror);
+                    return angN > 90 ? "lateral-normalMinus" : "lateral-normalPlus";
+                }
+                if (step == Step.STATE_LATERAL)
+                    return "lateral-crossrange";
+
+                Vector3d t = thrustDir.sqrMagnitude > 1e-12 ? thrustDir.normalized : Vector3d.zero;
+                if (t == Vector3d.zero) return "none";
+                double upDot = Vector3d.Dot(t, VesselState.up);
+                Vector3d th = Vector3d.Exclude(VesselState.up, t);
+                double drDot = 0;
+                if (downrange.sqrMagnitude > 1e-12 && th.sqrMagnitude > 1e-12)
+                    drDot = Vector3d.Dot(th.normalized, downrange.normalized);
+                if (Math.Abs(upDot) > 0.85) return upDot > 0 ? "radial-out" : "radial-in";
+                if (drDot > 0.5) return "prograde-ish";
+                if (drDot < -0.5) return "retrograde-ish";
+                return "lateral-ish";
             }
 
             public double setHorizontalSpeed(Vector3d downrangeVec, Vector3d crossrangeVec, Vector3d closestPos, Vector3d targetPos,

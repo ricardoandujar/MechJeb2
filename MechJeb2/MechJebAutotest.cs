@@ -4,6 +4,8 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using UnityEngine;
+using MuMech.Landing;
+using MuMech.LandingAutopilot;
 
 namespace MuMech
 {
@@ -211,6 +213,7 @@ namespace MuMech
         private double  _maxApa = double.NegativeInfinity;
         private string  _csvPath;
         private StreamWriter _csv;
+        private string  _prevStepName;
         private bool    _optionalTarget;
         private double  _optLat, _optLon;
         private string  _optBody = "";
@@ -328,7 +331,7 @@ namespace MuMech
             _csvPath = Path.Combine(logDir, stamp + ".csv");
             _csv = new StreamWriter(_csvPath, false, Encoding.UTF8);
             _csv.WriteLine(
-                "time,autopilot_state,altitude,terrain_altitude,vertical_speed,horizontal_speed,distance_to_target,ApA,apoapsis_past_pad,frac,throttle,pitch");
+                "time,autopilot_state,step,altitude,terrain_altitude,vertical_speed,horizontal_speed,distance_to_target,ApA,apoapsis_past_pad,frac,padDh,padDt,t_go,burn_axis,burn_started,zem,zev,a_cmd,handoff,throttle,pitch");
             _csv.Flush();
 
             GameEvents.onCrash.Add(OnCrash);
@@ -553,24 +556,88 @@ namespace MuMech
             }
 
             string state = "Off";
+            string stepName = "";
+            string apPast = "";
+            string frac = "";
+            string padDhS = "";
+            string padDtS = "";
+            string tGoS = "";
+            string burnAxis = "";
+            string burnStarted = "";
+            string zemS = "";
+            string zevS = "";
+            string aCmdS = "";
+            string handoff = "";
+
             if (core.Landing != null)
             {
                 if (core.Landing.CurrentStep != null)
                     state = core.Landing.CurrentStep.GetType().Name + ":" + (core.Landing.Status ?? "");
                 else if (core.Landing.Enabled)
                     state = "Enabled";
-            }
 
-            string apPast = "";
-            string frac   = "";
+                AutopilotStep cur = core.Landing.CurrentStep;
+                if (cur is TargetSubOrbit tsoStep)
+                {
+                    stepName = tsoStep.AutotestStepName ?? "";
+                    if (!double.IsNaN(tsoStep.AutotestPadDh))
+                        padDhS = tsoStep.AutotestPadDh.ToString("F1", CultureInfo.InvariantCulture);
+                    if (!double.IsNaN(tsoStep.AutotestPadDt))
+                        padDtS = tsoStep.AutotestPadDt.ToString("F1", CultureInfo.InvariantCulture);
+                    if (!double.IsNaN(tsoStep.AutotestApFrac))
+                        frac = tsoStep.AutotestApFrac.ToString("F3", CultureInfo.InvariantCulture);
+                    apPast = tsoStep.AutotestApPast ? "1" : "0";
+                    burnAxis = tsoStep.AutotestBurnAxis ?? "";
+                    handoff = tsoStep.AutotestHandoff ?? "";
+                }
+                else if (cur is LandingBurn lbStep)
+                {
+                    stepName = "LandingBurn";
+                    if (!double.IsNaN(lbStep.AutotestPadDh))
+                        padDhS = lbStep.AutotestPadDh.ToString("F1", CultureInfo.InvariantCulture);
+                    if (!double.IsNaN(lbStep.AutotestTgo))
+                        tGoS = lbStep.AutotestTgo.ToString("F2", CultureInfo.InvariantCulture);
+                    burnAxis = lbStep.AutotestBurnAxis ?? "";
+                    burnStarted = lbStep.AutotestBurnStarted ? "1" : "0";
+                    if (!double.IsNaN(lbStep.AutotestZemMag))
+                        zemS = lbStep.AutotestZemMag.ToString("F1", CultureInfo.InvariantCulture);
+                    if (!double.IsNaN(lbStep.AutotestZevMag))
+                        zevS = lbStep.AutotestZevMag.ToString("F1", CultureInfo.InvariantCulture);
+                    if (!double.IsNaN(lbStep.AutotestDesiredAccelMag))
+                        aCmdS = lbStep.AutotestDesiredAccelMag.ToString("F2", CultureInfo.InvariantCulture);
+                }
+                else if (cur != null)
+                {
+                    stepName = cur.GetType().Name;
+                }
+
+                if (string.IsNullOrEmpty(padDhS) && core.Landing.TryPadOverflightDeltaHeight(out double padDh, out double padDt))
+                {
+                    padDhS = padDh.ToString("F1", CultureInfo.InvariantCulture);
+                    padDtS = padDt.ToString("F1", CultureInfo.InvariantCulture);
+                }
+
+                string stepKey = cur != null ? cur.GetType().Name + ":" + stepName : "Off";
+                if (!string.IsNullOrEmpty(_prevStepName) && _prevStepName != stepKey)
+                {
+                    if (string.IsNullOrEmpty(handoff))
+                        handoff = _prevStepName + "->" + stepKey;
+                    Debug.Log("[Autotest-handoff] " + handoff
+                        + " t=" + (ut - _startUt).ToString("F1", CultureInfo.InvariantCulture)
+                        + " dist=" + dist.ToString("F0", CultureInfo.InvariantCulture)
+                        + " padDh=" + (string.IsNullOrEmpty(padDhS) ? "n/a" : padDhS));
+                }
+                _prevStepName = stepKey;
+            }
 
             float throttle = vessel.ctrlState != null ? vessel.ctrlState.mainThrottle : 0f;
             double pitch   = vs.vesselPitch;
 
             string line = string.Format(CultureInfo.InvariantCulture,
-                "{0:F3},{1},{2:F3},{3:F3},{4:F3},{5:F3},{6:F3},{7:F3},{8},{9},{10:F3},{11:F3}",
+                "{0:F3},{1},{2},{3:F3},{4:F3},{5:F3},{6:F3},{7:F3},{8:F3},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20:F3},{21:F3}",
                 ut - _startUt,
                 CsvEscape(state),
+                CsvEscape(stepName),
                 alt,
                 terrain,
                 vSpeed,
@@ -579,6 +646,15 @@ namespace MuMech
                 apa,
                 apPast,
                 frac,
+                padDhS,
+                padDtS,
+                tGoS,
+                CsvEscape(burnAxis),
+                burnStarted,
+                zemS,
+                zevS,
+                aCmdS,
+                CsvEscape(handoff),
                 throttle,
                 pitch);
 
