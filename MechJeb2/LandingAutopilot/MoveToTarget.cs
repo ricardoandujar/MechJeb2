@@ -866,7 +866,20 @@ namespace MuMech
                 if (accel.magnitude > maxA)
                     accel *= maxA / accel.magnitude;
 
-                velocityPID.AntiWindup(rawAccel, accel);
+velocityPID.AntiWindup(rawAccel, accel);
+
+                // 192439 re-boost: HoldAp desV=-25 then PID chased undershoot with thr~0.85
+                // pitch+89, pumping Ap 5->26 Mm. While vacuum Ap > 1.15x cruise, strip upward
+                // accel (terrain hop still uses collision path before this). Cap thr by g/a_max.
+                bool vacuumApOver = (MainBody.atmosphere == false)
+                    && ((VesselState.orbitApA < 0)
+                        || (Math.Abs(VesselState.orbitApA) > 1.15 * Math.Max(1000.0, CruiseApaTarget())));
+                if (vacuumApOver && !collisionHopActive && !hopArmed)
+                {
+                    double upDotAp = Vector3d.Dot(accel, up);
+                    if (upDotAp > 0)
+                        accel -= up * upDotAp;
+                }
 
                 desiredThrustVector = (accel.sqrMagnitude > 1e-12) ? accel : up;
 
@@ -874,6 +887,13 @@ namespace MuMech
                 Core.Thrust.TransKillH = false;
                 attitudeAngleFromThrust = Core.Attitude.attitudeAngleFromTarget();
                 float throttle = (float)(accel.magnitude / Math.Max(VesselState.maxThrustAccel, 1e-6));
+                if (vacuumApOver && !collisionHopActive)
+                {
+                    double thrCapAp = Math.Max(0.03, Math.Min(1.0,
+                        8.0 * Math.Max(0.05, Core.Landing.g) / Math.Max(1e-3, VesselState.limitedMaxThrustAccel)));
+                    if (throttle > thrCapAp)
+                        throttle = (float)thrCapAp;
+                }
                 Core.Thrust.RequestActiveThrottle(throttle);
 
                 Vector3d vPart = Vector3d.Dot(desiredThrustVector, up) * up;
@@ -1124,18 +1144,26 @@ namespace MuMech
                         desiredVerticalSpeed = Math.Min(vFrac * Core.Landing.GetCircularOrbitSpeed(VesselState.altitudeTrue, MainBody), Math.Max(3.0, (ratio - maxRatio) * (1 + hTargetError / ASCENT_H_DISTANCE_DIVISOR)));
                         // Once Ap is high enough AND (atmosphere OR vacuum downrange H ready),
                         // stop commanding climb so TargetSubOrbital can suppressThrottle + warp-to-Ap.
-                        if ((Math.Abs(VesselState.orbitApA - Vessel.terrainAltitude) > Math.Min(1.2 * hTargetError, subOrbitalApA)) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
+                        // 192439 root: HoldAp waited on altitudeTrue>2000 AGL while mountain
+                        // ASL/Ap already > cruise -> 14s vertical thr~0.85 lofted Ap to 4 Mm.
                         {
+                            double checkApaHold = CruiseApaTarget();
+                            bool apAlreadyAtCruise = (Math.Abs(VesselState.orbitApA) >= checkApaHold)
+                                || (VesselState.altitudeASL >= checkApaHold);
+                            bool apGate = (Math.Abs(VesselState.orbitApA - Vessel.terrainAltitude)
+                                > Math.Min(1.2 * hTargetError, subOrbitalApA))
+                                && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT);
                             if (MainBody.atmosphere == false)
                             {
-                                // Ap high enough: stop raising Ap until H is ready AND Ap is sane.
-                                double checkApaHold = CruiseApaTarget();
-                                if (!HasMeaningfulDownrangeTowardTarget() || !ApaSaneForVacuumCoast(checkApaHold))
-                                    HoldApWhileBuildingDownrangeH(ref desiredVerticalSpeed, checkApaHold);
-                                else
-                                    desiredVerticalSpeed = 0;
+                                if (apAlreadyAtCruise || apGate)
+                                {
+                                    if (!HasMeaningfulDownrangeTowardTarget() || !ApaSaneForVacuumCoast(checkApaHold))
+                                        HoldApWhileBuildingDownrangeH(ref desiredVerticalSpeed, checkApaHold);
+                                    else
+                                        desiredVerticalSpeed = 0;
+                                }
                             }
-                            else
+                            else if (apGate)
                             {
                                 desiredVerticalSpeed = 0;
                             }
@@ -1157,7 +1185,12 @@ namespace MuMech
                         if (lowGSubOrbitalClimb)
                         {
                             double checkApaClimb = CruiseApaTarget();
-                            if ((Math.Abs(VesselState.orbitApA) >= checkApaClimb) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
+                            // Same mountain-start fix: ASL/Ap at cruise beats altitudeTrue gate.
+                            bool apClimbReady = (Math.Abs(VesselState.orbitApA) >= checkApaClimb)
+                                || (VesselState.altitudeASL >= checkApaClimb)
+                                || (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT
+                                    && Math.Abs(VesselState.orbitApA) >= checkApaClimb);
+                            if (apClimbReady)
                             {
                                 if ((MainBody.atmosphere == false) && (!HasMeaningfulDownrangeTowardTarget() || !ApaSaneForVacuumCoast(checkApaClimb)))
                                 {
@@ -1174,7 +1207,10 @@ namespace MuMech
                             }
                             else
                             {
-                                desiredVerticalSpeed = Math.Max(3.0, desiredVerticalSpeed);
+                                // Gravity-scale loft: cap climb desV (~12*g) so TWR cannot mint Mm Ap.
+                                double climbCap = Math.Max(3.0, Math.Min(40.0, 12.0 * Math.Max(Core.Landing.g, 0.05)));
+                                double climbCmd = (desiredVerticalSpeed > 0) ? desiredVerticalSpeed : climbCap;
+                                desiredVerticalSpeed = Math.Max(3.0, Math.Min(climbCap, climbCmd));
                                 // do NOT stopIncrease - TargetSubOrbital owns Ap handoff
                             }
                         }

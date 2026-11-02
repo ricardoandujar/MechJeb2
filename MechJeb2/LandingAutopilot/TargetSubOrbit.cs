@@ -621,28 +621,32 @@ namespace MuMech
                 if (!_apPullLatch)
                     return;
 
-                // Latched: clear only in positive halfway band AND Ap not past pad.
-                // Negative frac is signed-angle noise, not "Ap halfway" (04:13 CLEAR frac=-2.54).
+                // Latched: clear in positive halfway band OR when pad overflight is in
+                // TgtAlt band (|padDh|<=600). 192439: frac=-88 never cleared; RETRO kept
+                // thr=1 and reversed H past zero into the pad. Pad-band clear is gravity-
+                // aware (same DELTA_TARGET_ALT_THRESHOLD as exit), not an arbitrary gate.
                 bool pastDest = ApoapsisPastDestination(targetPosBody);
                 bool inClearBand = haveFrac
                     && frac >= AP_HALFWAY_LO
                     && frac <= AP_HALFWAY_TARGET;
-                if (!pastDest && inClearBand)
+                bool padBandOk = false;
+                if (TryPadOverflightGate(targetPosBody, out double padDhClear, out _))
+                    padBandOk = Math.Abs(padDhClear) <= DELTA_TARGET_ALT_THRESHOLD;
+                if (!pastDest && (inClearBand || padBandOk))
                 {
                     _apPullClearStreak++;
                     if (_apPullClearStreak >= AP_PULL_CLEAR_TICKS)
                     {
                         _apPullLatch = false;
                         _apPullClearStreak = 0;
-                        LogApPullLatch("CLEAR", frac, true);
+                        LogApPullLatch(padBandOk && !inClearBand ? "CLEAR_PADBAND" : "CLEAR", frac, haveFrac);
                     }
                 }
                 else
                 {
                     // Missing/negative/NaN frac, past dest, or still above target: keep latch.
                     _apPullClearStreak = 0;
-                }
-            }
+                }            }
 
             /// <summary>
             /// True while Ap along-track is past the pad or beyond ~halfway to pad,
@@ -1006,7 +1010,9 @@ namespace MuMech
                     case Step.STATE_RETROGRADE:
                         // Closest position is close target - do final retrograde burn to get it to pass close to target altitude
                         {
-                            forceHoriz = false; // use retrograde burn
+                            // 192439: forceHoriz=false used |herror|/10000 thr uncapped -> thr=1
+                            // reversed H 5->1235 m/s. Same g/a_max thrCap as LATERAL via forceHoriz.
+                            forceHoriz = true;
 
                             double hOrbitalVelocity = Vector3d.Exclude(VesselState.up, VesselState.orbitalVelocity).magnitude; // Get current horizontal orbital velocity
                             double desiredHorizontal = 0.9*hOrbitalVelocity;
@@ -1026,7 +1032,23 @@ namespace MuMech
                                 retroMag = Math.Max(retroMag, 2000.0);
                             else if (retroMag < 1.0)
                                 retroMag = 1.0;
-                            herror = -retroMag * downrangeVec.normalized;
+
+                            // Surface H toward pad; never reverse past zero relative to pad.
+                            Vector3d hVelSurf = Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
+                            double towardPad = Vector3d.Dot(hVelSurf, downrangeVec.normalized);
+                            double circH = Core.Landing.GetCircularOrbitSpeed(
+                                Math.Max(0.0, VesselState.altitudeASL), MainBody);
+                            double hNullEps = Math.Max(2.0, 0.02 * Math.Max(1.0, circH));
+                            bool hNearNeeded = towardPad <= hNullEps;
+                            if (towardPad <= 0)
+                            {
+                                // Already nulled or reversed past pad direction: kill anti-H burn.
+                                herror = Vector3d.zero;
+                            }
+                            else
+                            {
+                                herror = -retroMag * downrangeVec.normalized;
+                            }
                             rc = 100; // we only want horizontal thrust here
 
                             // Exit on pad-overflight height gate when pad still ahead.
@@ -1035,7 +1057,8 @@ namespace MuMech
                             // ClosestPoint/intercept past allowed. Pad behind: never OK.
                             bool heightOk;
                             bool tooLow = false;
-                            if (TryPadOverflightGate(targetPos, out double padDhExit, out _))
+                            double padDhExit = double.NaN;
+                            if (TryPadOverflightGate(targetPos, out padDhExit, out _))
                             {
                                 // Band: TgtAlt-600 <= heightOverPad <= TgtAlt+600 (|padDh| <= 600).
                                 heightOk = Math.Abs(padDhExit) <= DELTA_TARGET_ALT_THRESHOLD;
@@ -1053,6 +1076,33 @@ namespace MuMech
                                 tooLow = false;
                             }
 
+                            // Clean exit: padDh in band and H toward pad near needed/zero.
+                            // Clears wild-frac latch without waiting for frac in [0.35,0.5].
+                            if (heightOk && hNearNeeded && !ApoapsisPastDestination(targetPos))
+                            {
+                                if (_apPullLatch)
+                                {
+                                    _apPullLatch = false;
+                                    _apPullClearStreak = 0;
+                                    LogApPullLatch("CLEAR_H", apFracExit, !double.IsNaN(apFracExit));
+                                }
+                                RetrogradeCount = throttleCount;
+                                throttleCount = 0;
+                                _establishingAp = false;
+                                double nowH = Planetarium.GetUniversalTime();
+                                if (nowH - _lastRetroExitLogUt >= 1.0)
+                                {
+                                    _lastRetroExitLogUt = nowH;
+                                    Debug.Log("RETROGRADE exit -> "
+                                        + (tooLow ? "PROGRADE" : "LATERAL_FINE")
+                                        + " padDh=" + (double.IsNaN(padDhExit) ? "n/a" : padDhExit.ToString("F0"))
+                                        + " towardPad=" + towardPad.ToString("F1")
+                                        + " hNullEps=" + hNullEps.ToString("F1")
+                                        + " frac=" + (double.IsNaN(apFracExit) ? "n/a" : apFracExit.ToString("F2")));
+                                }
+                                step = tooLow ? Step.STATE_PROGRADE : Step.STATE_LATERAL_FINE;
+                                break;
+                            }
                             if (needsPull || _apPullLatch)
                             {
                                 // Stay RETROGRADE while Ap past / latch held. No shape climbs.
@@ -1240,6 +1290,14 @@ namespace MuMech
                     else
                     {
                         verticalThrust = horizontalThrust;
+                    }
+                    // Belt: if RETROGRADE ever uses forceHoriz=false, same g/a_max thrCap as LATERAL.
+                    if (step == Step.STATE_RETROGRADE)
+                    {
+                        double aMaxCapR = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
+                        double gCapR = Math.Max(0.05, Core.Landing.g);
+                        double thrCapR = Math.Max(0.03, Math.Min(1.0, 8.0 * gCapR / aMaxCapR));
+                        if (verticalThrust > thrCapR) verticalThrust = thrCapR;
                     }
                     lastHorizontalThrust = (float)verticalThrust;
                     double throttleDiv = Core.Landing.debug11/Core.Landing.g;
