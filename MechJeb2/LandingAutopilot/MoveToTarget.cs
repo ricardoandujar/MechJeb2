@@ -119,8 +119,6 @@ namespace MuMech
             // V boost / HOP_STRIP_BOOST so the strip drop does not slam aH.
             private bool collisionHopActive = false;
             private double hopBlend = 0;
-            // One-shot: move() saw vacuum Ap hard-runaway with terrain clear; allow pitch-over dump even if hopArmed residual.
-            private bool VacuumApDumpDespiteHop = false;
             // Set when FineTune reached but terrain/hop blocked TargetSubOrbit handoff.
             // Retried each Drive until CoastClearForSubOrbitHandOff, then hand off.
             private bool pendingSubOrbitHandOff = false;
@@ -262,22 +260,6 @@ namespace MuMech
                 if (targetApa <= 0)
                     return apa >= 0;
                 return apa <= 3.0 * targetApa;
-            }
-
-            /// <summary>
-            /// Vacuum far hop hard cap: Ap already hyperbolic or above 3x cruise.
-            /// Used to force an Ap dump / stop climb boost even during a collision hop
-            /// when terrain ahead is clear.
-            /// </summary>
-            private bool VacuumApHardRunaway()
-            {
-                if (MainBody.atmosphere)
-                    return false;
-                double apaSigned = VesselState.orbitApA;
-                double apa = Math.Abs(apaSigned);
-                double targetApa = CruiseApaTarget();
-                bool hyperbolic = (apaSigned < 0) || double.IsInfinity(apa) || (apa > 1e8);
-                return hyperbolic || (targetApa > 0 && apa > 3.0 * targetApa);
             }
 
             public MoveToTarget(MechJebCore core) : base(core)
@@ -851,13 +833,9 @@ namespace MuMech
                 bool hopArmed = (hopBlend > 0) || (vCollisionCounter > 0);
                 // Soft dump: fade pitch-over authority over DUMP_V_* instead of a hard
                 // on/off at desired+2 (that pulsed the vertical vector around +2 m/s).
-                // Hop armed still suppresses dump into terrain, except vacuum Ap hard-runaway
-                // with terrain clear (VacuumApDumpDespiteHop one-shot from move()).
-                bool dumpDespiteHop = VacuumApDumpDespiteHop;
-                VacuumApDumpDespiteHop = false;
-                bool hopBlocksDump = hopArmed && !dumpDespiteHop;
+                // Hop armed still suppresses dump into terrain.
                 double dumpBlend = 0.0;
-                if (!hopBlocksDump && (desiredVerticalSpeed >= 0))
+                if (!hopArmed && (desiredVerticalSpeed >= 0))
                 {
                     double excessV = VesselState.speedVertical - desiredVerticalSpeed;
                     if (excessV > DUMP_V_START_EXCESS)
@@ -871,7 +849,7 @@ namespace MuMech
                     && !HasMeaningfulDownrangeTowardTarget()
                     && ((VesselState.orbitApA < 0) || (Math.Abs(VesselState.orbitApA) >= CruiseApaTarget()));
                 bool allowPitchOver = (Core.Landing.g <= Core.Landing.LOW_GRAVITY) && (VesselState.altitudeTrue >= 30)
-                    && !hopBlocksDump
+                    && !hopArmed
                     && ((desiredVerticalSpeed < 0) || (dumpBlend > 0) || vacuumWaitingH);
                 double avFinal = Vector3d.Dot(accel, up);
                 if (avFinal < 0)
@@ -999,36 +977,13 @@ namespace MuMech
                         && newRequired > remainingBoost * HOP_REARM_RATIO
                         && newRequired > vCollisionDeltaV;
 
-                    bool hardRunaway = VacuumApHardRunaway();
-                    bool terrainClear = newRequired <= 0;
-
-                    if (hardRunaway && terrainClear)
-                    {
-                        // Ap already >3x cruise / hyperbolic and path clear: force dump,
-                        // do not add remainingBoost, allow pitch-over despite residual hopArmed.
-                        vCollisionCounter = 0;
-                        vCollisionDeltaV = 0;
-                        hopBlend = 0;
-                        collisionHopActive = false;
-                        HoldApWhileBuildingDownrangeH(ref desiredVerticalSpeed, CruiseApaTarget());
-                        vError = desiredVerticalSpeed - VesselState.speedVertical;
-                        VacuumApDumpDespiteHop = true;
-                        if (LOG_LANDING_TICK)
-                            Debug.Log("collisionApHardCap: dump Ap runaway, skip hop boost ApA=" + VesselState.orbitApA.ToString("F0"));
-                    }
-                    else if (newRequired > 0 && (hopInProgress == false || substantialUpgrade))
+                    if (newRequired > 0 && (hopInProgress == false || substantialUpgrade))
                     {
                         // Fresh hop or real upgrade: invalidate H/L I/D. Do not
                         // InvalidateHorizontal on a skipped re-fire.
                         velocityPID.InvalidateHorizontal();
                         vCollisionDeltaV = Math.Max(vCollisionDeltaV, newRequired);
                         desiredVerticalSpeed += vCollisionDeltaV;
-                        if (hardRunaway)
-                        {
-                            // Terrain still needs hop: keep it, but cap climb so Ap does not run further.
-                            double capBoost = Math.Max(newRequired, 20.0);
-                            desiredVerticalSpeed = Math.Min(desiredVerticalSpeed, VesselState.speedVertical + capBoost);
-                        }
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
                         // Hop is vertical-first. Zeroing only desiredHorizontalVel still
                         // leaves a large eH that the ASCENDING mixer will fight V with.
@@ -1054,8 +1009,6 @@ namespace MuMech
                         // next hop never fully recovers (Vesta crater pulse-down).
                         double vBoost = remainingBoost;
                         if (newRequired > vBoost) vBoost = newRequired;
-                        if (hardRunaway)
-                            vBoost = Math.Min(vBoost, Math.Max(20.0, newRequired > 0 ? newRequired : 5.0));
                         desiredVerticalSpeed += vBoost;
                         vError = desiredVerticalSpeed - VesselState.speedVertical;
                         // PID still wants to kill H (desired H = 0). Keep the hard H/L
@@ -1170,9 +1123,7 @@ namespace MuMech
                         desiredVerticalSpeed = Math.Min(vFrac * Core.Landing.GetCircularOrbitSpeed(VesselState.altitudeTrue, MainBody), Math.Max(3.0, (ratio - maxRatio) * (1 + hTargetError / ASCENT_H_DISTANCE_DIVISOR)));
                         // Once Ap is high enough AND (atmosphere OR vacuum downrange H ready),
                         // stop commanding climb so TargetSubOrbital can suppressThrottle + warp-to-Ap.
-                        // Vacuum: hold/dump as soon as Ap is high enough — no ASCENT_AOA_MIN_ALT gate (crater-floor climbs overshoot before 2 km AGL).
-                        bool altOkForApHold = (MainBody.atmosphere == false) || (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT);
-                        if ((Math.Abs(VesselState.orbitApA - Vessel.terrainAltitude) > Math.Min(1.2 * hTargetError, subOrbitalApA)) && altOkForApHold)
+                        if ((Math.Abs(VesselState.orbitApA - Vessel.terrainAltitude) > Math.Min(1.2 * hTargetError, subOrbitalApA)) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
                         {
                             if (MainBody.atmosphere == false)
                             {
@@ -1205,9 +1156,7 @@ namespace MuMech
                         if (lowGSubOrbitalClimb)
                         {
                             double checkApaClimb = CruiseApaTarget();
-                            // Vacuum: Ap >= cruise is enough to hold; atmosphere still needs ASCENT_AOA_MIN_ALT.
-                            bool altOkForClimbHold = (MainBody.atmosphere == false) || (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT);
-                            if ((Math.Abs(VesselState.orbitApA) >= checkApaClimb) && altOkForClimbHold)
+                            if ((Math.Abs(VesselState.orbitApA) >= checkApaClimb) && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT))
                             {
                                 if ((MainBody.atmosphere == false) && (!HasMeaningfulDownrangeTowardTarget() || !ApaSaneForVacuumCoast(checkApaClimb)))
                                 {
