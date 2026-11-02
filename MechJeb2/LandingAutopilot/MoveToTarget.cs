@@ -871,10 +871,19 @@ velocityPID.AntiWindup(rawAccel, accel);
                 // 192439 re-boost: HoldAp desV=-25 then PID chased undershoot with thr~0.85
                 // pitch+89, pumping Ap 5->26 Mm. While vacuum Ap > 1.15x cruise, strip upward
                 // accel (terrain hop still uses collision path before this). Cap thr by g/a_max.
-                bool vacuumApOver = (MainBody.atmosphere == false)
+                // Only during loft/ascent (increaseVertical or pre-FineTune). Near-pad
+                // suicide must keep full thr even if Ap still >1.15x cruise (195311 crash
+                // thr~0.07 into AGL with V=-84 after TSO->MTT).
+                bool loftPhaseAp = Core.Landing.increaseVertical
+                    || ((errStep > Ascend2Target.Disabled) && (errStep < Ascend2Target.FineTune));
+                bool vacuumApOver = loftPhaseAp && (MainBody.atmosphere == false)
                     && ((VesselState.orbitApA < 0)
                         || (Math.Abs(VesselState.orbitApA) > 1.15 * Math.Max(1000.0, CruiseApaTarget())));
-                if (vacuumApOver && !collisionHopActive && !hopArmed)
+                // 195311: departure-mountain hop set hopArmed/collisionHopActive and skipped
+                // this strip while HoldAp desV=-25 -> thr=0.85 pitch90 lofted Ap 33k->774k.
+                // Ap already >1.15x cruise: always strip upward / thrCap (hop must not mint Mm Ap).
+                // Genuine low-AGL hop still runs in move() only when Ap not already high.
+                if (vacuumApOver)
                 {
                     double upDotAp = Vector3d.Dot(accel, up);
                     if (upDotAp > 0)
@@ -887,7 +896,7 @@ velocityPID.AntiWindup(rawAccel, accel);
                 Core.Thrust.TransKillH = false;
                 attitudeAngleFromThrust = Core.Attitude.attitudeAngleFromTarget();
                 float throttle = (float)(accel.magnitude / Math.Max(VesselState.maxThrustAccel, 1e-6));
-                if (vacuumApOver && !collisionHopActive)
+                if (vacuumApOver)
                 {
                     double thrCapAp = Math.Max(0.03, Math.Min(1.0,
                         8.0 * Math.Max(0.05, Core.Landing.g) / Math.Max(1e-3, VesselState.limitedMaxThrustAccel)));
@@ -985,7 +994,17 @@ velocityPID.AntiWindup(rawAccel, accel);
                         (deltaV, willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, AVOID_MIN_ALTITUDE);
                     }
 
+                    // 195311: on mountain ASL~33km already >= cruise; PredictAvoid armed hop
+                    // and boosted desV after HoldAp dump -> vertical loft. Skip hop V-boost
+                    // when vacuum Ap/ASL already at design cruise (terrain avoid kept when
+                    // Ap not yet high).
+                    double cruiseHop = CruiseApaTarget();
+                    bool apAlreadyHighForHop = (MainBody.atmosphere == false)
+                        && ((Math.Abs(VesselState.orbitApA) > 1.15 * Math.Max(1000.0, cruiseHop))
+                            || (VesselState.altitudeASL >= cruiseHop));
                     double newRequired = (deltaV > 0) ? deltaV : ((willCrash == true) ? 500.0 : 0.0);
+                    if (apAlreadyHighForHop)
+                        newRequired = 0.0;
                     double remainingBoost = (vCollisionCounter > 0)
                         ? vCollisionDeltaV * ((double)vCollisionCounter / COLLISION_TAIL)
                         : 0.0;
@@ -1064,6 +1083,18 @@ velocityPID.AntiWindup(rawAccel, accel);
                     }
                 }
 
+                // Re-assert Ap dump after hop may have added +desV (195311). Loft phase only.
+                if (Core.Landing.increaseVertical
+                    && (MainBody.atmosphere == false)
+                    && ((VesselState.orbitApA < 0)
+                        || (Math.Abs(VesselState.orbitApA) > 1.15 * Math.Max(1000.0, CruiseApaTarget()))))
+                {
+                    if (desiredVerticalSpeed > 0)
+                        desiredVerticalSpeed = -Math.Max(5.0, Math.Min(25.0, 12.0 * Math.Max(Core.Landing.g, 0.05)));
+                    else if (desiredVerticalSpeed > -5.0)
+                        desiredVerticalSpeed = -Math.Max(5.0, Math.Min(25.0, 12.0 * Math.Max(Core.Landing.g, 0.05)));
+                    vError = desiredVerticalSpeed - VesselState.speedVertical;
+                }
                 // Set thrust vector based on vertical and horizontal inputs
                 setThrustVector(ref hTargetError, ref desiredThrustVector, ref desiredHorizontalVel, herror, hCorrectionAngle, ref desiredVerticalSpeed, vError);
 
