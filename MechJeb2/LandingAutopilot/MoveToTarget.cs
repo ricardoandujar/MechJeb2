@@ -229,7 +229,8 @@ namespace MuMech
                 double apa = Math.Abs(apaSigned);
                 double targetApa = (checkApa > 0) ? checkApa : CruiseApaTarget();
                 bool hyperbolic = (apaSigned < 0) || double.IsInfinity(apa) || (apa > 1e8);
-                if (hyperbolic || (targetApa > 0 && apa > 2.0 * targetApa))
+                // High-TWR/low-g: hard-dump once Ap > ~1.15x cruise (was 2x; soft-hold let Ap runaway).
+                if (hyperbolic || (targetApa > 0 && apa > 1.15 * targetApa))
                 {
                     double overshoot = hyperbolic ? 15.0 : Math.Min(40.0, apa / Math.Max(targetApa, 1.0));
                     desiredVerticalSpeed = -Math.Max(5.0, Math.Min(25.0, 0.35 * Math.Abs(VesselState.speedVertical) + overshoot));
@@ -1464,7 +1465,20 @@ namespace MuMech
                             double orig_hvel = desiredHorizontalVel.magnitude - startTiltHVel;
                             desiredHorizontalVel = desiredHorizontalVel.normalized * startTiltHVel;
 
-                            if (tiltDelta < 0.1) tiltDelta = Math.Max(500, Math.Abs(Core.Landing.TargetAltitude - VesselState.altitudeASL));
+                            if (tiltDelta < 0.1)
+                            {
+                                // Vacuum mountain start: |TgtAlt-altASL| can be tens of km when
+                                // already above the pad, so pitch-over never ramps (H stays ~1).
+                                // Cap the pitch window by g/a_max so high-TWR low-g tilts in ~1 km.
+                                double absDelta = Math.Abs(Core.Landing.TargetAltitude - VesselState.altitudeASL);
+                                double gLoc = Math.Max(Core.Landing.g, 0.05);
+                                double aMax = Math.Max(VesselState.limitedMaxThrustAccel, gLoc);
+                                double tiltCap = Math.Max(300.0, Math.Min(1500.0, 8.0 * aMax / gLoc));
+                                if (VesselState.altitudeASL > Core.Landing.TargetAltitude)
+                                    tiltDelta = Math.Max(300.0, Math.Min(absDelta, tiltCap));
+                                else
+                                    tiltDelta = Math.Max(500.0, absDelta);
+                            }
                             else if (VesselState.speedVertical > Core.Landing.g * 2 * 28)   // 28<=30<=20(too shallow)<=30
                             {
                                 if (startTiltAlt < 0.1) startTiltAlt = VesselState.altitudeASL;

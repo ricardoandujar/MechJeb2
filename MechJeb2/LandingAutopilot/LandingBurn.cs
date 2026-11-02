@@ -146,8 +146,13 @@ namespace MuMech.LandingAutopilot
                 double ay = a * sin_theta - g;                  // vertical (downward positive)
                 double ax = a * cos_theta;                      // horizontal
 
-                double h_vert  = Math.Max(3000, (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (Vy * Vy) / (2.0 * ay));
-                double d_horiz = Math.Max(3000, (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * ax));
+                // High-TWR: Vx^2/(2ax) is tiny so the old 3 km floor started the burn at ~3 km
+                // (baseline: coast from 57 km to ~3 km). Scale the floor by sqrt(a/g) so
+                // Vesta TWR~116 leads ~20+ km out; Kerbin TWR~2 stays near 3 km.
+                double twr = a / Math.Max(g, 0.05);
+                double distFloor = Math.Max(3000.0, Math.Min(80000.0, 3000.0 * Math.Sqrt(Math.Max(twr, 1.0) / 2.0)));
+                double h_vert  = Math.Max(distFloor, (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (Vy * Vy) / (2.0 * Math.Max(ay, 0.1)));
+                double d_horiz = Math.Max(distFloor, (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * Math.Max(ax, 0.1)));
 
                 if (sin_theta < 0.25)
                 {
@@ -278,13 +283,16 @@ namespace MuMech.LandingAutopilot
             // Downward velocity magnitude
             double v_down = Math.Max(0, -vy);
 
-            // Discriminant for vertical suicide-burn time
-            double disc = v_down * v_down + 2 * a_brake_net * slantRange;
+            // Discriminant for vertical suicide-burn time.
+            // Use altitude (not full slantRange): slantRange~57 km inflated t_go to ~100 s
+            // on Vesta so a_cmd stayed ~3 m/s2 while falling at -60 m/s (baseline thr~0.1).
+            double rangeForTgo = Math.Max(alt, 1.0);
+            double disc = v_down * v_down + 2 * a_brake_net * rangeForTgo;
 
-            // Combined t_go (max of vertical and horizontal)
+            // Combined t_go (vertical suicide based on altitude; ZevH<0 keeps range/vel form)
             // double t_go = Math.Max(1, (disc >= 0) ? (v_down + Math.Sqrt(disc)) / a_brake_net : 9999);
             // =IF(C3>0,IF($AC$5>0,(-E3 + Sqrt(M3)) / ($AB$2-G3),min(N2-$A$3/5,2*K3/(L3))),0)
-            double t_go = (Core.Landing.ZevH<0) ? 2 * slantRange / vel.magnitude : (v_down + Math.Sqrt(disc)) / a_brake_net;
+            double t_go = (Core.Landing.ZevH<0) ? 2 * Math.Max(slantRange, alt) / Math.Max(vel.magnitude, 0.1) : (v_down + Math.Sqrt(Math.Max(disc, 0))) / Math.Max(a_brake_net, 0.1);
             if (prev_t_go > 0 )
             {
                 t_go = Math.Max(1, Math.Min(prev_t_go - VesselState.deltaT / 5.0, t_go));
@@ -340,6 +348,20 @@ namespace MuMech.LandingAutopilot
 
                 // Terminal vertical velocity bias: add extra vertical braking if descending faster than target speed near ground
                 a_cmd += (-Math.Abs(Core.Landing.TouchdownSpeed) - vy) * Vessel.up * (6.0 / t_go);
+            }
+
+            // Near pad / low AGL with large downward speed: bias a_cmd to suicide-burn vertical
+            // before horizontal downrange/anti-downrange can bounce past the pad (baseline
+            // crossed pad then thr~0.05 downrange while vSpd stayed -60).
+            if (alt < 5000.0 && vy < -8.0)
+            {
+                double needAlt = (vy * vy) / (2.0 * Math.Max(a_brake_net, 0.1));
+                if (alt < needAlt * 2.0)
+                {
+                    double blend = Mathf.Clamp01((float)((needAlt * 2.0 - alt) / Math.Max(needAlt, 1.0)));
+                    Vector3d vertBrake = Vessel.up * VesselState.limitedMaxThrustAccel;
+                    a_cmd = a_cmd * (1.0 - blend) + vertBrake * blend;
+                }
             }
 
             // Early-phase gain reduction (less aggressive when far away)

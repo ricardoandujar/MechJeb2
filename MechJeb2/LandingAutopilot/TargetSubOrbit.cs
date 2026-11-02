@@ -551,7 +551,7 @@ namespace MuMech
             /// Instantaneous Ap-past / frac>~0.5 check (no latch). ClosestPoint/intercept
             /// past is allowed and does not set this.
             /// </summary>
-            private bool ApNeedsPullBackRaw(Vector3d targetPosBody, out double frac)
+                        private bool ApNeedsPullBackRaw(Vector3d targetPosBody, out double frac)
             {
                 frac = double.NaN;
                 if (ApoapsisPastDestination(targetPosBody))
@@ -560,7 +560,18 @@ namespace MuMech
                     return true;
                 }
                 if (TryApAlongTrackFraction(targetPosBody, out frac, out _))
-                    return frac > AP_HALFWAY_TARGET;
+                {
+                    if (frac > AP_HALFWAY_TARGET)
+                        return true;
+                }
+                // Pad overflight too high (padDh << 0): must RETROGRADE to lower Ap.
+                // Baseline 52263ef3 never entered RETROGRADE - LATERAL fell through to
+                // PROGRADE and negative frac never armed pull (frac>~0.5 only).
+                if (TryPadOverflightGate(targetPosBody, out double padDhPull, out _))
+                {
+                    if (padDhPull < -DELTA_TARGET_ALT_THRESHOLD)
+                        return true;
+                }
                 return false;
             }
 
@@ -916,6 +927,9 @@ namespace MuMech
                                 step = Step.STATE_RETROGRADE;
                             else if (ApNeedsPullBack(targetPos))
                                 step = Step.STATE_RETROGRADE; // Ap past / frac>~0.5: pull back
+                            else if (TryPadOverflightGate(targetPos, out double padDhLat, out _)
+                                     && padDhLat < -DELTA_TARGET_ALT_THRESHOLD)
+                                step = Step.STATE_RETROGRADE; // overflight too high
                             else if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
                                 step = Step.STATE_RETROGRADE;
                             else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < 2000))
@@ -1179,6 +1193,14 @@ namespace MuMech
                     {
                     }
                     vCorrectionAngle = 0;
+                    // Gravity-aware lateral thr cap: 1 s at a_max is ~11% of Vesta v_circ.
+                    // thr_cap = k*g/a_max (Vesta ~0.07 with k=8; Kerbin clamps to 1).
+                    {
+                        double aMaxCap = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
+                        double gCap = Math.Max(0.05, Core.Landing.g);
+                        double thrCap = Math.Max(0.03, Math.Min(1.0, 8.0 * gCap / aMaxCap));
+                        if (thrust > thrCap) thrust = thrCap;
+                    }
                     lastHorizontalThrust = (float)thrust;
                     double throttleDiv = Core.Landing.debug11/Core.Landing.g;
                     Core.Thrust.RequestActiveThrottle(lastHorizontalThrust/(float)throttleDiv);
