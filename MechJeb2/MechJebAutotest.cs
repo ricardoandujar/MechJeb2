@@ -197,6 +197,10 @@ namespace MuMech
         private const float  FlightSettleSeconds = 5f;
         private const double MinAirborneSeconds  = 10.0;
         private const double MinTerrainAltForLiftoff = 50.0;
+        private const float  TimeoutExtendStepSec = 300f;
+        private const float  TimeoutHardCapSec = 3600f;
+        private const double TimeoutImpactHorizonSec = 400.0;
+        private const double TimeoutClosePadM = 15000.0;
 
         private enum Phase
         {
@@ -208,6 +212,8 @@ namespace MuMech
 
         private Phase   _phase = Phase.WaitReady;
         private float   _timeoutSec = 1800f;
+        private float   _timeoutBaseSec = 1800f;
+        private int     _timeoutExtensions;
         private float   _startUt = -1f;
         private float   _nextLogUt;
         private double  _maxApa = double.NegativeInfinity;
@@ -319,6 +325,8 @@ namespace MuMech
             }
 
             _timeoutSec     = MechJebAutotestConfig.TimeoutSec;
+            _timeoutBaseSec = _timeoutSec;
+            _timeoutExtensions = 0;
             _optionalTarget = MechJebAutotestConfig.HasTarget;
             _optLat         = MechJebAutotestConfig.TargetLat;
             _optLon         = MechJebAutotestConfig.TargetLon;
@@ -482,6 +490,8 @@ namespace MuMech
 
                 if ((float)ut - _startUt >= _timeoutSec)
                 {
+                    if (TryExtendTimeout(vessel, core, ut))
+                        return;
                     Finish("timeout");
                     return;
                 }
@@ -492,6 +502,72 @@ namespace MuMech
                     _nextLogUt = (float)ut + 1f;
                 }
             }
+        }
+
+        /// <summary>
+        /// Near-pad adaptive timeout: when the base (or prior) budget expires, keep flying
+        /// if still airborne, descending, landing AP engaged, and impact/landing is soon
+        /// (AGL/|vSpd| or pad-proximate). Extend by TimeoutExtendStepSec up to TimeoutHardCapSec.
+        /// </summary>
+        private bool TryExtendTimeout(Vessel vessel, MechJebCore core, double ut)
+        {
+            if (_timeoutSec >= TimeoutHardCapSec)
+                return false;
+            if (vessel == null || vessel.LandedOrSplashed)
+                return false;
+            if (core == null || core.Landing == null || !core.Landing.Enabled)
+                return false;
+
+            double agl = 0;
+            double vSpd = vessel.verticalSpeed;
+            try
+            {
+                if (core.VesselState != null)
+                {
+                    agl = core.VesselState.altitudeTrue;
+                    vSpd = core.VesselState.speedVertical;
+                }
+                else
+                    agl = vessel.altitude - vessel.terrainAltitude;
+            }
+            catch (Exception)
+            {
+                agl = Math.Max(0, vessel.altitude - vessel.terrainAltitude);
+            }
+
+            // Must be descending toward the surface.
+            if (!(vSpd < -0.5))
+                return false;
+
+            double timeToImpact = agl / Math.Max(-vSpd, 0.1);
+            double dist = double.PositiveInfinity;
+            try { dist = core.Landing.getHDistanceToTarget(); }
+            catch (Exception) { dist = double.PositiveInfinity; }
+
+            bool impactSoon = timeToImpact <= TimeoutImpactHorizonSec;
+            bool closeToPad = dist <= TimeoutClosePadM && timeToImpact <= TimeoutImpactHorizonSec * 1.5;
+            if (!impactSoon && !closeToPad)
+                return false;
+
+            float prev = _timeoutSec;
+            float next = Math.Min(TimeoutHardCapSec, _timeoutSec + TimeoutExtendStepSec);
+            if (next <= prev)
+                return false;
+
+            _timeoutSec = next;
+            _timeoutExtensions++;
+            string msg = string.Format(CultureInfo.InvariantCulture,
+                "[MechJebAutotest] Timeout extended #{0}: {1:F0}s -> {2:F0}s (base={3:F0} cap={4:F0}) elapsed={5:F1}s agl={6:F1}m vSpd={7:F2} tImpact={8:F1}s padDist={9:F1}m",
+                _timeoutExtensions, prev, next, _timeoutBaseSec, TimeoutHardCapSec,
+                (float)ut - _startUt, agl, vSpd, timeToImpact,
+                double.IsInfinity(dist) ? -1.0 : dist);
+            Debug.Log(msg);
+            if (_csv != null)
+            {
+                try { _csv.WriteLine(msg); _csv.Flush(); }
+                catch (Exception) { /* ignore csv flush errors */ }
+            }
+            return true;
         }
 
         private void UpdateLiftoffGate(Vessel vessel, MechJebCore core, double ut)
