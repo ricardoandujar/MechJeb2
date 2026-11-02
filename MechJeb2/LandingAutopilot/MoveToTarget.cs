@@ -232,12 +232,27 @@ namespace MuMech
                 // High-TWR/low-g: hard-dump once Ap > ~1.15x cruise (was 2x; soft-hold let Ap runaway).
                 if (hyperbolic || (targetApa > 0 && apa > 1.15 * targetApa))
                 {
-                    double overshoot = hyperbolic ? 15.0 : Math.Min(40.0, apa / Math.Max(targetApa, 1.0));
-                    desiredVerticalSpeed = -Math.Max(5.0, Math.Min(25.0, 0.35 * Math.Abs(VesselState.speedVertical) + overshoot));
-                    LogDownrangeH("setVerticalSpeed: vacuum Ap overshot/hyperbolic, dump V while building H ApA="
-                        + apaSigned.ToString("F0") + " target=" + targetApa.ToString("F0")
-                        + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1")
-                        + " desV=" + desiredVerticalSpeed.ToString("F1"));
+                    // 203350: mountain ASL/Ap already > cruise at AGL~2; dumping V
+                    // into the pad with hop H-strip left thr=0 forever. Clear AGL
+                    // first (gravity-scaled loft), then dump while building H.
+                    if (VesselState.altitudeTrue < ASCENT_AOA_MIN_ALT)
+                    {
+                        double clearCap = Math.Max(3.0, Math.Min(12.0, 8.0 * Math.Max(Core.Landing.g, 0.05)));
+                        desiredVerticalSpeed = clearCap;
+                        LogDownrangeH("setVerticalSpeed: vacuum Ap high but AGL low, clear pad before dump ApA="
+                            + apaSigned.ToString("F0") + " target=" + targetApa.ToString("F0")
+                            + " AGL=" + VesselState.altitudeTrue.ToString("F1")
+                            + " desV=" + desiredVerticalSpeed.ToString("F1"));
+                    }
+                    else
+                    {
+                        double overshoot = hyperbolic ? 15.0 : Math.Min(40.0, apa / Math.Max(targetApa, 1.0));
+                        desiredVerticalSpeed = -Math.Max(5.0, Math.Min(25.0, 0.35 * Math.Abs(VesselState.speedVertical) + overshoot));
+                        LogDownrangeH("setVerticalSpeed: vacuum Ap overshot/hyperbolic, dump V while building H ApA="
+                            + apaSigned.ToString("F0") + " target=" + targetApa.ToString("F0")
+                            + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1")
+                            + " desV=" + desiredVerticalSpeed.ToString("F1"));
+                    }
                 }
                 else
                 {
@@ -1005,8 +1020,11 @@ velocityPID.AntiWindup(rawAccel, accel);
                     // when vacuum Ap/ASL already at design cruise (terrain avoid kept when
                     // Ap not yet high).
                     double cruiseHop = CruiseApaTarget();
+                    // 203350: do NOT require AGL>ASCENT_AOA_MIN_ALT. Mountain pad
+                    // has ASL/Ap already >= cruise at AGL~2; gating on AGL re-armed
+                    // hop H-zero under Ap-dump and stuck thr=0. Skip hop loft whenever
+                    // Ap/ASL already at design cruise (rim already below cruise ASL).
                     bool apAlreadyHighForHop = (MainBody.atmosphere == false)
-                        && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT)
                         && ((Math.Abs(VesselState.orbitApA) > 1.15 * Math.Max(1000.0, cruiseHop))
                             || (VesselState.altitudeASL >= cruiseHop));
                     double newRequired = (deltaV > 0) ? deltaV : ((willCrash == true) ? 500.0 : 0.0);
@@ -1091,8 +1109,11 @@ velocityPID.AntiWindup(rawAccel, accel);
                 }
 
                 // Re-assert Ap dump after hop may have added +desV (195311). Loft phase only.
+                // 203350: skip while AGL still below clear - dump-through-pad + hop
+                // H-strip produced thr=0 stuck on mountain.
                 if (Core.Landing.increaseVertical
                     && (MainBody.atmosphere == false)
+                    && (VesselState.altitudeTrue >= ASCENT_AOA_MIN_ALT)
                     && ((VesselState.orbitApA < 0)
                         || (Math.Abs(VesselState.orbitApA) > 1.15 * Math.Max(1000.0, CruiseApaTarget()))))
                 {
