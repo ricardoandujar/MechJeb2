@@ -237,7 +237,10 @@ namespace MuMech
                     // first (gravity-scaled loft), then dump while building H.
                     if (VesselState.altitudeTrue < ASCENT_AOA_MIN_ALT)
                     {
-                        double clearCap = Math.Max(3.0, Math.Min(12.0, 8.0 * Math.Max(Core.Landing.g, 0.05)));
+                        // Need V > g*2*28 for vacuum pitch-over latch; 8*g alone is ~2 on Vesta.
+                        double gClear = Math.Max(Core.Landing.g, 0.05);
+                        double tiltGate = gClear * 2.0 * 28.0 + 1.0;
+                        double clearCap = Math.Max(3.0, Math.Min(25.0, Math.Max(8.0 * gClear, tiltGate)));
                         desiredVerticalSpeed = clearCap;
                         LogDownrangeH("setVerticalSpeed: vacuum Ap high but AGL low, clear pad before dump ApA="
                             + apaSigned.ToString("F0") + " target=" + targetApa.ToString("F0")
@@ -1574,7 +1577,11 @@ velocityPID.AntiWindup(rawAccel, accel);
                                 else
                                     tiltDelta = Math.Max(500.0, absDelta);
                             }
-                            else if (VesselState.speedVertical > Core.Landing.g * 2 * 28)   // 28<=30<=20(too shallow)<=30
+                            else if ((VesselState.speedVertical > Core.Landing.g * 2 * 28)   // 28<=30<=20(too shallow)<=30
+                                || ((MainBody.atmosphere == false)
+                                    && (VesselState.altitudeTrue >= 100.0)
+                                    && ((Math.Abs(VesselState.orbitApA) >= CruiseApaTarget())
+                                        || (VesselState.altitudeASL >= CruiseApaTarget()))))
                             {
                                 if (startTiltAlt < 0.1) startTiltAlt = VesselState.altitudeASL;
                             }
