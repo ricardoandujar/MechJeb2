@@ -1295,9 +1295,10 @@ namespace MuMech
                     {
                         verticalThrust = horizontalThrust;
                     }
-                    // Belt: if RETROGRADE ever uses forceHoriz=false, same g/a_max thrCap
-                    // applied to the actual Request (see forceHoriz path / debug11 note).
-                    if (step == Step.STATE_RETROGRADE)
+                    // All forceHoriz=false paths (PROGRADE + RETRO belt): same g/a_max thrCap
+                    // on the actual Request. 211436: uncapped PROGRADE thr=1 for ~3s raised
+                    // H 26->103 and circularized (alt~Ap~43km); LB then had t_go~300s /
+                    // a_cmd~0.2 and timed out at 1.4km still 32km AGL. Cap matches LATERAL.
                     {
                         double aMaxCapR = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
                         double gCapR = Math.Max(0.05, Core.Landing.g);
@@ -1309,13 +1310,6 @@ namespace MuMech
                         float reqThrR = lastHorizontalThrust / (float)throttleDivR;
                         if (reqThrR > thrCapR) reqThrR = (float)thrCapR;
                         Core.Thrust.RequestActiveThrottle(reqThrR);
-                    }
-                    else
-                    {
-                        lastHorizontalThrust = (float)verticalThrust;
-                        double throttleDiv = Core.Landing.debug11 / Core.Landing.g;
-                        if (double.IsNaN(throttleDiv) || throttleDiv < 1e-6) throttleDiv = 1e-6;
-                        Core.Thrust.RequestActiveThrottle(lastHorizontalThrust / (float)throttleDiv); // set vertical thrust
                     }
                 }
 
