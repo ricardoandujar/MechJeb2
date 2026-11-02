@@ -1245,15 +1245,19 @@ namespace MuMech
                     vCorrectionAngle = 0;
                     // Gravity-aware lateral thr cap: 1 s at a_max is ~11% of Vesta v_circ.
                     // thr_cap = k*g/a_max (Vesta ~0.07 with k=8; Kerbin clamps to 1).
-                    {
-                        double aMaxCap = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
-                        double gCap = Math.Max(0.05, Core.Landing.g);
-                        double thrCap = Math.Max(0.03, Math.Min(1.0, 8.0 * gCap / aMaxCap));
-                        if (thrust > thrCap) thrust = thrCap;
-                    }
+                    // Cap the vessel Request, not only lastHorizontalThrust: debug11/g
+                    // (craft debug11=0.01 on Vesta => throttleDiv~0.04) undoes a pre-div
+                    // cap (204916: lastH=0.07 but CSV thr=1 wiped H 98->0 in ~3s).
+                    double aMaxCap = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
+                    double gCap = Math.Max(0.05, Core.Landing.g);
+                    double thrCap = Math.Max(0.03, Math.Min(1.0, 8.0 * gCap / aMaxCap));
+                    if (thrust > thrCap) thrust = thrCap;
                     lastHorizontalThrust = (float)thrust;
-                    double throttleDiv = Core.Landing.debug11/Core.Landing.g;
-                    Core.Thrust.RequestActiveThrottle(lastHorizontalThrust/(float)throttleDiv);
+                    double throttleDiv = Core.Landing.debug11 / Core.Landing.g;
+                    if (double.IsNaN(throttleDiv) || throttleDiv < 1e-6) throttleDiv = 1e-6;
+                    float reqThr = lastHorizontalThrust / (float)throttleDiv;
+                    if (reqThr > thrCap) reqThr = (float)thrCap;
+                    Core.Thrust.RequestActiveThrottle(reqThr);
                 }
 
                 // Vertical Control - we want to blend it based on the horizontal error and vertical error. When herror is large we use max thrust and primarily control
@@ -1291,17 +1295,28 @@ namespace MuMech
                     {
                         verticalThrust = horizontalThrust;
                     }
-                    // Belt: if RETROGRADE ever uses forceHoriz=false, same g/a_max thrCap as LATERAL.
+                    // Belt: if RETROGRADE ever uses forceHoriz=false, same g/a_max thrCap
+                    // applied to the actual Request (see forceHoriz path / debug11 note).
                     if (step == Step.STATE_RETROGRADE)
                     {
                         double aMaxCapR = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
                         double gCapR = Math.Max(0.05, Core.Landing.g);
                         double thrCapR = Math.Max(0.03, Math.Min(1.0, 8.0 * gCapR / aMaxCapR));
                         if (verticalThrust > thrCapR) verticalThrust = thrCapR;
+                        lastHorizontalThrust = (float)verticalThrust;
+                        double throttleDivR = Core.Landing.debug11 / Core.Landing.g;
+                        if (double.IsNaN(throttleDivR) || throttleDivR < 1e-6) throttleDivR = 1e-6;
+                        float reqThrR = lastHorizontalThrust / (float)throttleDivR;
+                        if (reqThrR > thrCapR) reqThrR = (float)thrCapR;
+                        Core.Thrust.RequestActiveThrottle(reqThrR);
                     }
-                    lastHorizontalThrust = (float)verticalThrust;
-                    double throttleDiv = Core.Landing.debug11/Core.Landing.g;
-                    Core.Thrust.RequestActiveThrottle(lastHorizontalThrust/(float)throttleDiv); // set vertical thrust
+                    else
+                    {
+                        lastHorizontalThrust = (float)verticalThrust;
+                        double throttleDiv = Core.Landing.debug11 / Core.Landing.g;
+                        if (double.IsNaN(throttleDiv) || throttleDiv < 1e-6) throttleDiv = 1e-6;
+                        Core.Thrust.RequestActiveThrottle(lastHorizontalThrust / (float)throttleDiv); // set vertical thrust
+                    }
                 }
 
                 return vCorrectionAngle;
