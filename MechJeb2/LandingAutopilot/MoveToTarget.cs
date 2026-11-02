@@ -885,9 +885,15 @@ velocityPID.AntiWindup(rawAccel, accel);
                 // Genuine low-AGL hop still runs in move() only when Ap not already high.
                 if (vacuumApOver)
                 {
+                    // 201838: full up-strip at AGL~2 left pitch~0 thrCap-only H slide on
+                    // mountain -> false landed at 22s. Allow ~3*g up until AGL clears
+                    // ASCENT_AOA_MIN_ALT so liftoff works; then strip excess loft.
                     double upDotAp = Vector3d.Dot(accel, up);
-                    if (upDotAp > 0)
-                        accel -= up * upDotAp;
+                    double upAllow = (VesselState.altitudeTrue < ASCENT_AOA_MIN_ALT)
+                        ? (3.0 * Math.Max(Core.Landing.g, 0.05))
+                        : 0.0;
+                    if (upDotAp > upAllow)
+                        accel -= up * (upDotAp - upAllow);
                 }
 
                 desiredThrustVector = (accel.sqrMagnitude > 1e-12) ? accel : up;
@@ -1000,6 +1006,7 @@ velocityPID.AntiWindup(rawAccel, accel);
                     // Ap not yet high).
                     double cruiseHop = CruiseApaTarget();
                     bool apAlreadyHighForHop = (MainBody.atmosphere == false)
+                        && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT)
                         && ((Math.Abs(VesselState.orbitApA) > 1.15 * Math.Max(1000.0, cruiseHop))
                             || (VesselState.altitudeASL >= cruiseHop));
                     double newRequired = (deltaV > 0) ? deltaV : ((willCrash == true) ? 500.0 : 0.0);
