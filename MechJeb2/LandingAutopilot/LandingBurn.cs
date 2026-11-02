@@ -283,19 +283,26 @@ namespace MuMech.LandingAutopilot
             // Downward velocity magnitude
             double v_down = Math.Max(0, -vy);
 
-            // Discriminant for vertical suicide-burn time.
-            // Use altitude (not full slantRange): slantRange~57 km inflated t_go to ~100 s
-            // on Vesta so a_cmd stayed ~3 m/s2 while falling at -60 m/s (baseline thr~0.1).
+            // t_go: altitude constant-accel stop at gravity-aware fraction of a_max, with
+            // horizontal stop time as a max() term. Dropped ZevH<0 -> 2R/|v| (214936/211436:
+            // t_go 300-700 s -> a_cmd~0.2-0.7, thr~0.02, never descended on Vesta).
+            double a_max = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
+            double gMag = Math.Max(g.magnitude, 0.05);
+            double twr = a_max / gMag;
+            // High TWR (Vesta ~116): f~0.4; low TWR (~2): f~0.7 - use a fraction of a_max.
+            double fBurn = 0.35 + 0.35 * Math.Min(1.0, 2.0 / Math.Sqrt(Math.Max(twr, 1.0)));
+            double a_used = Math.Max(fBurn * a_max, gMag + 0.05);
+            double a_brake_f = Math.Max(a_used - gMag, 0.1);
             double rangeForTgo = Math.Max(alt, 1.0);
-            double disc = v_down * v_down + 2 * a_brake_net * rangeForTgo;
-
-            // Combined t_go (vertical suicide based on altitude; ZevH<0 keeps range/vel form)
-            // double t_go = Math.Max(1, (disc >= 0) ? (v_down + Math.Sqrt(disc)) / a_brake_net : 9999);
-            // =IF(C3>0,IF($AC$5>0,(-E3 + Sqrt(M3)) / ($AB$2-G3),min(N2-$A$3/5,2*K3/(L3))),0)
-            double t_go = (Core.Landing.ZevH<0) ? 2 * Math.Max(slantRange, alt) / Math.Max(vel.magnitude, 0.1) : (v_down + Math.Sqrt(Math.Max(disc, 0))) / Math.Max(a_brake_net, 0.1);
-            if (prev_t_go > 0 )
+            double disc = v_down * v_down + 2.0 * a_brake_f * rangeForTgo;
+            double t_vert = (v_down + Math.Sqrt(Math.Max(disc, 0.0))) / a_brake_f;
+            double v_horiz = Vector3d.Exclude(Vessel.up, vel).magnitude;
+            double t_horiz = v_horiz / a_used; // downrange stop time
+            double t_go = Math.Max(1.0, Math.Max(t_vert, t_horiz));
+            // Mild low-pass only (was Min(prev-dt/5, t_go) which held multi-minute t_go).
+            if (prev_t_go > 0)
             {
-                t_go = Math.Max(1, Math.Min(prev_t_go - VesselState.deltaT / 5.0, t_go));
+                t_go = Math.Max(1.0, 0.75 * t_go + 0.25 * prev_t_go);
             }
             prev_t_go = t_go;
 
@@ -307,21 +314,20 @@ namespace MuMech.LandingAutopilot
             Vector3d zem_y = Vector3d.Exclude(zem_x, zem);
             Vector3d zev_y = -(vy*Vessel.up + VesselState.gravityForce * t_go); // = 0 - predicted_velocity
 
-            // If Vertical ZEV gain and vertical velocity is negative, only apply it when vertical velocity is below a specified vertical velocity threshold.
+            // Vertical ZEV: soft TWR-scaled fade (no hard zero outside 1500 m). Hard gate left
+            // ZevV=0 for the whole Vesta approach so the vertical channel never shaped descent.
             double ZevV = Core.Landing.ZevV;
             float downrange = (float)downrangeVec.magnitude;
-            if ( ZevV < 0 ) 
+            if (ZevV < 0)
             {
-                if (downrange <= DOWNRANGE_THRESHOLD_CONSTANT || minDownRange < DOWNRANGE_THRESHOLD_CONSTANT)
-                {
-                    minDownRange = Math.Min(minDownRange, downrange);
-                    ZevV *= Mathf.Clamp((DOWNRANGE_THRESHOLD_CONSTANT - minDownRange) / (DOWNRANGE_THRESHOLD_CONSTANT - 10.0f), 0, 1);
-                }
-                else
-                {
-                    ZevV = 0;
-                }
+                double stopRef = (v_horiz * v_horiz) / Math.Max(2.0 * a_used, 0.1);
+                float zevGate = (float)Math.Max(DOWNRANGE_THRESHOLD_CONSTANT,
+                    Math.Min(80000.0, 3.0 * stopRef + 1500.0));
+                minDownRange = Math.Min(minDownRange, downrange);
+                float rangeForFade = Math.Min(minDownRange, downrange);
+                ZevV *= Mathf.Clamp01((zevGate - rangeForFade) / Math.Max(zevGate - 10.0f, 1.0f));
             }
+
 
             // Commanded acceleration (ZEM/ZEV formula)
             Vector3d a_cmd = (Core.Landing.ZemH / (t_go * t_go)) * zem_x + (Core.Landing.ZevH / t_go) * zev_x +
@@ -364,10 +370,9 @@ namespace MuMech.LandingAutopilot
                 }
             }
 
-            // Early-phase gain reduction (less aggressive when far away)
-            double gain_scale = 0.4 + 0.6 * Mathf.Clamp((float)((60 - t_go) / 30), 0, 1);
-
-            // Apply gain scale
+            // Gain scale: do not floor at 0.4 for long t_go (that kept thr~0.02 on Vesta).
+            // With stopping-time t_go this stays near 1; still soft-caps only if t_go is large.
+            double gain_scale = Math.Min(1.0, Math.Max(0.7, 45.0 / Math.Max(t_go, 1.0)));
             a_cmd *= gain_scale;
 
             // Desired acceleration vector

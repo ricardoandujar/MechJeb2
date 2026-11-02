@@ -1623,6 +1623,22 @@ namespace MuMech
 
             Vector3d targetPos = Core.Target.GetPositionTargetPosition();
             GetRangeVectorsToSurfaceTarget(Vessel, VesselState, targetPos, tUT, out Vector3d downrangeVec, out Vector3d crossrangeVec, out Vector3d horizontalVec);
+
+            // Gravity/TWR-aware range gate: enter only within k*V^2/(2*f*a_max) + margin.
+            // Far near-circular handoffs (211436/214936 at 50-90 km) left ZEM-ZEV with no brake.
+            // Descending + Ap-at/before-pad already enforced above; keep shaping otherwise.
+            double aMaxEntry = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
+            double gEntry = Math.Max(VesselState.localg, 0.05);
+            double twrEntry = aMaxEntry / gEntry;
+            double fEntry = 0.35 + 0.35 * Math.Min(1.0, 2.0 / Math.Sqrt(Math.Max(twrEntry, 1.0)));
+            double vHEntry = Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity).magnitude;
+            double stopDist = (vHEntry * vHEntry) / Math.Max(2.0 * fEntry * aMaxEntry, 0.1);
+            double rangeMargin = Math.Max(3000.0, Math.Min(40000.0, 3000.0 * Math.Sqrt(Math.Max(twrEntry, 1.0) / 2.0)));
+            const double kStop = 2.5;
+            double rangeLimit = kStop * stopDist + rangeMargin;
+            if (horizontalVec.magnitude > LANDING_BURN_PAD_FALSE_FIRE_M && horizontalVec.magnitude > rangeLimit)
+                return false;
+
             if (horizontalVec.magnitude <= LANDING_BURN_PAD_FALSE_FIRE_M)
                 return true;
 
