@@ -545,6 +545,18 @@ namespace MuMech
                         private bool ApNeedsPullBackRaw(Vector3d targetPosBody, out double frac)
             {
                 frac = double.NaN;
+                // 101149: padDh already in band (-122) but frac noise 28.27 + apPast flicker
+                // armed DUMP RETRO and zeroed H at ~32 km. Once overflight is shaped,
+                // never pull on frac/ApPast noise — hand LB or coast; LB owns braking.
+                if (TryPadOverflightGate(targetPosBody, out double padDhShaped, out _))
+                {
+                    TryApAlongTrackFraction(targetPosBody, out frac, out _);
+                    if (Math.Abs(padDhShaped) <= DELTA_TARGET_ALT_THRESHOLD)
+                        return false;
+                    // Still too high: real dump needed.
+                    if (padDhShaped < -DELTA_TARGET_ALT_THRESHOLD)
+                        return true;
+                }
                 if (ApoapsisPastDestination(targetPosBody))
                 {
                     TryApAlongTrackFraction(targetPosBody, out frac, out _);
@@ -553,14 +565,6 @@ namespace MuMech
                 if (TryApAlongTrackFraction(targetPosBody, out frac, out _))
                 {
                     if (frac > AP_HALFWAY_TARGET)
-                        return true;
-                }
-                // Pad overflight too high (padDh << 0): must RETROGRADE to lower Ap.
-                // Baseline 52263ef3 never entered RETROGRADE - LATERAL fell through to
-                // PROGRADE and negative frac never armed pull (frac>~0.5 only).
-                if (TryPadOverflightGate(targetPosBody, out double padDhPull, out _))
-                {
-                    if (padDhPull < -DELTA_TARGET_ALT_THRESHOLD)
                         return true;
                 }
                 return false;
@@ -651,6 +655,18 @@ namespace MuMech
                 UpdateApPullLatch(targetPosBody);
                 frac = double.NaN;
                 bool haveFrac = TryApAlongTrackFraction(targetPosBody, out frac, out _);
+                // Gate already shaped: drop latch and do not dump (101149).
+                if (TryPadOverflightGate(targetPosBody, out double padDhDone, out _)
+                    && Math.Abs(padDhDone) <= DELTA_TARGET_ALT_THRESHOLD)
+                {
+                    if (_apPullLatch)
+                    {
+                        _apPullLatch = false;
+                        _apPullClearStreak = 0;
+                        LogApPullLatch("CLEAR_SHAPED", frac, haveFrac);
+                    }
+                    return false;
+                }
                 if (_apPullLatch)
                 {
                     if (!haveFrac)
@@ -797,8 +813,9 @@ namespace MuMech
             }
 
             /// <summary>
-            /// TSO done: pad overflight near TgtAlt, Ap not past / no pull, descending,
-            /// path terrain-clear. Hands LandingBurn directly (range gate skipped).
+            /// TSO done: pad overflight near TgtAlt, Ap not past / no pull, path clear.
+            /// Vertical crest (v~0 at Ap) is valid for a shaped ballistic path — LB owns
+            /// braking. Do not require arbitrary v<-0.5 (101149 blocked for minutes).
             /// </summary>
             private bool TryDirectLandingBurnHandoff(Vector3d targetPosBody, out string reason)
             {
@@ -811,11 +828,6 @@ namespace MuMech
                 if (ApNeedsPullBack(targetPosBody, out double frac))
                 {
                     reason = "needs-pull frac=" + (double.IsNaN(frac) ? "n/a" : frac.ToString("F2"));
-                    return false;
-                }
-                if (!(VesselState.speedVertical < -0.5))
-                {
-                    reason = "not-descending v=" + VesselState.speedVertical.ToString("F1");
                     return false;
                 }
                 if (PadOverflightBehind(targetPosBody))

@@ -1608,10 +1608,20 @@ namespace MuMech
             pathTerrainBlocked = false;
             detail = "";
 
-            // Do not teach LandingBurn to burn while ascending into the pad.
-            if (!(VesselState.speedVertical < 0))
+            // Do not teach LandingBurn to burn while climbing hard into the pad.
+            // From TSO after pad@TgtAlt shaped: allow near-crest (v~0 at Ap) — that is the
+            // ballistic overhead gate. Strict v<0 only when enforceRangeGate (non-TSO path).
+            if (enforceRangeGate)
             {
-                detail = "ascending";
+                if (!(VesselState.speedVertical < 0))
+                {
+                    detail = "ascending";
+                    return false;
+                }
+            }
+            else if (VesselState.speedVertical > 0.5)
+            {
+                detail = "ascending-hard v=" + VesselState.speedVertical.ToString("F1");
                 return false;
             }
 
