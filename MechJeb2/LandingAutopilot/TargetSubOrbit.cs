@@ -151,9 +151,9 @@ namespace MuMech
                 if (apGate != null)
                     return apGate;
 
-                // While shaping (not dumping): keep path terrain-clear by raising TgtAlt.
-                // Do NOT hand early to LandingBurn around a ridge, and do NOT hop to MoveToTarget.
-                if (_apReachedForShape && !ApNeedsPullBack(tgtPosSeq) && step != Step.STATE_RETROGRADE)
+                // Terrain clearance: local suicide always (incl. RETRO dump); TgtAlt bump only while shaping.
+                // MTT only on proven infeasibility inside ApplyShapingTerrainClearance — not after success.
+                if (_apReachedForShape || step == Step.STATE_RETROGRADE || _apPullLatch)
                 {
                     AutopilotStep terrainFix = ApplyShapingTerrainClearance(tgtPosSeq);
                     if (terrainFix != null)
@@ -714,8 +714,34 @@ namespace MuMech
             /// While shaping: if local or far path clips terrain, raise TgtAlt and climb in
             /// PROGRADE. Stays in TargetSubOrbit - never MoveToTarget, never early LandingBurn.
             /// </summary>
+            private const double CA_PADDH_BUMP_CAP_M = 5000.0; // stop raising TgtAlt once padDh already demands big climb
+            private const double CA_LOCAL_AGL_M = 2500.0;
+
             private AutopilotStep ApplyShapingTerrainClearance(Vector3d targetPosBody)
             {
+                // 094807: RETRO dump skipped CA (ApNeedsPullBack) and hit terrain at
+                // vSpd~-78 / AGL~40 while pad still 87 km away. Local suicide always checked.
+                try
+                {
+                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 900.0);
+                    if ((willCrash || deltaV > 0)
+                        && VesselState.altitudeTrue < CA_LOCAL_AGL_M
+                        && VesselState.speedVertical < -5.0)
+                    {
+                        Debug.Log("[TSO->MTT] infeasible: local collision while "
+                            + step + " AGL=" + VesselState.altitudeTrue.ToString("F0")
+                            + " vSpd=" + VesselState.speedVertical.ToString("F1")
+                            + " dV=" + deltaV.ToString("F0")
+                            + " pull=" + ApNeedsPullBack(targetPosBody));
+                        Core.Thrust.ThrustOff();
+                        return new MoveToTarget(Core);
+                    }
+                }
+                catch (System.Exception e)
+                {
+                    Debug.Log("[TSO-CA] local check failed: " + e.Message);
+                }
+
                 if (!_apReachedForShape || ApNeedsPullBack(targetPosBody))
                     return null;
 
@@ -728,6 +754,22 @@ namespace MuMech
                 }
                 if (pathClear)
                     return null;
+
+                // 094807: CA ratcheted TgtAlt 665->20661 while AGL~2 km, leaving padDh=+10 km
+                // permanently out of LB band. Stop bumping once pad already demands a big climb.
+                if (TryPadOverflightGate(targetPosBody, out double padDhCap, out _)
+                    && padDhCap > CA_PADDH_BUMP_CAP_M)
+                {
+                    if (Planetarium.GetUniversalTime() - _lastApSeqLogUt >= 1.0)
+                        LogApSeq("CA bump capped padDh=" + padDhCap.ToString("F0")
+                            + " TgtAlt=" + Core.Landing.TgtAlt.ToString("F0"));
+                    if (step != Step.STATE_PROGRADE)
+                    {
+                        step = Step.STATE_PROGRADE;
+                        throttleCount = 0;
+                    }
+                    return null;
+                }
 
                 // Still blocked at TgtAlt ceiling: TSO cannot shape over terrain — MTT owns CA hop.
                 if (Core.Landing.TgtAlt >= TERRAIN_RAISE_MAX_TGTALT_M - 1.0)
