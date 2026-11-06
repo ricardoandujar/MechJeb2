@@ -26,7 +26,7 @@ namespace MuMech
             private const double AP_HALFWAY_HI = 0.65;
             // Once Ap past / frac>~0.5 seen: stay RETROGRADE until frac stably in positive
             // halfway band [LO, TARGET]. Never clear on negative frac (04:13 signed-angle noise).
-            private const int AP_PULL_CLEAR_TICKS = 5;
+            private const int AP_PULL_CLEAR_TICKS = 50; // ~1s @50Hz; was 5 (~0.1s) -> 230322 RETRO thrash
             private const double TERRAIN_RAISE_STEP_M = 800.0;
             private const double TERRAIN_RAISE_INTERVAL_S = 2.0;
             private const double TERRAIN_RAISE_MAX_TGTALT_M = 25000.0;
@@ -69,6 +69,7 @@ namespace MuMech
             private double _lastApPastBounceLogUt = double.NegativeInfinity;
             private double _lastApSeqLogUt = double.NegativeInfinity;
             private double _lastTerrainRaiseUt = double.NegativeInfinity;
+            private double _lastLbHandoffLogUt = double.NegativeInfinity;
             private bool _establishingAp = false;
             private bool _apPullLatch = false;
             private int _apPullClearStreak = 0;
@@ -139,23 +140,10 @@ namespace MuMech
 
             public override AutopilotStep Drive(FlightCtrlState s)
             {
-                // This is checked once to determine if we need to move on to landing burn
-                if (ratio == 0)                    
-                {
-                    ratio = Core.Landing.getHDistanceToTarget() / VesselState.altitudeTrue;
-                    // Near-pad only: do NOT bounce on altitudeTrue<=5000 alone.
-                    // Low-g Ap handoff can be under 5 km when _subOrbitalApA latched early;
-                    // that used to exit TargetSubOrbit->MoveToTarget and skip pad@TgtAlt shaping.
-                    if ((ratio < 0.4) && (VesselState.altitudeTrue <= 1.1 * Core.Landing.TargetAltitude))
-                    {
-                        Debug.Log("exit TargetSubOrbit to MoveToTarget near-pad ratio="
-                            + ratio.ToString("F2")
-                            + " alt=" + VesselState.altitudeTrue.ToString("F0")
-                            + " tgtAlt=" + Core.Landing.TargetAltitude.ToString("F0"));
-                        Core.Thrust.ThrustOff();
-                        return new MoveToTarget(Core);
-                    }
-                }
+                // ratio retained for steepness curve only - no MoveToTarget near-pad handback.
+                // TSO owns suborbital shape to pad@TgtAlt then hands DIRECTLY to LandingBurn.
+                if (ratio == 0)
+                    ratio = Core.Landing.getHDistanceToTarget() / Math.Max(1.0, VesselState.altitudeTrue);
 
                 // Ricardo: stay in TargetSubOrbit. Gate dump-in-place / shape only (no Ap handback).
                 Vector3d tgtPosSeq = Core.Target.GetPositionTargetPosition();
@@ -163,24 +151,44 @@ namespace MuMech
                 if (apGate != null)
                     return apGate;
 
-                // STATE_CORRECT: only hand to LandingBurn when descending into the pad
-                // with intercept still ahead and suborbit path clear of terrain. Do not
-                // teach LandingBurn to burn while ascending into / past the pad.
+                // While shaping (not dumping): keep path terrain-clear by raising TgtAlt.
+                // Do NOT hand early to LandingBurn around a ridge, and do NOT hop to MoveToTarget.
+                if (_apReachedForShape && !ApNeedsPullBack(tgtPosSeq) && step != Step.STATE_RETROGRADE)
+                {
+                    AutopilotStep terrainFix = ApplyShapingTerrainClearance(tgtPosSeq);
+                    if (terrainFix != null)
+                        return terrainFix;
+                }
+
+                // Completed suborbit (pad height, Ap before pad, path clear) -> LandingBurn.
+                // Skips the far-range brake gate: TSO already finished its job.
+                if (TryDirectLandingBurnHandoff(tgtPosSeq, out string lbReason))
+                {
+                    Core.Thrust.ThrustOff();
+                    Debug.Log("[TSO->LB] direct handoff: " + lbReason
+                        + " step=" + step
+                        + " dist=" + Core.Landing.getHDistanceToTarget().ToString("F0"));
+                    return new LandingBurn(Core);
+                }
+                else if (_apReachedForShape && !string.IsNullOrEmpty(lbReason)
+                         && Planetarium.GetUniversalTime() - _lastLbHandoffLogUt >= 1.0)
+                {
+                    // 1 Hz threshold reasoning while shaping toward the handoff.
+                    _lastLbHandoffLogUt = Planetarium.GetUniversalTime();
+                    if (lbReason.StartsWith("padDh-out-of-band")
+                        || lbReason.StartsWith("lb-gate")
+                        || lbReason.StartsWith("path-")
+                        || lbReason.StartsWith("needs-pull")
+                        || lbReason.StartsWith("not-descending"))
+                    {
+                        Debug.Log("[TSO->LB] waiting: " + lbReason + " step=" + step);
+                    }
+                }
+
+                // STATE_CORRECT: shape residuals only. Never MoveToTarget from here.
                 if (step == Step.STATE_CORRECT)
                 {
                     Core.Thrust.ThrustOff();
-                    if ((ProgradeCount >= 4) || (RetrogradeCount >= 4) || (LateralFineCount >= 4))
-                    {
-                        return new MoveToTarget(Core);
-                    }
-
-                    if (Core.Landing.LandingBurnEntryAllowed(out bool localTerrainBlocked, out bool pathTerrainBlocked))
-                    {
-                        return new LandingBurn(Core);
-                    }
-
-                    // Too low for ZEM-ZEV room: shape climb before terrain / CORRECT hop.
-                    // Never PROGRADE / terrain bump while Ap past or frac > ~0.5.
                     Vector3d tgtPosGate = Core.Target.GetPositionTargetPosition();
                     bool gateNeedsPull = ApNeedsPullBack(tgtPosGate);
                     if (TryPadOverflightGate(tgtPosGate, out double padDhCorrect, out _)
@@ -190,46 +198,22 @@ namespace MuMech
                         step = Step.STATE_PROGRADE;
                         throttleCount = 0;
                     }
-                    // Local rim/crash look: MoveToTarget collision hop already climbs out.
-                    else if (localTerrainBlocked)
+                    else if (gateNeedsPull)
                     {
-                        return new MoveToTarget(Core);
+                        step = Step.STATE_RETROGRADE;
+                        throttleCount = 0;
                     }
-                    // Far intercept clips before pad: raise TgtAlt only after Ap, else re-sequence.
-                    else if (pathTerrainBlocked)
+                    else if (PadOverflightBehind(tgtPosGate))
                     {
-                        if (gateNeedsPull)
-                        {
-                            step = Step.STATE_RETROGRADE;
-                            throttleCount = 0;
-                        }
-                        else
-                        {
-                            // Stay in TargetSubOrbit: bump TgtAlt and climb - no Ap/coast handback.
-                            BumpTgtAltForTerrainClear();
-                            step = Step.STATE_PROGRADE;
-                            throttleCount = 0;
-                        }
+                        // Pad behind: stay in TSO and re-sequence lateral; no MTT detour.
+                        Debug.Log("[TSO] pad behind while CORRECT - resequence LATERAL (no MTT)");
+                        step = Step.STATE_LATERAL;
+                        throttleCount = 0;
                     }
                     else
                     {
-                        // Ap past / frac>~0.5: dump. Pad already behind: hop recover via MoveToTarget.
-                        // ClosestPoint/intercept past is allowed (do not force RETROGRADE on it).
-                        Vector3d tgtPosCorrect = Core.Target.GetPositionTargetPosition();
-                        if (ApNeedsPullBack(tgtPosCorrect))
-                        {
-                            step = Step.STATE_RETROGRADE;
-                            throttleCount = 0;
-                        }
-                        else if (PadOverflightBehind(tgtPosCorrect))
-                        {
-                            return new MoveToTarget(Core);
-                        }
-                        else
-                        {
-                            step = Step.STATE_LATERAL;
-                            throttleCount = 0;
-                        }
+                        step = Step.STATE_LATERAL;
+                        throttleCount = 0;
                     }
                 }
 
@@ -621,10 +605,10 @@ namespace MuMech
                 if (!_apPullLatch)
                     return;
 
-                // Latched: clear in positive halfway band OR when pad overflight is in
-                // TgtAlt band (|padDh|<=600). 192439: frac=-88 never cleared; RETRO kept
-                // thr=1 and reversed H past zero into the pad. Pad-band clear is gravity-
-                // aware (same DELTA_TARGET_ALT_THRESHOLD as exit), not an arbitrary gate.
+                // Latched: clear ONLY with proven Ap progress (frac in halfway band).
+                // 230322: padBandOk alone (|padDh|<=600) cleared latch in ~0.1s while frac
+                // was negative, bouncing RETRO->LATERAL_FINE 28x. Wild-frac dumps still
+                // clear via RETROGRADE heightOk+hNearNeeded (CLEAR_H).
                 bool pastDest = ApoapsisPastDestination(targetPosBody);
                 bool inClearBand = haveFrac
                     && frac >= AP_HALFWAY_LO
@@ -632,19 +616,19 @@ namespace MuMech
                 bool padBandOk = false;
                 if (TryPadOverflightGate(targetPosBody, out double padDhClear, out _))
                     padBandOk = Math.Abs(padDhClear) <= DELTA_TARGET_ALT_THRESHOLD;
-                if (!pastDest && (inClearBand || padBandOk))
+                if (!pastDest && inClearBand) // 230322: padBandOk alone cleared on neg frac
                 {
                     _apPullClearStreak++;
                     if (_apPullClearStreak >= AP_PULL_CLEAR_TICKS)
                     {
                         _apPullLatch = false;
                         _apPullClearStreak = 0;
-                        LogApPullLatch(padBandOk && !inClearBand ? "CLEAR_PADBAND" : "CLEAR", frac, haveFrac);
+                        LogApPullLatch(padBandOk ? "CLEAR_HALFWAY_PADOK" : "CLEAR_HALFWAY", frac, haveFrac);
                     }
                 }
                 else
                 {
-                    // Missing/negative/NaN frac, past dest, or still above target: keep latch.
+                    // Missing/negative/NaN frac, past dest, or not yet halfway: keep latch.
                     _apPullClearStreak = 0;
                 }            }
 
@@ -717,6 +701,110 @@ namespace MuMech
                     Core.Landing.TgtAlt = raised;
                     LogApSeq("terrain-after-Ap raise TgtAlt=" + Core.Landing.TgtAlt.ToString("F0"));
                 }
+            }
+
+            /// <summary>
+            /// While shaping: if local or far path clips terrain, raise TgtAlt and climb in
+            /// PROGRADE. Stays in TargetSubOrbit - never MoveToTarget, never early LandingBurn.
+            /// </summary>
+            private AutopilotStep ApplyShapingTerrainClearance(Vector3d targetPosBody)
+            {
+                if (!_apReachedForShape || ApNeedsPullBack(targetPosBody))
+                    return null;
+
+                bool pathClear;
+                try { pathClear = Core.Landing.SubOrbitPathClearToTarget(); }
+                catch (System.Exception e)
+                {
+                    Debug.Log("[TSO-CA] terrain check failed: " + e.Message);
+                    return null;
+                }
+                if (pathClear)
+                    return null;
+
+                BumpTgtAltForTerrainClear();
+                if (step != Step.STATE_PROGRADE)
+                {
+                    step = Step.STATE_PROGRADE;
+                    throttleCount = 0;
+                }
+                if (Planetarium.GetUniversalTime() - _lastApSeqLogUt >= 1.0)
+                {
+                    LogApSeq("CA shape raise path-blocked TgtAlt="
+                        + Core.Landing.TgtAlt.ToString("F0")
+                        + " AGL=" + VesselState.altitudeTrue.ToString("F0"));
+                }
+                return null;
+            }
+
+            /// <summary>
+            /// TSO done: pad overflight near TgtAlt, Ap not past / no pull, descending,
+            /// path terrain-clear. Hands LandingBurn directly (range gate skipped).
+            /// </summary>
+            private bool TryDirectLandingBurnHandoff(Vector3d targetPosBody, out string reason)
+            {
+                reason = "";
+                if (!_apReachedForShape)
+                {
+                    reason = "shape-not-ready";
+                    return false;
+                }
+                if (ApNeedsPullBack(targetPosBody, out double frac))
+                {
+                    reason = "needs-pull frac=" + (double.IsNaN(frac) ? "n/a" : frac.ToString("F2"));
+                    return false;
+                }
+                if (!(VesselState.speedVertical < -0.5))
+                {
+                    reason = "not-descending v=" + VesselState.speedVertical.ToString("F1");
+                    return false;
+                }
+                if (PadOverflightBehind(targetPosBody))
+                {
+                    reason = "pad-behind";
+                    return false;
+                }
+                if (!TryPadOverflightGate(targetPosBody, out double padDh, out double padDt))
+                {
+                    reason = "no-pad-gate";
+                    return false;
+                }
+                // Ideal overhead: |padDh| within TgtAlt band (same 600 m as shape exit).
+                if (Math.Abs(padDh) > DELTA_TARGET_ALT_THRESHOLD)
+                {
+                    reason = "padDh-out-of-band padDh=" + padDh.ToString("F0")
+                        + " padDt=" + padDt.ToString("F0");
+                    return false;
+                }
+                if (ApoapsisPastDestination(targetPosBody))
+                {
+                    reason = "ap-past-pad";
+                    return false;
+                }
+
+                bool pathClear;
+                try { pathClear = Core.Landing.SubOrbitPathClearToTarget(); }
+                catch { reason = "path-check-failed"; return false; }
+                if (!pathClear)
+                {
+                    reason = "path-terrain-blocked";
+                    return false;
+                }
+
+                // Shared descent / intercept / low-side checks; SKIP far-range brake gate.
+                if (!Core.Landing.LandingBurnEntryAllowedFromTargetSubOrbit(
+                        out bool localBlocked, out bool pathBlocked, out string gateDetail))
+                {
+                    reason = "lb-gate " + gateDetail
+                        + " local=" + localBlocked + " path=" + pathBlocked;
+                    return false;
+                }
+
+                reason = "padDh=" + padDh.ToString("F0")
+                    + " padDt=" + padDt.ToString("F0")
+                    + " frac=" + (TryApAlongTrackFraction(targetPosBody, out double fOut, out _) ? fOut.ToString("F2") : "n/a")
+                    + " " + gateDetail;
+                return true;
             }
 
 

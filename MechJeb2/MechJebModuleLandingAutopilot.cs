@@ -1587,19 +1587,43 @@ namespace MuMech
 
         public bool LandingBurnEntryAllowed(out bool localTerrainBlocked, out bool pathTerrainBlocked)
         {
+            return LandingBurnEntryAllowedCore(out localTerrainBlocked, out pathTerrainBlocked, out _, enforceRangeGate: true);
+        }
+
+        /// <summary>
+        /// TargetSubOrbit completed pad@TgtAlt with Ap before pad: hand LandingBurn without the
+        /// far-range brake gate (that gate blocked legitimate TSO finish at 40-90 km on Vesta).
+        /// Still requires descent, intercept ahead, low-side TgtAlt margin, and terrain-clear path.
+        /// </summary>
+        public bool LandingBurnEntryAllowedFromTargetSubOrbit(
+            out bool localTerrainBlocked, out bool pathTerrainBlocked, out string detail)
+        {
+            return LandingBurnEntryAllowedCore(out localTerrainBlocked, out pathTerrainBlocked, out detail, enforceRangeGate: false);
+        }
+
+        private bool LandingBurnEntryAllowedCore(
+            out bool localTerrainBlocked, out bool pathTerrainBlocked, out string detail, bool enforceRangeGate)
+        {
             localTerrainBlocked = false;
             pathTerrainBlocked = false;
+            detail = "";
 
             // Do not teach LandingBurn to burn while ascending into the pad.
             if (!(VesselState.speedVertical < 0))
+            {
+                detail = "ascending";
                 return false;
+            }
 
             ClosestPointToSurfaceTarget(out Vector3d closestPos, out double tUT, out double distanceToTarget, out Vector3d surfaceVel);
             double now = Planetarium.GetUniversalTime();
 
             // Overhead pass: closest approach already behind us.
             if (!double.IsNaN(tUT) && !double.IsInfinity(tUT) && tUT < now - 1.0)
+            {
+                detail = "intercept-behind";
                 return false;
+            }
 
             // Finite Ap still ahead of the intercept: ApA is after the destination.
             if (ApoapsisIsFinite(Vessel.orbit))
@@ -1609,6 +1633,7 @@ namespace MuMech
                     && !double.IsNaN(tUT) && !double.IsInfinity(tUT)
                     && tUT < now + tAp)
                 {
+                    detail = "ap-before-intercept tAp=" + tAp.ToString("F0");
                     return false;
                 }
             }
@@ -1618,15 +1643,17 @@ namespace MuMech
             if (TryPadOverflightDeltaHeight(out double padDhEntry, out _))
             {
                 if (padDhEntry > LANDING_BURN_TGTALT_LOW_MARGIN_M)
+                {
+                    detail = "padDh-too-low padDh=" + padDhEntry.ToString("F0");
                     return false;
+                }
             }
 
             Vector3d targetPos = Core.Target.GetPositionTargetPosition();
             GetRangeVectorsToSurfaceTarget(Vessel, VesselState, targetPos, tUT, out Vector3d downrangeVec, out Vector3d crossrangeVec, out Vector3d horizontalVec);
 
-            // Gravity/TWR-aware range gate: enter only within k*V^2/(2*f*a_max) + margin.
-            // Far near-circular handoffs (211436/214936 at 50-90 km) left ZEM-ZEV with no brake.
-            // Descending + Ap-at/before-pad already enforced above; keep shaping otherwise.
+            // Gravity/TWR-aware range gate: blocks premature LB from incomplete far TSO.
+            // Skipped for LandingBurnEntryAllowedFromTargetSubOrbit after TSO finished pad@TgtAlt.
             double aMaxEntry = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
             double gEntry = Math.Max(VesselState.localg, 0.05);
             double twrEntry = aMaxEntry / gEntry;
@@ -1636,25 +1663,38 @@ namespace MuMech
             double rangeMargin = Math.Max(3000.0, Math.Min(40000.0, 3000.0 * Math.Sqrt(Math.Max(twrEntry, 1.0) / 2.0)));
             const double kStop = 2.5;
             double rangeLimit = kStop * stopDist + rangeMargin;
-            if (horizontalVec.magnitude > LANDING_BURN_PAD_FALSE_FIRE_M && horizontalVec.magnitude > rangeLimit)
+            if (enforceRangeGate
+                && horizontalVec.magnitude > LANDING_BURN_PAD_FALSE_FIRE_M
+                && horizontalVec.magnitude > rangeLimit)
+            {
+                detail = "range-gate dist=" + horizontalVec.magnitude.ToString("F0")
+                    + " limit=" + rangeLimit.ToString("F0");
                 return false;
+            }
 
             if (horizontalVec.magnitude <= LANDING_BURN_PAD_FALSE_FIRE_M)
+            {
+                detail = "near-pad dist=" + horizontalVec.magnitude.ToString("F0");
                 return true;
+            }
 
             (double deltaV, bool willCrash) = PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE);
             if (willCrash || deltaV > 0)
             {
                 localTerrainBlocked = true;
+                detail = "local-terrain dV=" + deltaV.ToString("F0");
                 return false;
             }
 
             if (!FarInterceptPathClear(tUT, targetPos, SUBORBIT_PATH_MIN_ALTITUDE))
             {
                 pathTerrainBlocked = true;
+                detail = "path-terrain";
                 return false;
             }
 
+            detail = "ok dist=" + horizontalVec.magnitude.ToString("F0")
+                + " rangeGate=" + (enforceRangeGate ? "on" : "off");
             return true;
         }
     }
