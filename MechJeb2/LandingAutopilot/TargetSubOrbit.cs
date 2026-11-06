@@ -131,17 +131,22 @@ namespace MuMech
                     minVerticalAngle = -0.25;
                 }
 
-                // If the current altitude is low, then adjust this to 1/3 of the current altitude to avoid overshooting
+                // If the current altitude is low, then adjust this to 1/3 of the current altitude to avoid overshooting.
+                // Never crush below the gravity-scaled ComputeOptimal gate (094807: mountain start
+                // AGL~2 km set TgtAlt=665; +/-600 band then accepted ~50-600 m over pad - too tight for LB).
                 if (VesselState.altitudeTrue < 3 * Core.Landing.TgtAlt)
                 {
                     Core.Landing.TgtAlt = VesselState.altitudeTrue / 3.0;
                 }
+                Core.Landing.EnsureTgtAltMeetsLbOverheadFloor();
             }
 
             public override AutopilotStep Drive(FlightCtrlState s)
             {
                 // ratio retained for steepness curve only - no MoveToTarget near-pad handback.
                 // TSO owns suborbital shape to pad@TgtAlt then hands DIRECTLY to LandingBurn.
+                // Enforce gravity-scaled LB overhead floor every tick (crush / bump-cap cannot undercut).
+                Core.Landing.EnsureTgtAltMeetsLbOverheadFloor();
                 if (ratio == 0)
                     ratio = Core.Landing.getHDistanceToTarget() / Math.Max(1.0, VesselState.altitudeTrue);
 
@@ -183,6 +188,7 @@ namespace MuMech
                     // 1 Hz threshold reasoning while shaping toward the handoff.
                     _lastLbHandoffLogUt = Planetarium.GetUniversalTime();
                     if (lbReason.StartsWith("padDh-out-of-band")
+                        || lbReason.StartsWith("overhead-too-low")
                         || lbReason.StartsWith("lb-gate")
                         || lbReason.StartsWith("path-")
                         || lbReason.StartsWith("needs-pull")
@@ -657,7 +663,8 @@ namespace MuMech
                 bool haveFrac = TryApAlongTrackFraction(targetPosBody, out frac, out _);
                 // Gate already shaped: drop latch and do not dump (101149).
                 if (TryPadOverflightGate(targetPosBody, out double padDhDone, out _)
-                    && Math.Abs(padDhDone) <= DELTA_TARGET_ALT_THRESHOLD)
+                    && Math.Abs(padDhDone) <= DELTA_TARGET_ALT_THRESHOLD
+                    && (Core.Landing.TgtAlt - padDhDone) >= Core.Landing.MinSafeLandingBurnOverheadM())
                 {
                     if (_apPullLatch)
                     {
@@ -771,10 +778,16 @@ namespace MuMech
                 if (pathClear)
                     return null;
 
+                // Keep TgtAlt at/above gravity-scaled LB overhead floor before applying bump cap.
+                // Cap must not freeze a crushed/low TgtAlt that leaves heightOverPad < min gate.
+                Core.Landing.EnsureTgtAltMeetsLbOverheadFloor();
+
                 // 094807: CA ratcheted TgtAlt 665->20661 while AGL~2 km, leaving padDh=+10 km
                 // permanently out of LB band. Stop bumping once pad already demands a big climb.
+                // Exception: still raise while TgtAlt is below the LB overhead floor.
                 if (TryPadOverflightGate(targetPosBody, out double padDhCap, out _)
-                    && padDhCap > CA_PADDH_BUMP_CAP_M)
+                    && padDhCap > CA_PADDH_BUMP_CAP_M
+                    && Core.Landing.TgtAlt >= Core.Landing.MinSafeLandingBurnOverheadM())
                 {
                     if (Planetarium.GetUniversalTime() - _lastApSeqLogUt >= 1.0)
                         LogApSeq("CA bump capped padDh=" + padDhCap.ToString("F0")
@@ -845,6 +858,17 @@ namespace MuMech
                 {
                     reason = "padDh-out-of-band padDh=" + padDh.ToString("F0")
                         + " padDt=" + padDt.ToString("F0");
+                    return false;
+                }
+                // Absolute LB headroom: band must not accept heightOverPad below gravity-scaled gate.
+                double heightOverPad = Core.Landing.TgtAlt - padDh;
+                double minOverhead = Core.Landing.MinSafeLandingBurnOverheadM();
+                if (heightOverPad < minOverhead)
+                {
+                    Core.Landing.EnsureTgtAltMeetsLbOverheadFloor();
+                    reason = "overhead-too-low h=" + heightOverPad.ToString("F0")
+                        + " min=" + minOverhead.ToString("F0")
+                        + " padDh=" + padDh.ToString("F0");
                     return false;
                 }
                 if (ApoapsisPastDestination(targetPosBody))

@@ -1252,6 +1252,12 @@ namespace MuMech
             crossrangeVec = cross_dir * Vector3d.Dot(horizontalVec, cross_dir);
         }
 
+        /// <summary>
+        /// Gravity-scaled pad-overflight / deorbit gate (baseline all-body formula).
+        /// hGate = max(MIN_TARGET_ALTITUDE, vCirc^2/(2*aNet)*S). Low-g / high-TWR bodies
+        /// floor at MIN_TARGET_ALTITUDE (3500); higher-g / lower-TWR bodies rise with hVertical*S
+        /// (Earth higher than Vesta). Design TSO->LB overhead constraint - not a fixed meter value.
+        /// </summary>
         public double ComputeOptimalDeorbitAltitude()
         {
             CelestialBody body = Vessel.mainBody;
@@ -1284,6 +1290,30 @@ namespace MuMech
             double hGate = Math.Max(MIN_TARGET_ALTITUDE, hVertical * S);
 
             return hGate;
+        }
+
+        /// <summary>
+        /// Minimum safe coast height over the pad for LandingBurn ZEM-ZEV braking room.
+        /// Same all-body gravity-scaled gate as ComputeOptimalDeorbitAltitude (not a fixed 2400).
+        /// Low-g floors at MIN_TARGET_ALTITUDE; higher-g / lower-TWR bodies rise with hVertical*S.
+        /// Vesta evaluates to the 3500 floor, covering ~2400 m low-g LB headroom after band.
+        /// </summary>
+        public double MinSafeLandingBurnOverheadM()
+        {
+            double h = ComputeOptimalDeorbitAltitude();
+            if (double.IsNaN(h) || double.IsInfinity(h) || h <= 0)
+                return MIN_TARGET_ALTITUDE;
+            return h;
+        }
+
+        /// <summary>
+        /// Never let TgtAlt sit below the gravity-scaled LB overhead gate (crush / bump-cap / band).
+        /// </summary>
+        public void EnsureTgtAltMeetsLbOverheadFloor()
+        {
+            double floor = MinSafeLandingBurnOverheadM();
+            if (TgtAlt < floor)
+                TgtAlt = floor;
         }
 
         void setTargetAltitude()
@@ -1650,11 +1680,22 @@ namespace MuMech
 
             // Low-side TgtAlt margin: do not enter while heightOverPad < TgtAlt-600 (padDh > 600).
             // ZEM-ZEV needs room as LandingBurn reduces height over pad.
+            // Absolute floor: +/-600 band must not accept heightOverPad below the gravity-scaled
+            // ComputeOptimal gate (Vesta ~3500 floor covers ~2400 m low-g LB braking headroom).
             if (TryPadOverflightDeltaHeight(out double padDhEntry, out _))
             {
                 if (padDhEntry > LANDING_BURN_TGTALT_LOW_MARGIN_M)
                 {
                     detail = "padDh-too-low padDh=" + padDhEntry.ToString("F0");
+                    return false;
+                }
+                double heightOverPadEntry = TgtAlt - padDhEntry;
+                double minOverhead = MinSafeLandingBurnOverheadM();
+                if (heightOverPadEntry < minOverhead)
+                {
+                    detail = "overhead-too-low h=" + heightOverPadEntry.ToString("F0")
+                        + " min=" + minOverhead.ToString("F0")
+                        + " padDh=" + padDhEntry.ToString("F0");
                     return false;
                 }
             }
