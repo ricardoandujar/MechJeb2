@@ -170,6 +170,13 @@ namespace MuMech
                         + " dist=" + Core.Landing.getHDistanceToTarget().ToString("F0"));
                     return new LandingBurn(Core);
                 }
+                else if (lbReason == "pad-behind")
+                {
+                    // Proven infeasible mid-shape: pad already behind — MTT recovery.
+                    Debug.Log("[TSO->MTT] infeasible: " + lbReason + " step=" + step);
+                    Core.Thrust.ThrustOff();
+                    return new MoveToTarget(Core);
+                }
                 else if (_apReachedForShape && !string.IsNullOrEmpty(lbReason)
                          && Planetarium.GetUniversalTime() - _lastLbHandoffLogUt >= 1.0)
                 {
@@ -185,7 +192,8 @@ namespace MuMech
                     }
                 }
 
-                // STATE_CORRECT: shape residuals only. Never MoveToTarget from here.
+                // STATE_CORRECT: shape residuals, or MTT only on proven infeasibility.
+                // Success path is TryDirectLandingBurnHandoff above (not MTT).
                 if (step == Step.STATE_CORRECT)
                 {
                     Core.Thrust.ThrustOff();
@@ -205,10 +213,9 @@ namespace MuMech
                     }
                     else if (PadOverflightBehind(tgtPosGate))
                     {
-                        // Pad behind: stay in TSO and re-sequence lateral; no MTT detour.
-                        Debug.Log("[TSO] pad behind while CORRECT - resequence LATERAL (no MTT)");
-                        step = Step.STATE_LATERAL;
-                        throttleCount = 0;
+                        // Proven infeasible: pad already behind — MTT owns recovery/CA hop.
+                        Debug.Log("[TSO->MTT] infeasible: pad behind while CORRECT");
+                        return new MoveToTarget(Core);
                     }
                     else
                     {
@@ -722,6 +729,16 @@ namespace MuMech
                 if (pathClear)
                     return null;
 
+                // Still blocked at TgtAlt ceiling: TSO cannot shape over terrain — MTT owns CA hop.
+                if (Core.Landing.TgtAlt >= TERRAIN_RAISE_MAX_TGTALT_M - 1.0)
+                {
+                    Debug.Log("[TSO->MTT] infeasible: path blocked at max TgtAlt="
+                        + Core.Landing.TgtAlt.ToString("F0")
+                        + " AGL=" + VesselState.altitudeTrue.ToString("F0"));
+                    Core.Thrust.ThrustOff();
+                    return new MoveToTarget(Core);
+                }
+
                 BumpTgtAltForTerrainClear();
                 if (step != Step.STATE_PROGRADE)
                 {
@@ -1087,9 +1104,17 @@ namespace MuMech
                             }
                             else if (_apReachedForShape && ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD))))
                             {
-                                ProgradeCount = throttleCount;
-                                throttleCount = 0;
-                                step = Step.STATE_LATERAL_FINE;
+                                // 091142: ClosestPoint deltaHeight was high while padDh still
+                                // +11 km (TgtAlt CA-bumped). Do not leave PROGRADE for FINE
+                                // until pad overflight is no longer too low.
+                                bool padStillTooLow = TryPadOverflightGate(targetPos, out double padDhPg, out _)
+                                    && padDhPg > DELTA_TARGET_ALT_THRESHOLD;
+                                if (!padStillTooLow)
+                                {
+                                    ProgradeCount = throttleCount;
+                                    throttleCount = 0;
+                                    step = Step.STATE_LATERAL_FINE;
+                                }
                             }
                             // Calculate horizontal correction angle using horizontal herror.
                             rc = Math.Max(0, Math.Min(_hCorrectionUpAngle, baseGain * H_CORRECTION_ANGLE_CONSTANT * herror.magnitude));
