@@ -1488,7 +1488,83 @@ namespace MuMech
             if (LocalCoastClipsTerrain(15, minAltitude))
                 return false;
 
-            return FarInterceptPathClear(tUT, targetPos, minAltitude);
+            if (!FarInterceptPathClear(tUT, targetPos, minAltitude))
+                return false;
+
+            // Pre-ignition (Ricardo Nov 9, 075027): the unpowered coast must stay above LB's AGL
+            // ignition trigger stacked with the path margin (minAltitude + 1.1 * floor) until LB's
+            // own ignition point (horizontal stopping distance), so the AGL floor cannot light LB
+            // early far from the pad. Inside the ignition point the existing minAltitude applies.
+            return !CoastBelowLbFloorBeforeIgnition(tUT, targetPos, minAltitude);
+        }
+
+        // LandingBurn.ShouldStartBurn AGL ignition floor: LandingBurn.cs:188 distFloor.
+        // KEEP IN SYNC with LandingBurn.cs (mirrored value, LandingBurn unchanged).
+        public const double LANDING_BURN_AGL_FLOOR_M = 3000.0;
+
+        /// <summary>
+        /// True when the coast from now until LB's predicted ignition point (arc to pad > dIgn)
+        /// drops below minAltitude + 1.1 * max(LB AGL floor, hSuicide) above terrain.
+        /// dIgn / hSuicide / aPlan use the same formulas as LandingBurn.ComputeBrakeBudget and
+        /// ShouldStartBurn (LandingBurn.cs:137-142, 191, 216). Terrain sampled in the same frame
+        /// as FarInterceptPathClear (no rotation compensation).
+        /// </summary>
+        private bool CoastBelowLbFloorBeforeIgnition(double tUT, Vector3d targetPos, double minAltitude)
+        {
+            double now = Planetarium.GetUniversalTime();
+            if (double.IsNaN(tUT) || double.IsInfinity(tUT) || tUT <= now + 1.0)
+                return false;
+            CelestialBody body = Vessel.mainBody;
+            Orbit orbit = Vessel.orbit;
+            if (body == null || orbit == null || !IsFiniteVec(targetPos))
+                return false;
+
+            // Same budget as LandingBurn.ComputeBrakeBudget.
+            double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
+            double g = Math.Max(VesselState.localg, 0.05);
+            double aPlan = Math.Min(8.0 * g, 0.7 * aMax);
+            aPlan = Math.Max(aPlan, g + 0.05);
+            aPlan = Math.Min(aPlan, aMax);
+            double bm = BurnMarginPerc / 100.0;
+            double vH = VesselState.speedSurfaceHorizontal;
+            // LandingBurn.cs:216 d_horiz (cos(theta) ~ 1 for the near-horizontal coast).
+            double dIgn = Math.Max(LANDING_BURN_AGL_FLOOR_M, (1.0 + bm) * vH * vH / (2.0 * aPlan));
+
+            double endUT = Math.Min(tUT, now + 900.0);
+            double span = endUT - now;
+            if (span < 1.0)
+                return false;
+            const int nSamples = 30;
+            double dt = span / nSamples;
+            double altPrev = VesselState.altitudeASL;
+            for (int i = 1; i <= nSamples; i++)
+            {
+                double ut = now + dt * i;
+                Vector3d pos = orbit.getPositionAtUT(ut);
+                if (!IsFiniteVec(pos)) continue;
+                Vector3d posBody = pos - body.position;
+                Vector3d tgtAtUt = RotateRelativePosition(targetPos, ut - now);
+                if (!IsFiniteVec(posBody) || !IsFiniteVec(tgtAtUt)) continue;
+
+                double posASL = body.GetAltitude(pos);
+                if (double.IsNaN(posASL) || double.IsInfinity(posASL)) continue;
+                double vDown = Math.Max(0.0, (altPrev - posASL) / dt);
+                altPrev = posASL;
+
+                double arcToPad = ArcDistance(posBody, tgtAtUt, body.Radius);
+                if (arcToPad <= dIgn)
+                    break; // inside LB ignition point: existing minAltitude checks apply
+
+                double terrainASL = body.TerrainAltitude(pos);
+                if (double.IsNaN(terrainASL) || double.IsInfinity(terrainASL)) continue;
+
+                // LandingBurn.cs:191 h_suicide at aPlan.
+                double hSuicide = (1.05 + bm) * (vDown * vDown) / (2.0 * Math.Max(aPlan - g, 0.1));
+                double need = minAltitude + 1.1 * Math.Max(LANDING_BURN_AGL_FLOOR_M, hSuicide);
+                if ((posASL - terrainASL) < need)
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>
