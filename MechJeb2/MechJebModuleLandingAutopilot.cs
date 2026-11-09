@@ -100,6 +100,15 @@ namespace MuMech
         // window edges. Edge / invalid result => the minimum is outside the window: full search.
         private const double CLOSEST_POINT_EDGE_S = 1.0;
         private const bool LOG_CLOSEST_POINT = false;
+        // DIAGNOSTIC ONLY ([CP-full]): one line per full search, rate-limited to >= 0.1 s UT and
+        // >= 0.1 s real time between lines (suppressed count carried into the next line).
+        // Written and read only by the [CP-full] log; never feeds any returned value.
+        private const bool LOG_CP_FULL = true;
+        private const double CP_FULL_LOG_MIN_DT = 0.1;
+        private double _cpFullLogUt = double.NegativeInfinity;
+        private float _cpFullLogReal = float.NegativeInfinity;
+        private int _cpFullSuppressed;
+        private int _cpFullSuppressedCoarseKept;
 
         // Same-tick reuse for hop + CoastClear. Do not keep this across UT: a 0.05s
         // stale answer would make coast-clear lie about a rim still in the way.
@@ -752,6 +761,11 @@ namespace MuMech
             bool needFullSearch = !_closestPointCacheValid
                 || lat != _closestPointCacheLat || lon != _closestPointCacheLon
                 || (now - _closestPointCacheNow) >= CLOSEST_POINT_FULL_PERIOD;
+            // [CP-full] diag: why the full search runs (computed from the same inputs, no writes).
+            string cpReason = !_closestPointCacheValid ? "cacheInvalid"
+                : (lat != _closestPointCacheLat || lon != _closestPointCacheLon) ? "latlon"
+                : needFullSearch ? "period" : "fast";
+            double cpSeedUT = _closestPointCacheUT;
             if (!needFullSearch)
             {
                 workDist = double.MaxValue;
@@ -808,15 +822,21 @@ namespace MuMech
                     return;
                 }
                 // Minimum at a window edge or past the impact horizon: full search below.
+                cpReason = (!IsFiniteVec(workPos) || workDist >= double.MaxValue)
+                    ? "fastFallback-invalid" : "fastFallback-edge";
             }
             // --- 1. Binary-search horizon detection ---------------------------------
+            bool cpImpactEarlyReturn = false;
             double FindImpactUT(double nowUT, double horizon)
             {
                 double lo = nowUT;
                 double hi = nowUT + horizon;
                 Vector3d pHi = orbit.getPositionAtUT(hi) - body.position;
                 if (!IsFiniteVec(pHi) || pHi.magnitude > R)
+                {
+                    cpImpactEarlyReturn = true;
                     return hi;
+                }
                 for (int i = 0; i < 40; i++)
                 {
                     double mid = 0.5 * (lo + hi);
@@ -835,6 +855,7 @@ namespace MuMech
             workPos = Vector3d.zero;
             double step = (endUT - now) / coarseSamples;
             if (step < 0 || double.IsNaN(step) || double.IsInfinity(step)) step = 0;
+            int cpBreakIdx = -1;
             for (int i = 0; i <= coarseSamples; i++)
             {
                 double ut = now + i * step;
@@ -842,7 +863,10 @@ namespace MuMech
                 if (!IsFiniteVec(srcPos) || srcPos.magnitude > rCap)
                     continue;
                 if (srcPos.magnitude < R)
+                {
+                    cpBreakIdx = i;
                     break;
+                }
                 Consider(ut);
             }
             // Hyperbola has no apoapsis; periapsis is the natural closest-to-body time.
@@ -852,6 +876,9 @@ namespace MuMech
                 if (!double.IsNaN(tPe) && !double.IsInfinity(tPe) && tPe >= 0 && now + tPe <= endUT)
                     Consider(now + tPe);
             }
+            double cpCoarseUT = workUT;
+            double cpCoarseDist = workDist;
+            bool cpCoarseNowFallback = !IsFiniteVec(workPos) || workDist == double.MaxValue;
             if (!IsFiniteVec(workPos) || workDist == double.MaxValue)
             {
                 workUT = now;
@@ -888,6 +915,7 @@ namespace MuMech
             }
             double fineUT = (a + b) / 2.0;
             double fineDist = GetDist(fineUT);
+            bool cpFineKept = fineDist < workDist;
             if (fineDist < workDist)
             {
                 workDist = fineDist;
@@ -907,6 +935,10 @@ namespace MuMech
             surfaceVel = velFuture - rotVelFuture;// Future surface-relative velocity ---
             if (LOG_CLOSEST_POINT)
                 Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1"));
+            if (LOG_CP_FULL)
+                LogClosestPointFull(now, cpReason, cpSeedUT, endUT, cpImpactEarlyReturn, step, cpBreakIdx,
+                    cpCoarseUT, cpCoarseDist, cpCoarseNowFallback, refineStart, refineEnd, fineUT, fineDist,
+                    cpFineKept, bestUT, bestDist, bestPos.magnitude - R);
             bestPos += body.position;
             _closestPointCacheValid = true;
             _closestPointCacheNow = now;
@@ -916,6 +948,56 @@ namespace MuMech
             _closestPointCacheUT = bestUT;
             _closestPointCacheDist = bestDist;
             _closestPointCacheVel = surfaceVel;
+        }
+
+        // DIAGNOSTIC ONLY: [CP-full] line for a full closest-point search. Reads its arguments,
+        // TgtAlt and pad terrain; writes only its own rate-limit fields. No effect on results.
+        private void LogClosestPointFull(double now, string reason, double seedUT, double endUT, bool impactEarly,
+            double step, int breakIdx, double coarseUT, double coarseDist, bool coarseNowFallback,
+            double refLo, double refHi, double fineUT, double fineDist, bool fineKept,
+            double bestUT, double bestDist, double bestAsl)
+        {
+            try
+            {
+                float real = Time.realtimeSinceStartup;
+                if (!(now - _cpFullLogUt >= CP_FULL_LOG_MIN_DT && real - _cpFullLogReal >= CP_FULL_LOG_MIN_DT))
+                {
+                    _cpFullSuppressed++;
+                    if (!fineKept) _cpFullSuppressedCoarseKept++;
+                    return;
+                }
+                CelestialBody body = Vessel.mainBody;
+                double padAsl = body.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
+                double dH = TgtAlt - (bestAsl - padAsl);
+                string F(double v, string f) => v >= double.MaxValue ? "MAX" : v.ToString(f);
+                Debug.Log("[CP-full] reason=" + reason
+                    + " now=" + now.ToString("F2")
+                    + " seedDt=" + (seedUT - now).ToString("F1")
+                    + " endDt=" + (endUT - now).ToString("F1")
+                    + " early3600=" + (impactEarly ? 1 : 0)
+                    + " step=" + step.ToString("F2")
+                    + " breakIdx=" + breakIdx
+                    + " breakDt=" + (breakIdx >= 0 ? (breakIdx * step).ToString("F1") : "n/a")
+                    + " coarseDt=" + (coarseUT - now).ToString("F1")
+                    + " coarseDist=" + F(coarseDist, "F0")
+                    + " coarseNowFb=" + (coarseNowFallback ? 1 : 0)
+                    + " refLoDt=" + (refLo - now).ToString("F1")
+                    + " refHiDt=" + (refHi - now).ToString("F1")
+                    + " fineDt=" + (fineUT - now).ToString("F2")
+                    + " fineDist=" + F(fineDist, "F0")
+                    + " kept=" + (fineKept ? "fine" : "coarse")
+                    + " bestDt=" + (bestUT - now).ToString("F2")
+                    + " bestDist=" + F(bestDist, "F0")
+                    + " bestAsl=" + bestAsl.ToString("F0")
+                    + " dH=" + dH.ToString("F0")
+                    + " supp=" + _cpFullSuppressed
+                    + " suppCoarse=" + _cpFullSuppressedCoarseKept);
+                _cpFullLogUt = now;
+                _cpFullLogReal = real;
+                _cpFullSuppressed = 0;
+                _cpFullSuppressedCoarseKept = 0;
+            }
+            catch (Exception e) { Debug.Log("[CP-full] diag failed: " + e.Message); }
         }
         // Rotate Body relative position based on it's rotation over input elapsed seconds from now.
         public Vector3d RotateRelativePosition(Vector3d posBodyCentered, double timeDeltaSeconds)
