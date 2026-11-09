@@ -1543,8 +1543,9 @@ namespace MuMech
         /// True when the coast from now until LB's predicted ignition point (arc to pad > dIgn)
         /// drops below minAltitude + 1.1 * max(LB AGL floor, hSuicide) above terrain.
         /// dIgn / hSuicide / aPlan use the same formulas as LandingBurn.ComputeBrakeBudget and
-        /// ShouldStartBurn (LandingBurn.cs:137-142, 191, 216). Terrain sampled in the same frame
-        /// as FarInterceptPathClear (no rotation compensation).
+        /// ShouldStartBurn (LandingBurn.cs:137-142, 191, 216). Terrain is sampled under each point
+        /// at its own time ut (body rotated by omega*tAhead, ReentrySimulation.cs:1001 convention),
+        /// verified against real AGL in run 20261109_093847. Other samplers are not compensated yet.
         /// </summary>
         private bool CoastBelowLbFloorBeforeIgnition(double tUT, Vector3d targetPos, double minAltitude,
             string diagTag = null, bool diagSamples = false)
@@ -1600,7 +1601,11 @@ namespace MuMech
                 if (arcToPad <= dIgn)
                 { brk = i; break; } // inside LB ignition point: existing minAltitude checks apply
 
-                double terrainASL = body.TerrainAltitude(pos);
+                // Terrain under the sample at time ut: the body has rotated by omega*tAhead since now.
+                double tAhead = ut - now;
+                double lat = body.GetLatitude(pos);
+                double lonRot = body.GetLongitude(pos) - omegaDeg * tAhead;
+                double terrainASL = body.TerrainAltitude(lat, lonRot);
                 if (double.IsNaN(terrainASL) || double.IsInfinity(terrainASL)) continue;
 
                 // LandingBurn.cs:191 h_suicide at aPlan.
@@ -1614,17 +1619,13 @@ namespace MuMech
                 }
                 if (!diag) continue;
 
-                // Diagnostic only: terrain under the sample at time ut (body rotated by omega*tAhead),
-                // same convention as ReentrySimulation.cs:1001. Never used for the return value.
-                double tAhead = ut - now;
-                double lat = body.GetLatitude(pos);
-                double lonRot = body.GetLongitude(pos) - omegaDeg * tAhead;
-                double terrRot = body.TerrainAltitude(lat, lonRot);
-                double aglRot = posASL - terrRot;
+                // Diagnostic only: old current-rotation terrain for comparison. Never used for the return value.
+                double terrCur = body.TerrainAltitude(pos);
+                double aglCur = posASL - terrCur;
                 double shiftKm = omegaDeg * tAhead * Math.PI / 180.0 * body.Radius * Math.Cos(lat * Math.PI / 180.0) / 1000.0;
                 nEval++;
                 if (agl - need < minM) { minM = agl - need; minI = i; minArc = arcToPad; }
-                if (aglRot - need < minRM) { minRM = aglRot - need; minRI = i; }
+                if (aglCur - need < minRM) { minRM = aglCur - need; minRI = i; }
                 if (diagSamples)
                     Debug.Log("[LB-floor] tag=" + diagTag + " i=" + i + "/" + nSamples
                         + " tAhead=" + tAhead.ToString("F1") + " arc=" + arcToPad.ToString("F0")
@@ -1632,15 +1633,15 @@ namespace MuMech
                         + " agl=" + agl.ToString("F0") + " need=" + need.ToString("F0")
                         + " hS=" + hSuicide.ToString("F0") + " dIgn=" + dIgn.ToString("F0")
                         + " res=" + (agl < need ? "FAIL" : "PASS")
-                        + " terrRotASL=" + terrRot.ToString("F0") + " aglRot=" + aglRot.ToString("F0")
-                        + " resRot=" + (aglRot < need ? "FAIL" : "PASS") + " shiftKm=" + shiftKm.ToString("F1"));
+                        + " terrCurASL=" + terrCur.ToString("F0") + " aglCur=" + aglCur.ToString("F0")
+                        + " resCur=" + (aglCur < need ? "FAIL" : "PASS") + " shiftKm=" + shiftKm.ToString("F1"));
             }
             if (diag)
                 Debug.Log("[LB-floor] tag=" + diagTag + " below=" + hit + " n=" + nEval + " brk=" + brk
                     + " span=" + span.ToString("F0") + " dIgn=" + dIgn.ToString("F0") + " vH=" + vH.ToString("F1")
                     + " aPlan=" + aPlan.ToString("F2") + " minMargin=" + minM.ToString("F0") + "@i" + minI
-                    + " arcAtMin=" + minArc.ToString("F0") + " minMarginRot=" + minRM.ToString("F0") + "@i" + minRI
-                    + " belowRot=" + (minRM < 0));
+                    + " arcAtMin=" + minArc.ToString("F0") + " minMarginCur=" + minRM.ToString("F0") + "@i" + minRI
+                    + " belowCur=" + (minRM < 0));
             return hit;
         }
 
