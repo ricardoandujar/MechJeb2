@@ -181,6 +181,7 @@ namespace MuMech
                         + " hoopCenter=" + AutotestHoopCenter.ToString("F0")
                         + " predH=" + AutotestPredH.ToString("F0")
                         + " miss=" + AutotestHoopMiss.ToString("F0"));
+                    Core.Landing.LogCoastFloorDiag("handoff");
                     return new LandingBurn(Core);
                 }
                 else if (lbReason == "pad-behind")

@@ -112,6 +112,13 @@ namespace MuMech
         private double _pathClearCacheNow;
         private double _pathClearCacheMinAlt;
         private bool _pathClearCacheResult;
+        // Diagnostic only ([LB-floor]): log throttle for CoastBelowLbFloorBeforeIgnition.
+        private bool   _coastFloorLogHave;
+        private bool   _coastFloorLogLast;
+        private double _coastFloorLogUt  = double.NegativeInfinity;
+        private double _coastFloorDumpUt = double.NegativeInfinity;
+        private const double COAST_FLOOR_LOG_PERIOD_S = 5.0;
+        private const double COAST_FLOOR_DUMP_MIN_S   = 1.0;
 
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public readonly EditableDouble TouchdownSpeed = 0.5;
@@ -1495,7 +1502,37 @@ namespace MuMech
             // ignition trigger stacked with the path margin (minAltitude + 1.1 * floor) until LB's
             // own ignition point (horizontal stopping distance), so the AGL floor cannot light LB
             // early far from the pad. Inside the ignition point the existing minAltitude applies.
-            return !CoastBelowLbFloorBeforeIgnition(tUT, targetPos, minAltitude);
+            bool below = CoastBelowLbFloorBeforeIgnition(tUT, targetPos, minAltitude);
+            LogCoastFloorThrottled(below, tUT, targetPos, minAltitude);
+            return !below;
+        }
+
+        // Diagnostic only: re-runs the check with logging; result discarded, no state but log throttle.
+        private void LogCoastFloorThrottled(bool below, double tUT, Vector3d targetPos, double minAltitude)
+        {
+            double now = Planetarium.GetUniversalTime();
+            bool changed = !_coastFloorLogHave || below != _coastFloorLogLast;
+            bool dump = changed && now - _coastFloorDumpUt >= COAST_FLOOR_DUMP_MIN_S;
+            if (!dump && now - _coastFloorLogUt < COAST_FLOOR_LOG_PERIOD_S)
+                return;
+            _coastFloorLogHave = true;
+            _coastFloorLogLast = below;
+            _coastFloorLogUt = now;
+            if (dump) _coastFloorDumpUt = now;
+            try { CoastBelowLbFloorBeforeIgnition(tUT, targetPos, minAltitude, changed ? "change" : "periodic", dump); }
+            catch (Exception e) { Debug.Log("[LB-floor] diag failed: " + e.Message); }
+        }
+
+        /// <summary>Diagnostic: full [LB-floor] sample dump (e.g. TSO->LB handoff). No behavior change.</summary>
+        public void LogCoastFloorDiag(string tag)
+        {
+            try
+            {
+                ClosestPointToSurfaceTarget(out _, out double tUT, out _, out _);
+                CoastBelowLbFloorBeforeIgnition(tUT, Core.Target.GetPositionTargetPosition(),
+                    SUBORBIT_PATH_MIN_ALTITUDE, tag, true);
+            }
+            catch (Exception e) { Debug.Log("[LB-floor] diag failed: " + e.Message); }
         }
 
         // LandingBurn.ShouldStartBurn AGL ignition floor: LandingBurn.cs:188 distFloor.
@@ -1509,11 +1546,16 @@ namespace MuMech
         /// ShouldStartBurn (LandingBurn.cs:137-142, 191, 216). Terrain sampled in the same frame
         /// as FarInterceptPathClear (no rotation compensation).
         /// </summary>
-        private bool CoastBelowLbFloorBeforeIgnition(double tUT, Vector3d targetPos, double minAltitude)
+        private bool CoastBelowLbFloorBeforeIgnition(double tUT, Vector3d targetPos, double minAltitude,
+            string diagTag = null, bool diagSamples = false)
         {
+            bool diag = diagTag != null;
             double now = Planetarium.GetUniversalTime();
             if (double.IsNaN(tUT) || double.IsInfinity(tUT) || tUT <= now + 1.0)
+            {
+                if (diag) Debug.Log("[LB-floor] tag=" + diagTag + " skip=tUT tGo=" + (tUT - now).ToString("F1"));
                 return false;
+            }
             CelestialBody body = Vessel.mainBody;
             Orbit orbit = Vessel.orbit;
             if (body == null || orbit == null || !IsFiniteVec(targetPos))
@@ -1537,6 +1579,9 @@ namespace MuMech
             const int nSamples = 30;
             double dt = span / nSamples;
             double altPrev = VesselState.altitudeASL;
+            bool hit = false; int nEval = 0, brk = -1, minI = -1, minRI = -1;
+            double minM = double.PositiveInfinity, minRM = double.PositiveInfinity, minArc = double.NaN;
+            double omegaDeg = (body.rotates && body.rotationPeriod != 0) ? 360.0 / body.rotationPeriod : 0.0;
             for (int i = 1; i <= nSamples; i++)
             {
                 double ut = now + dt * i;
@@ -1553,7 +1598,7 @@ namespace MuMech
 
                 double arcToPad = ArcDistance(posBody, tgtAtUt, body.Radius);
                 if (arcToPad <= dIgn)
-                    break; // inside LB ignition point: existing minAltitude checks apply
+                { brk = i; break; } // inside LB ignition point: existing minAltitude checks apply
 
                 double terrainASL = body.TerrainAltitude(pos);
                 if (double.IsNaN(terrainASL) || double.IsInfinity(terrainASL)) continue;
@@ -1561,10 +1606,42 @@ namespace MuMech
                 // LandingBurn.cs:191 h_suicide at aPlan.
                 double hSuicide = (1.05 + bm) * (vDown * vDown) / (2.0 * Math.Max(aPlan - g, 0.1));
                 double need = minAltitude + 1.1 * Math.Max(LANDING_BURN_AGL_FLOOR_M, hSuicide);
-                if ((posASL - terrainASL) < need)
-                    return true;
+                double agl = posASL - terrainASL;
+                if (agl < need)
+                {
+                    if (!diag) return true;
+                    hit = true;
+                }
+                if (!diag) continue;
+
+                // Diagnostic only: terrain under the sample at time ut (body rotated by omega*tAhead),
+                // same convention as ReentrySimulation.cs:1001. Never used for the return value.
+                double tAhead = ut - now;
+                double lat = body.GetLatitude(pos);
+                double lonRot = body.GetLongitude(pos) - omegaDeg * tAhead;
+                double terrRot = body.TerrainAltitude(lat, lonRot);
+                double aglRot = posASL - terrRot;
+                double shiftKm = omegaDeg * tAhead * Math.PI / 180.0 * body.Radius * Math.Cos(lat * Math.PI / 180.0) / 1000.0;
+                nEval++;
+                if (agl - need < minM) { minM = agl - need; minI = i; minArc = arcToPad; }
+                if (aglRot - need < minRM) { minRM = aglRot - need; minRI = i; }
+                if (diagSamples)
+                    Debug.Log("[LB-floor] tag=" + diagTag + " i=" + i + "/" + nSamples
+                        + " tAhead=" + tAhead.ToString("F1") + " arc=" + arcToPad.ToString("F0")
+                        + " altASL=" + posASL.ToString("F0") + " terrASL=" + terrainASL.ToString("F0")
+                        + " agl=" + agl.ToString("F0") + " need=" + need.ToString("F0")
+                        + " hS=" + hSuicide.ToString("F0") + " dIgn=" + dIgn.ToString("F0")
+                        + " res=" + (agl < need ? "FAIL" : "PASS")
+                        + " terrRotASL=" + terrRot.ToString("F0") + " aglRot=" + aglRot.ToString("F0")
+                        + " resRot=" + (aglRot < need ? "FAIL" : "PASS") + " shiftKm=" + shiftKm.ToString("F1"));
             }
-            return false;
+            if (diag)
+                Debug.Log("[LB-floor] tag=" + diagTag + " below=" + hit + " n=" + nEval + " brk=" + brk
+                    + " span=" + span.ToString("F0") + " dIgn=" + dIgn.ToString("F0") + " vH=" + vH.ToString("F1")
+                    + " aPlan=" + aPlan.ToString("F2") + " minMargin=" + minM.ToString("F0") + "@i" + minI
+                    + " arcAtMin=" + minArc.ToString("F0") + " minMarginRot=" + minRM.ToString("F0") + "@i" + minRI
+                    + " belowRot=" + (minRM < 0));
+            return hit;
         }
 
         /// <summary>
