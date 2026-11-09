@@ -1462,7 +1462,7 @@ namespace MuMech
 
         /// <summary>
         /// True when the coast from now to ClosestPoint does not clip terrain before the
-        /// pad. Local PredictAvoid is unchanged (no hTargetError in lookRange). Samples
+        /// pad. Trajectory samples only (local 15 s + far intercept); no heading samples. Samples
         /// within 5 km of the pad are ignored. Near-pad overall is treated clear.
         /// Cached once per UT.
         /// </summary>
@@ -1480,11 +1480,40 @@ namespace MuMech
             if (horizontalVec.magnitude <= LANDING_BURN_PAD_FALSE_FIRE_M)
                 return true;
 
-            (double deltaV, bool willCrash) = PredictAvoidCollisionDeltaV(15, minAltitude);
-            if (willCrash || deltaV > 0)
+            // Path-blocked = the predicted coast itself clips terrain. Only Keplerian samples
+            // along the trajectory are used here; PredictAvoidCollisionDeltaV's straight-line
+            // heading samples (current ASL vs terrain up to ~25 km ahead) flag ridges a
+            // climbing arc would clear, and are not used for TSO shaping / the landing hoop.
+            // PredictAvoidCollisionDeltaV itself is unchanged for its other callers.
+            if (LocalCoastClipsTerrain(15, minAltitude))
                 return false;
 
             return FarInterceptPathClear(tUT, targetPos, minAltitude);
+        }
+
+        /// <summary>
+        /// True when any of 6 Keplerian samples over the next lookAheadSec of the unpowered
+        /// coast is below minAltitude above terrain (same samples and spacing as the orbit
+        /// part of PredictAvoidCollisionDeltaV). No heading / straight-line terrain samples.
+        /// </summary>
+        private bool LocalCoastClipsTerrain(double lookAheadSec, double minAltitude)
+        {
+            CelestialBody body = Vessel.mainBody;
+            if (body == null || Vessel.orbit == null || !(lookAheadSec > 0))
+                return false;
+            double now = Planetarium.GetUniversalTime();
+            const int nTime = 6;
+            for (int i = 1; i <= nTime; i++)
+            {
+                double dt = lookAheadSec * i / nTime;
+                Vector3d pos = Vessel.orbit.getPositionAtUT(now + dt);
+                if (!IsFiniteVec(pos)) continue;
+                double agl = body.GetAltitude(pos) - body.TerrainAltitude(pos);
+                if (double.IsNaN(agl) || double.IsInfinity(agl)) continue;
+                if (agl < minAltitude)
+                    return true;
+            }
+            return false;
         }
 
         // Keplerian samples along the intercept only (PredictAvoid already did local).
