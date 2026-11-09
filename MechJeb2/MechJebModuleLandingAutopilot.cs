@@ -1912,11 +1912,13 @@ namespace MuMech
             TryPredictedHeightOverPad(out predH, out _, out _);
 
             double maxRidgeRel = 0.0;
+            double maxRidgeRelCur = 0.0; // diag only: unrotated lookup, never feeds clearNeed
             double endUT = Math.Min(tUT, now + 900.0);
             double span = endUT - now;
             if (span >= 1.0)
             {
                 const int nSamples = 10;
+                double omegaDeg = (body.rotates && body.rotationPeriod != 0) ? 360.0 / body.rotationPeriod : 0.0;
                 for (int i = 1; i <= nSamples; i++)
                 {
                     double ut = now + span * i / nSamples;
@@ -1930,7 +1932,13 @@ namespace MuMech
                     if (arcToPad <= LANDING_BURN_PAD_FALSE_FIRE_M)
                         continue;
 
-                    double terrainASL = body.TerrainAltitude(pos);
+                    // Terrain under the sample at time ut: the body has rotated by omega*tAhead since now
+                    // (same convention as CoastBelowLbFloorBeforeIgnition / ReentrySimulation.cs:1001).
+                    double tAhead = ut - now;
+                    double terrainASL = body.TerrainAltitude(body.GetLatitude(pos), body.GetLongitude(pos) - omegaDeg * tAhead);
+                    double terrainCurASL = body.TerrainAltitude(pos); // diag only
+                    if (!double.IsNaN(terrainCurASL) && !double.IsInfinity(terrainCurASL) && terrainCurASL - padAsl > maxRidgeRelCur)
+                        maxRidgeRelCur = terrainCurASL - padAsl;
                     if (double.IsNaN(terrainASL) || double.IsInfinity(terrainASL)) continue;
                     double ridgeRel = terrainASL - padAsl;
                     if (ridgeRel > maxRidgeRel) maxRidgeRel = ridgeRel;
@@ -1948,6 +1956,9 @@ namespace MuMech
             // Margin of one band so jitter of clearNeed around the gate cannot flip the rule.
             terrainDriven = clearNeed > gate + HOOP_BAND_M;
 
+            // Diagnostic only (rotated vs old unrotated ridge); not used in any decision.
+            string ridgeDiag = " ridgeRot=" + maxRidgeRel.ToString("F0") + " ridgeCur=" + maxRidgeRelCur.ToString("F0");
+
             try { pathHitsTerrain = !SubOrbitPathClearToTarget(); }
             catch { pathHitsTerrain = true; }
 
@@ -1958,7 +1969,8 @@ namespace MuMech
                     + " clearNeed=" + clearNeed.ToString("F0")
                     + " predH=" + predH.ToString("F0")
                     + " miss=" + miss.ToString("F0")
-                    + (terrainDriven ? " terrain-hoop" : "");
+                    + (terrainDriven ? " terrain-hoop" : "")
+                    + ridgeDiag;
                 return true;
             }
 
@@ -1974,7 +1986,8 @@ namespace MuMech
                         + " tol=" + HOOP_MISS_TOLERANCE_M.ToString("F0")
                         + " predH=" + predH.ToString("F0")
                         + " hoopCenter=" + hoopCenter.ToString("F0")
-                        + " clearNeed=" + clearNeed.ToString("F0");
+                        + " clearNeed=" + clearNeed.ToString("F0")
+                        + ridgeDiag;
                     return true;
                 }
                 ok = true;
@@ -1982,7 +1995,8 @@ namespace MuMech
                     + " gate=" + gate.ToString("F0")
                     + " clearNeed=" + clearNeed.ToString("F0")
                     + " predH=" + predH.ToString("F0")
-                    + " miss=" + miss.ToString("F0");
+                    + " miss=" + miss.ToString("F0")
+                    + ridgeDiag;
                 return true;
             }
             if (double.IsNaN(predH) || double.IsInfinity(predH))
@@ -1996,7 +2010,8 @@ namespace MuMech
                     + " hoopCenter=" + hoopCenter.ToString("F0")
                     + " gate=" + gate.ToString("F0")
                     + " clearNeed=" + clearNeed.ToString("F0")
-                    + " miss=" + miss.ToString("F0");
+                    + " miss=" + miss.ToString("F0")
+                    + ridgeDiag;
                 return true;
             }
             if (double.IsNaN(miss) || miss > HOOP_MISS_TOLERANCE_M)
@@ -2013,7 +2028,8 @@ namespace MuMech
                 + " gate=" + gate.ToString("F0")
                 + " clearNeed=" + clearNeed.ToString("F0")
                 + " predH=" + predH.ToString("F0")
-                + " miss=" + miss.ToString("F0");
+                + " miss=" + miss.ToString("F0")
+                + ridgeDiag;
             return true;
         }
 
