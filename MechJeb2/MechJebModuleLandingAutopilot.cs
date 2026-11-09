@@ -1570,6 +1570,8 @@ namespace MuMech
         ///             also maxed with TerrainHoopFloorM from TSO bumps.
         /// hoopCenter = max(gate, clearNeed) - never below the gate; raised only for clearance.
         /// predH/miss from unpowered-coast ClosestPointToSurfaceTarget (height above pad terrain / arc miss).
+        /// Gate-driven hoop (clearNeed <= gate + band): PASS needs |predH - hoopCenter| <= band and miss <= tol.
+        /// Terrain-driven hoop (clearNeed > gate + band): PASS once the inbound coast clears terrain.
         /// </summary>
         public bool TryEvaluateLandingHoop(
             out double hoopCenter, out double gate, out double clearNeed,
@@ -1628,10 +1630,16 @@ namespace MuMech
             predDt = tUT - now;
             miss = bestDist;
 
-            Vector3d closestWorld = closestPos + body.position;
-            double closestAsl = body.GetAltitude(closestWorld);
-            if (double.IsNaN(closestAsl) || double.IsInfinity(closestAsl))
-                closestAsl = closestPos.magnitude - body.Radius;
+            // ClosestPointToSurfaceTarget returns bestPos in WORLD space (it already adds
+            // body.position). The old "closestPos + body.position" added it twice, so with the
+            // floating origin at the vessel GetAltitude measured |closest - vessel| - R
+            // (Vesta R=262.7 km -> predH ~ -155..-198 km in 20261109_022402).
+            // Re-evaluate the unpowered coast at tUT here so the cached world vector
+            // (and any floating-origin shift since it was cached) cannot skew the height.
+            Vector3d closestWorld = Vessel.orbit.getPositionAtUT(tUT);
+            if (!IsFiniteVec(closestWorld))
+                closestWorld = closestPos;
+            double closestAsl = (closestWorld - body.position).magnitude - body.Radius;
             predH = closestAsl - padAsl;
 
             double maxRidgeRel = 0.0;
@@ -1667,6 +1675,9 @@ namespace MuMech
                 clearNeed = TerrainHoopFloorM;
 
             hoopCenter = Math.Max(gate, clearNeed);
+            // Ricardo (Nov 9): hoop raised for terrain => TSO has nothing better to shape.
+            // Margin of one band so jitter of clearNeed around the gate cannot flip the rule.
+            bool terrainDriven = clearNeed > gate + HOOP_BAND_M;
 
             try { pathHitsTerrain = !SubOrbitPathClearToTarget(); }
             catch { pathHitsTerrain = true; }
@@ -1674,6 +1685,21 @@ namespace MuMech
             if (pathHitsTerrain)
             {
                 why = "path-terrain hoopCenter=" + hoopCenter.ToString("F0")
+                    + " gate=" + gate.ToString("F0")
+                    + " clearNeed=" + clearNeed.ToString("F0")
+                    + " predH=" + predH.ToString("F0")
+                    + " miss=" + miss.ToString("F0")
+                    + (terrainDriven ? " terrain-hoop" : "");
+                return true;
+            }
+
+            // Terrain-driven hoop: inbound coast clears terrain (checked above) and the caller
+            // already required Ap not past the pad. LandingBurn coasts to optimal ignition and
+            // ZEM-ZEV removes the residual miss; no predH band / miss gate here.
+            if (terrainDriven)
+            {
+                ok = true;
+                why = "ok terrain-hoop hoopCenter=" + hoopCenter.ToString("F0")
                     + " gate=" + gate.ToString("F0")
                     + " clearNeed=" + clearNeed.ToString("F0")
                     + " predH=" + predH.ToString("F0")
@@ -1710,6 +1736,50 @@ namespace MuMech
                 + " predH=" + predH.ToString("F0")
                 + " miss=" + miss.ToString("F0");
             return true;
+        }
+
+        /// <summary>
+        /// Minimum cruise apoapsis (ASL) for the initial MoveToTarget climb so TSO starts shaping
+        /// above the terrain-driven hoop: max(padASL + gate, ridgeASL + SUBORBIT_PATH_MIN_ALTITUDE) + gate,
+        /// with ridgeASL the highest terrain on the great circle vessel->pad (pad false-fire zone excluded).
+        /// Returns 0 when not applicable (no target, or pad within the false-fire range).
+        /// </summary>
+        public double AscentApaFloorForTerrain(int nSamples = 48)
+        {
+            CelestialBody body = Vessel.mainBody;
+            if (body == null) return 0.0;
+            Vector3d tgt = Core.Target.GetPositionTargetPosition();
+            Vector3d ves = VesselState.CoM - body.position;
+            if (!IsFiniteVec(tgt) || !IsFiniteVec(ves) || tgt.sqrMagnitude < 1.0 || ves.sqrMagnitude < 1.0)
+                return 0.0;
+
+            Vector3d a = ves.normalized;
+            Vector3d b = tgt.normalized;
+            double theta = Math.Acos(Math.Max(-1.0, Math.Min(1.0, Vector3d.Dot(a, b))));
+            double R = body.Radius;
+            if (theta * R <= LANDING_BURN_PAD_FALSE_FIRE_M || Math.Sin(theta) < 1e-9)
+                return 0.0;
+
+            double padAsl = body.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
+            if (double.IsNaN(padAsl) || double.IsInfinity(padAsl)) padAsl = 0.0;
+
+            double ridgeAsl = padAsl;
+            double sinT = Math.Sin(theta);
+            for (int i = 1; i < nSamples; i++)
+            {
+                double f = (double)i / nSamples;
+                if ((1.0 - f) * theta * R <= LANDING_BURN_PAD_FALSE_FIRE_M)
+                    break;
+                Vector3d dir = (Math.Sin((1.0 - f) * theta) / sinT) * a + (Math.Sin(f * theta) / sinT) * b;
+                double h = body.TerrainAltitude(body.position + dir.normalized * R);
+                if (!double.IsNaN(h) && !double.IsInfinity(h) && h > ridgeAsl)
+                    ridgeAsl = h;
+            }
+
+            double gate = ComputeOptimalDeorbitAltitude();
+            if (double.IsNaN(gate) || double.IsInfinity(gate) || gate <= 0)
+                gate = MIN_TARGET_ALTITUDE;
+            return Math.Max(padAsl + gate, ridgeAsl + SUBORBIT_PATH_MIN_ALTITUDE) + gate;
         }
 
         /// <summary>

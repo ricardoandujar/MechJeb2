@@ -329,6 +329,22 @@ namespace MuMech
                 else
                 {
                     subOrbitalApA = Math.Max(24000.0,0.08 * MainBody.Radius);
+                    // Ricardo (Nov 9): if the hoop must rise for terrain, the only better option
+                    // is a higher initial climb so TSO starts shaping above the ridge. Only raises.
+                    try
+                    {
+                        double terrainApa = Core.Landing.AscentApaFloorForTerrain();
+                        if (terrainApa > subOrbitalApA)
+                        {
+                            Debug.Log("MoveToTarget: terrain Ap floor " + terrainApa.ToString("F0")
+                                + " > base " + subOrbitalApA.ToString("F0"));
+                            subOrbitalApA = terrainApa;
+                        }
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.Log("MoveToTarget: terrain Ap floor failed: " + e.Message);
+                    }
                 }
 
                 checkWarp = false; // bypassing retroburn to move to target

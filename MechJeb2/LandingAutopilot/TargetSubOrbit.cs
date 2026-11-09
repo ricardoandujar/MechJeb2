@@ -910,6 +910,7 @@ namespace MuMech
                     + " miss=" + miss.ToString("F0")
                     + " apPast=0"
                     + " ok=1"
+                    + (hoopWhy.StartsWith("ok terrain-hoop") ? " mode=terrain-hoop" : " mode=gate-band")
                     + " frac=" + (TryApAlongTrackFraction(targetPosBody, out double fOut, out _) ? fOut.ToString("F2") : "n/a")
                     + " " + gateDetail;
                 return true;
