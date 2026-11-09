@@ -216,7 +216,8 @@ namespace MuMech
                     bool gateNeedsPull = ApNeedsPullBack(tgtPosGate);
                     if (TryPadOverflightGate(tgtPosGate, out double padDhCorrect, out _)
                         && padDhCorrect > DELTA_TARGET_ALT_THRESHOLD
-                        && !gateNeedsPull && _apReachedForShape)
+                        && !gateNeedsPull && _apReachedForShape
+                        && !TerrainHoopShaped())
                     {
                         step = Step.STATE_PROGRADE;
                         throttleCount = 0;
@@ -459,25 +460,18 @@ namespace MuMech
                 // would sample ahead of the vessel instead of the pad).
                 if (alongTrack <= 0.0)
                     return false;
-                double dt = alongTrack / hOrbSpeed;
-                if (dt < 5.0)
-                    dt = 5.0;
-                // Allow long pad-overflight horizons on small bodies (20:18 ~110 km /
-                // low hOrbSpeed exceeded the old 600s cap and fell through to ClosestPoint).
-                if (dt > 3600.0)
+                // One height-over-pad measure for state logic AND the LB hoop handoff:
+                // unpowered-coast height above pad terrain at the ClosestPoint ground-track
+                // point (= hoop predH). The old along-track/hSpeed time estimate disagreed with
+                // the handoff predH by ~4 km (20261109_025729: 7.8 vs 3.7 km), and ignored
+                // crossrange. Pad-behind / no-speed preconditions above are unchanged.
+                if (!Core.Landing.TryPredictedHeightOverPad(out double heightOverPad, out double predDt, out _))
                     return false;
-
-                double now = Planetarium.GetUniversalTime();
-                Vector3d atPad = Vessel.orbit.getPositionAtUT(now + dt) - Vessel.mainBody.position;
-                if (!MechJebModuleLandingAutopilot.IsFiniteVec(atPad))
-                    return false;
-
-                double heightOverPad = atPad.magnitude - targetPosBody.magnitude;
-                if (double.IsNaN(heightOverPad) || double.IsInfinity(heightOverPad))
+                if (predDt > 3600.0)
                     return false;
 
                 gateDeltaHeight = Core.Landing.TgtAlt - heightOverPad;
-                gateDt = dt;
+                gateDt = Math.Max(5.0, predDt);
                 return !double.IsNaN(gateDeltaHeight) && !double.IsInfinity(gateDeltaHeight);
             }
 
@@ -546,6 +540,17 @@ namespace MuMech
                 return !double.IsNaN(fraction) && !double.IsInfinity(fraction);
             }
 
+            /// <summary>
+            /// Ricardo (Nov 9): hoop raised for terrain => TSO has nothing better to shape in
+            /// height. True when the hoop is terrain-driven AND the inbound coast clears terrain;
+            /// PRO/RETRO are then done (go LATERAL_FINE) and the padDh band no longer applies.
+            /// </summary>
+            private bool TerrainHoopShaped()
+            {
+                bool driven = Core.Landing.LandingHoopIsTerrainDriven(out bool pathClear);
+                return driven && pathClear;
+            }
+
             private bool ApApproximatelyHalfwayBeforePad(Vector3d targetPosBody)
             {
                 if (!TryApAlongTrackFraction(targetPosBody, out double frac, out _))
@@ -568,8 +573,10 @@ namespace MuMech
                     TryApAlongTrackFraction(targetPosBody, out frac, out _);
                     if (Math.Abs(padDhShaped) <= DELTA_TARGET_ALT_THRESHOLD)
                         return false;
-                    // Still too high: real dump needed.
-                    if (padDhShaped < -DELTA_TARGET_ALT_THRESHOLD)
+                    // Still too high: real dump needed - gate-driven hoop only. Terrain-driven
+                    // hoop has no height band (Nov 9 rule); dumping height would re-block the
+                    // terrain the hoop was raised for. Ap-past / frac checks below still apply.
+                    if (padDhShaped < -DELTA_TARGET_ALT_THRESHOLD && !TerrainHoopShaped())
                         return true;
                 }
                 if (ApoapsisPastDestination(targetPosBody))
@@ -781,6 +788,13 @@ namespace MuMech
                 if (!_apReachedForShape || ApNeedsPullBack(targetPosBody))
                     return null;
 
+                // Ricardo order: LATERAL first (point to the pad), then PRO/RETRO shape length and
+                // terrain. 20261109_025729: forcing PROGRADE here from INIT skipped LATERAL and
+                // left ~20 deg heading error / 41.5 km crossrange at handoff. Local collision
+                // check above still applies in every state.
+                if (LateralFirstPending())
+                    return null;
+
                 bool pathClear;
                 try { pathClear = Core.Landing.SubOrbitPathClearToTarget(); }
                 catch (System.Exception e)
@@ -923,6 +937,13 @@ namespace MuMech
             /// RETROGRADE dump in place, then continue shaping - never hand back for Ap/coast.
             /// Returns non-null only if Drive should switch steps (no longer returns MoveToTarget).
             /// </summary>
+            // INIT/LATERAL own direction first (Ricardo order 1). Ap-dump and terrain shaping
+            // are PRO/RETRO work and must not pre-empt them.
+            private bool LateralFirstPending()
+            {
+                return step == Step.STATE_INIT || step == Step.STATE_LATERAL;
+            }
+
             private AutopilotStep ApplyApOwnershipGate(Vector3d targetPosBody)
             {
                 // Hyperbola / Inf Ap: keep existing dump / shape path in place.
@@ -933,7 +954,9 @@ namespace MuMech
                     {
                         // Hold shape flag off so dump is not fought by PROGRADE climbs.
                         _apReachedForShape = false;
-                        if (step != Step.STATE_RETROGRADE)
+                        // Ricardo order: LATERAL runs first; its exit chooses RETROGRADE
+                        // (hyperbolic / ApNeedsPullBack). Do not pre-empt INIT/LATERAL here.
+                        if (step != Step.STATE_RETROGRADE && !LateralFirstPending())
                         {
                             step = Step.STATE_RETROGRADE;
                             throttleCount = 0;
@@ -962,7 +985,9 @@ namespace MuMech
                 {
                     _apReachedForShape = false;
                     _establishingAp = true;
-                    if (step != Step.STATE_RETROGRADE)
+                    // Ricardo order: LATERAL runs first; its exit chooses RETROGRADE via
+                    // ApNeedsPullBack. Do not pre-empt INIT/LATERAL here.
+                    if (step != Step.STATE_RETROGRADE && !LateralFirstPending())
                     {
                         step = Step.STATE_RETROGRADE;
                         throttleCount = 0;
@@ -1194,6 +1219,15 @@ namespace MuMech
                             {
                                 // Keep PROGRADE until halfway band ├óΓé¼ΓÇ¥ do not LATERAL_FINE mid-place.
                             }
+                            else if (_apReachedForShape && TerrainHoopShaped())
+                            {
+                                // Terrain-driven hoop and inbound coast now clears terrain:
+                                // nothing better to shape in height (Nov 9). Finish crossrange.
+                                ProgradeCount = throttleCount;
+                                throttleCount = 0;
+                                Debug.Log("PROGRADE exit -> LATERAL_FINE terrain-hoop path clear");
+                                step = Step.STATE_LATERAL_FINE;
+                            }
                             else if (_apReachedForShape && ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD))))
                             {
                                 // 091142: ClosestPoint deltaHeight was high while padDh still
@@ -1306,6 +1340,23 @@ namespace MuMech
                                         + " frac=" + (double.IsNaN(apFracExit) ? "n/a" : apFracExit.ToString("F2")));
                                 }
                                 step = tooLow ? Step.STATE_PROGRADE : Step.STATE_LATERAL_FINE;
+                                break;
+                            }
+                            // Terrain-driven hoop, path clear, no Ap pull: no height band to hit
+                            // (Nov 9) - finish crossrange in LATERAL_FINE.
+                            if (!needsPull && !_apPullLatch && _apReachedForShape && !_establishingAp
+                                && !ApoapsisPastDestination(targetPos) && TerrainHoopShaped())
+                            {
+                                RetrogradeCount = throttleCount;
+                                throttleCount = 0;
+                                double nowT = Planetarium.GetUniversalTime();
+                                if (nowT - _lastRetroExitLogUt >= 1.0)
+                                {
+                                    _lastRetroExitLogUt = nowT;
+                                    Debug.Log("RETROGRADE exit -> LATERAL_FINE terrain-hoop path clear"
+                                        + " padDh=" + (double.IsNaN(padDhExit) ? "n/a" : padDhExit.ToString("F0")));
+                                }
+                                step = Step.STATE_LATERAL_FINE;
                                 break;
                             }
                             if (needsPull || _apPullLatch)

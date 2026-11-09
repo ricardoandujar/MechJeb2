@@ -1525,7 +1525,10 @@ namespace MuMech
                 if (!IsFiniteVec(pos)) continue;
 
                 Vector3d posBody = pos - body.position;
-                Vector3d tgtNow = targetPos - body.position;
+                // GetPositionTargetPosition() is already body-relative (surface - body.position).
+                // Subtracting body.position again put the pad ~R away from itself, so the 5 km
+                // pad exclusion below never applied (same frame class as the predH fix).
+                Vector3d tgtNow = targetPos;
                 Vector3d tgtAtUt = RotateRelativePosition(tgtNow, ut - now);
                 if (!IsFiniteVec(posBody) || !IsFiniteVec(tgtAtUt)) continue;
 
@@ -1564,6 +1567,67 @@ namespace MuMech
         public double TerrainHoopFloorM = 0;
 
         /// <summary>
+        /// Single height-over-pad measure shared by TSO state logic (padDh), the TSO->LB hoop
+        /// (predH) and autotest/LB logging: unpowered-coast height above pad terrain at the
+        /// ClosestPointToSurfaceTarget ground-track point, re-evaluated from the orbit at tUT
+        /// (body-relative). predDt = tUT - now, miss = arc miss at that point.
+        /// False when no finite closest point or the closest point is already behind.
+        /// </summary>
+        public bool TryPredictedHeightOverPad(out double predH, out double predDt, out double miss)
+        {
+            predH = double.NaN;
+            predDt = double.NaN;
+            miss = double.NaN;
+            CelestialBody body = Vessel.mainBody;
+            if (body == null || Vessel.orbit == null)
+                return false;
+            double padAsl = body.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
+            if (double.IsNaN(padAsl) || double.IsInfinity(padAsl))
+                padAsl = 0.0;
+            ClosestPointToSurfaceTarget(out Vector3d closestPos, out double tUT, out double bestDist, out _);
+            double now = Planetarium.GetUniversalTime();
+            if (double.IsNaN(tUT) || double.IsInfinity(tUT))
+                return false;
+            predDt = tUT - now;
+            miss = bestDist;
+            if (tUT < now - 1.0)
+                return false;
+            // ClosestPointToSurfaceTarget returns bestPos in WORLD space (it already adds
+            // body.position). Re-evaluate the coast at tUT so the cached world vector (and any
+            // floating-origin shift since it was cached) cannot skew the height.
+            Vector3d closestWorld = Vessel.orbit.getPositionAtUT(tUT);
+            if (!IsFiniteVec(closestWorld))
+                closestWorld = closestPos;
+            predH = (closestWorld - body.position).magnitude - body.Radius - padAsl;
+            return !double.IsNaN(predH) && !double.IsInfinity(predH);
+        }
+
+        // Per-physics-tick cache of TryEvaluateLandingHoop (called from Sync, handoff, and the
+        // TSO terrain-hoop state checks several times per tick). Keyed on UT + TerrainHoopFloorM
+        // so a same-tick hoop bump re-evaluates.
+        private bool _hoopCacheValid;
+        private double _hoopCacheUt = double.NaN;
+        private double _hoopCacheFloor = double.NaN;
+        private bool _hoopCacheRet, _hoopCachePathHits, _hoopCacheOk, _hoopCacheTerrainDriven;
+        private double _hoopCacheCenter, _hoopCacheGate, _hoopCacheClearNeed, _hoopCachePredH, _hoopCacheMiss, _hoopCachePredDt;
+        private string _hoopCacheWhy = "";
+
+        /// <summary>
+        /// True when the current hoop is terrain-driven (clearNeed > gate + HOOP_BAND_M; raised for
+        /// inbound terrain). pathClear = inbound coast clears terrain (SubOrbitPathClearToTarget).
+        /// False (pathClear=false) when the hoop cannot be evaluated.
+        /// </summary>
+        public bool LandingHoopIsTerrainDriven(out bool pathClear)
+        {
+            pathClear = false;
+            if (!TryEvaluateLandingHoop(out _, out _, out _, out _, out _, out _,
+                    out bool pathHits, out _, out _))
+                return false;
+            pathClear = !pathHits;
+            return _hoopCacheTerrainDriven;
+        }
+
+        /// <summary>
         /// TSO->LB landing hoop above pad terrain.
         /// gate = ComputeOptimalDeorbitAltitude() (gravity-scaled; Vesta floors at MIN_TARGET_ALTITUDE).
         /// clearNeed = max ridge (terrainASL - padASL) along predicted inbound coast + SUBORBIT_PATH_MIN_ALTITUDE,
@@ -1578,6 +1642,36 @@ namespace MuMech
             out double predH, out double miss, out double predDt,
             out bool pathHitsTerrain, out bool ok, out string why)
         {
+            double nowC = Planetarium.GetUniversalTime();
+            if (!(_hoopCacheValid && nowC == _hoopCacheUt && TerrainHoopFloorM == _hoopCacheFloor))
+            {
+                _hoopCacheRet = TryEvaluateLandingHoopUncached(
+                    out _hoopCacheCenter, out _hoopCacheGate, out _hoopCacheClearNeed,
+                    out _hoopCachePredH, out _hoopCacheMiss, out _hoopCachePredDt,
+                    out _hoopCachePathHits, out _hoopCacheOk, out _hoopCacheWhy,
+                    out _hoopCacheTerrainDriven);
+                _hoopCacheValid = true;
+                _hoopCacheUt = nowC;
+                _hoopCacheFloor = TerrainHoopFloorM;
+            }
+            hoopCenter = _hoopCacheCenter;
+            gate = _hoopCacheGate;
+            clearNeed = _hoopCacheClearNeed;
+            predH = _hoopCachePredH;
+            miss = _hoopCacheMiss;
+            predDt = _hoopCachePredDt;
+            pathHitsTerrain = _hoopCachePathHits;
+            ok = _hoopCacheOk;
+            why = _hoopCacheWhy;
+            return _hoopCacheRet;
+        }
+
+        private bool TryEvaluateLandingHoopUncached(
+            out double hoopCenter, out double gate, out double clearNeed,
+            out double predH, out double miss, out double predDt,
+            out bool pathHitsTerrain, out bool ok, out string why, out bool terrainDriven)
+        {
+            terrainDriven = false;
             hoopCenter = double.NaN;
             gate = double.NaN;
             clearNeed = double.NaN;
@@ -1630,17 +1724,9 @@ namespace MuMech
             predDt = tUT - now;
             miss = bestDist;
 
-            // ClosestPointToSurfaceTarget returns bestPos in WORLD space (it already adds
-            // body.position). The old "closestPos + body.position" added it twice, so with the
-            // floating origin at the vessel GetAltitude measured |closest - vessel| - R
-            // (Vesta R=262.7 km -> predH ~ -155..-198 km in 20261109_022402).
-            // Re-evaluate the unpowered coast at tUT here so the cached world vector
-            // (and any floating-origin shift since it was cached) cannot skew the height.
-            Vector3d closestWorld = Vessel.orbit.getPositionAtUT(tUT);
-            if (!IsFiniteVec(closestWorld))
-                closestWorld = closestPos;
-            double closestAsl = (closestWorld - body.position).magnitude - body.Radius;
-            predH = closestAsl - padAsl;
+            // Shared height-over-pad measure (same as TSO padDh): see TryPredictedHeightOverPad.
+            // (Old code added body.position twice to a world-space bestPos -> predH ~-155..-198 km.)
+            TryPredictedHeightOverPad(out predH, out _, out _);
 
             double maxRidgeRel = 0.0;
             double endUT = Math.Min(tUT, now + 900.0);
@@ -1677,7 +1763,7 @@ namespace MuMech
             hoopCenter = Math.Max(gate, clearNeed);
             // Ricardo (Nov 9): hoop raised for terrain => TSO has nothing better to shape.
             // Margin of one band so jitter of clearNeed around the gate cannot flip the rule.
-            bool terrainDriven = clearNeed > gate + HOOP_BAND_M;
+            terrainDriven = clearNeed > gate + HOOP_BAND_M;
 
             try { pathHitsTerrain = !SubOrbitPathClearToTarget(); }
             catch { pathHitsTerrain = true; }
@@ -1693,11 +1779,21 @@ namespace MuMech
                 return true;
             }
 
-            // Terrain-driven hoop: inbound coast clears terrain (checked above) and the caller
-            // already required Ap not past the pad. LandingBurn coasts to optimal ignition and
-            // ZEM-ZEV removes the residual miss; no predH band / miss gate here.
+            // Terrain-driven hoop: no predH band (nothing better to shape in height), but the
+            // horizontal miss must still be within tolerance - TSO LATERAL_FINE removes the
+            // residual crossrange before handing off (Ricardo order: LATERAL -> PRO/RETRO ->
+            // LATERAL_FINE -> exit). Caller requires Ap not past pad; path clear checked above.
             if (terrainDriven)
             {
+                if (double.IsNaN(miss) || miss > HOOP_MISS_TOLERANCE_M)
+                {
+                    why = "miss-high terrain-hoop miss=" + miss.ToString("F0")
+                        + " tol=" + HOOP_MISS_TOLERANCE_M.ToString("F0")
+                        + " predH=" + predH.ToString("F0")
+                        + " hoopCenter=" + hoopCenter.ToString("F0")
+                        + " clearNeed=" + clearNeed.ToString("F0");
+                    return true;
+                }
                 ok = true;
                 why = "ok terrain-hoop hoopCenter=" + hoopCenter.ToString("F0")
                     + " gate=" + gate.ToString("F0")
@@ -1840,23 +1936,12 @@ namespace MuMech
             if (alongTrack <= 0.0)
                 return false;
 
-            double dt = alongTrack / hOrbSpeed;
-            if (dt < 5.0)
-                dt = 5.0;
-            if (dt > 600.0)
-                return false;
-
-            double nowUt = Planetarium.GetUniversalTime();
-            Vector3d atPad = Vessel.orbit.getPositionAtUT(nowUt + dt) - Vessel.mainBody.position;
-            if (!IsFiniteVec(atPad))
-                return false;
-
-            double heightOverPad = atPad.magnitude - targetPosBody.magnitude;
-            if (double.IsNaN(heightOverPad) || double.IsInfinity(heightOverPad))
+            // Shared height-over-pad measure (same as TSO padDh and hoop predH).
+            if (!TryPredictedHeightOverPad(out double heightOverPad, out double predDt, out _))
                 return false;
 
             padDh = TgtAlt - heightOverPad;
-            padDt = dt;
+            padDt = Math.Max(5.0, predDt);
             return !double.IsNaN(padDh) && !double.IsInfinity(padDh);
         }
 
