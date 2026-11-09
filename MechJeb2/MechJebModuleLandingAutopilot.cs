@@ -834,8 +834,22 @@ namespace MuMech
                 Vector3d pHi = orbit.getPositionAtUT(hi) - body.position;
                 if (!IsFiniteVec(pHi) || pHi.magnitude > R)
                 {
-                    cpImpactEarlyReturn = true;
-                    return hi;
+                    // +horizon is outside R, but a sub-orbital Kepler path passes through the body
+                    // and comes back out (161531: impact 864-1512 s, +3600 s above R), so [now, hi]
+                    // does not bracket the impact. The below-R stretch of a pass always contains
+                    // periapsis: bracket [now, next Pe] instead. No dip -> unchanged.
+                    double tPe = double.NaN;
+                    try { tPe = orbit.NextPeriapsisTime(nowUT); } catch (Exception) { }
+                    bool peInRange = tPe > nowUT && tPe < hi;
+                    Vector3d pNow = orbit.getPositionAtUT(nowUT) - body.position;
+                    Vector3d pPe = peInRange ? orbit.getPositionAtUT(tPe) - body.position : Vector3d.zero;
+                    if (!peInRange || !IsFiniteVec(pNow) || pNow.magnitude <= R
+                        || !IsFiniteVec(pPe) || pPe.magnitude >= R)
+                    {
+                        cpImpactEarlyReturn = true;
+                        return hi;
+                    }
+                    hi = tPe;
                 }
                 for (int i = 0; i < 40; i++)
                 {
