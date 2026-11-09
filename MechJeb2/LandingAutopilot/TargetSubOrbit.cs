@@ -93,6 +93,9 @@ namespace MuMech
             public bool AutotestApPast = false;
             public string AutotestBurnAxis = "";
             public string AutotestHandoff = "";
+            public double AutotestHoopCenter = double.NaN;
+            public double AutotestPredH = double.NaN;
+            public double AutotestHoopMiss = double.NaN;
 
             public TargetSubOrbit(MechJebCore core) : base(core)
             {
@@ -147,6 +150,8 @@ namespace MuMech
                 // TSO owns suborbital shape to pad@TgtAlt then hands DIRECTLY to LandingBurn.
                 // Enforce gravity-scaled LB overhead floor every tick (crush / bump-cap cannot undercut).
                 Core.Landing.EnsureTgtAltMeetsLbOverheadFloor();
+                if (_apReachedForShape)
+                    Core.Landing.SyncTgtAltToLandingHoop();
                 if (ratio == 0)
                     ratio = Core.Landing.getHDistanceToTarget() / Math.Max(1.0, VesselState.altitudeTrue);
 
@@ -172,7 +177,10 @@ namespace MuMech
                     Core.Thrust.ThrustOff();
                     Debug.Log("[TSO->LB] direct handoff: " + lbReason
                         + " step=" + step
-                        + " dist=" + Core.Landing.getHDistanceToTarget().ToString("F0"));
+                        + " dist=" + Core.Landing.getHDistanceToTarget().ToString("F0")
+                        + " hoopCenter=" + AutotestHoopCenter.ToString("F0")
+                        + " predH=" + AutotestPredH.ToString("F0")
+                        + " miss=" + AutotestHoopMiss.ToString("F0"));
                     return new LandingBurn(Core);
                 }
                 else if (lbReason == "pad-behind")
@@ -187,11 +195,12 @@ namespace MuMech
                 {
                     // 1 Hz threshold reasoning while shaping toward the handoff.
                     _lastLbHandoffLogUt = Planetarium.GetUniversalTime();
-                    if (lbReason.StartsWith("padDh-out-of-band")
-                        || lbReason.StartsWith("overhead-too-low")
+                    if (lbReason.StartsWith("hoop-fail")
+                        || lbReason.StartsWith("hoop-eval")
                         || lbReason.StartsWith("lb-gate")
                         || lbReason.StartsWith("path-")
                         || lbReason.StartsWith("needs-pull")
+                        || lbReason.StartsWith("ap-past")
                         || lbReason.StartsWith("not-descending"))
                     {
                         Debug.Log("[TSO->LB] waiting: " + lbReason + " step=" + step);
@@ -715,7 +724,7 @@ namespace MuMech
             /// </summary>
             private void BumpTgtAltForTerrainClear()
             {
-                // Terrain bump only after Ap reached for shape, and never while pull needed.
+                // Raise hoop clearNeed floor (TerrainHoopFloorM); SyncTgtAltToLandingHoop aims TgtAlt at hoop.
                 Vector3d tgt = Core.Target.GetPositionTargetPosition();
                 if (!_apReachedForShape)
                     return;
@@ -725,11 +734,15 @@ namespace MuMech
                 if (now - _lastTerrainRaiseUt < TERRAIN_RAISE_INTERVAL_S)
                     return;
                 _lastTerrainRaiseUt = now;
-                double raised = Math.Min(TERRAIN_RAISE_MAX_TGTALT_M, Core.Landing.TgtAlt + TERRAIN_RAISE_STEP_M);
-                if (raised > Core.Landing.TgtAlt)
+                double raised = Math.Min(
+                    TERRAIN_RAISE_MAX_TGTALT_M,
+                    Math.Max(Core.Landing.TerrainHoopFloorM, Core.Landing.TgtAlt) + TERRAIN_RAISE_STEP_M);
+                if (raised > Core.Landing.TerrainHoopFloorM)
                 {
-                    Core.Landing.TgtAlt = raised;
-                    LogApSeq("terrain-after-Ap raise TgtAlt=" + Core.Landing.TgtAlt.ToString("F0"));
+                    Core.Landing.TerrainHoopFloorM = raised;
+                    Core.Landing.SyncTgtAltToLandingHoop();
+                    LogApSeq("terrain-after-Ap raise hoopFloor=" + Core.Landing.TerrainHoopFloorM.ToString("F0")
+                        + " TgtAlt=" + Core.Landing.TgtAlt.ToString("F0"));
                 }
             }
 
@@ -848,55 +861,55 @@ namespace MuMech
                     reason = "pad-behind";
                     return false;
                 }
-                if (!TryPadOverflightGate(targetPosBody, out double padDh, out double padDt))
-                {
-                    reason = "no-pad-gate";
-                    return false;
-                }
-                // Ideal overhead: |padDh| within TgtAlt band (same 600 m as shape exit).
-                if (Math.Abs(padDh) > DELTA_TARGET_ALT_THRESHOLD)
-                {
-                    reason = "padDh-out-of-band padDh=" + padDh.ToString("F0")
-                        + " padDt=" + padDt.ToString("F0");
-                    return false;
-                }
-                // Absolute LB headroom: band must not accept heightOverPad below gravity-scaled gate.
-                double heightOverPad = Core.Landing.TgtAlt - padDh;
-                double minOverhead = Core.Landing.MinSafeLandingBurnOverheadM();
-                if (heightOverPad < minOverhead)
-                {
-                    Core.Landing.EnsureTgtAltMeetsLbOverheadFloor();
-                    reason = "overhead-too-low h=" + heightOverPad.ToString("F0")
-                        + " min=" + minOverhead.ToString("F0")
-                        + " padDh=" + padDh.ToString("F0");
-                    return false;
-                }
                 if (ApoapsisPastDestination(targetPosBody))
                 {
                     reason = "ap-past-pad";
+                    AutotestHoopCenter = double.NaN;
+                    AutotestPredH = double.NaN;
+                    AutotestHoopMiss = double.NaN;
                     return false;
                 }
 
-                bool pathClear;
-                try { pathClear = Core.Landing.SubOrbitPathClearToTarget(); }
-                catch { reason = "path-check-failed"; return false; }
-                if (!pathClear)
+                // Landing hoop: unpowered coast through gate-above-pad (ComputeOptimal) raised
+                // for inbound terrain clearance. Replaces padDh-vs-TgtAlt band + crest/vSpd.
+                if (!Core.Landing.TryEvaluateLandingHoop(
+                        out double hoopCenter, out double gate, out double clearNeed,
+                        out double predH, out double miss, out double predDt,
+                        out bool pathHits, out bool hoopOk, out string hoopWhy))
                 {
-                    reason = "path-terrain-blocked";
+                    reason = "hoop-eval-failed " + hoopWhy;
+                    return false;
+                }
+                AutotestHoopCenter = hoopCenter;
+                AutotestPredH = predH;
+                AutotestHoopMiss = miss;
+                AutotestPadDh = double.IsNaN(predH) || double.IsNaN(hoopCenter) ? double.NaN : (hoopCenter - predH);
+                AutotestPadDt = predDt;
+
+                if (!hoopOk || pathHits)
+                {
+                    reason = "hoop-fail " + hoopWhy + " apPast=0";
                     return false;
                 }
 
-                // Shared descent / intercept / low-side checks; SKIP far-range brake gate.
+                // Shared intercept / path checks; SKIP far-range brake gate.
                 if (!Core.Landing.LandingBurnEntryAllowedFromTargetSubOrbit(
                         out bool localBlocked, out bool pathBlocked, out string gateDetail))
                 {
                     reason = "lb-gate " + gateDetail
-                        + " local=" + localBlocked + " path=" + pathBlocked;
+                        + " local=" + localBlocked + " path=" + pathBlocked
+                        + " hoopCenter=" + hoopCenter.ToString("F0")
+                        + " predH=" + predH.ToString("F0");
                     return false;
                 }
 
-                reason = "padDh=" + padDh.ToString("F0")
-                    + " padDt=" + padDt.ToString("F0")
+                reason = "hoopCenter=" + hoopCenter.ToString("F0")
+                    + " gate=" + gate.ToString("F0")
+                    + " clearNeed=" + clearNeed.ToString("F0")
+                    + " predH=" + predH.ToString("F0")
+                    + " miss=" + miss.ToString("F0")
+                    + " apPast=0"
+                    + " ok=1"
                     + " frac=" + (TryApAlongTrackFraction(targetPosBody, out double fOut, out _) ? fOut.ToString("F2") : "n/a")
                     + " " + gateDetail;
                 return true;

@@ -339,7 +339,7 @@ namespace MuMech
             _csvPath = Path.Combine(logDir, stamp + ".csv");
             _csv = new StreamWriter(_csvPath, false, Encoding.UTF8);
             _csv.WriteLine(
-                "time,autopilot_state,step,altitude,terrain_altitude,vertical_speed,horizontal_speed,distance_to_target,ApA,apoapsis_past_pad,frac,padDh,padDt,t_go,burn_axis,burn_started,zem,zev,a_cmd,handoff,throttle,pitch,a_plan,a_clip");
+                "time,autopilot_state,step,altitude,terrain_altitude,vertical_speed,horizontal_speed,distance_to_target,ApA,apoapsis_past_pad,frac,padDh,padDt,t_go,burn_axis,burn_started,zem,zev,a_cmd,handoff,throttle,pitch,a_plan,a_clip,hoop_center,pred_h,hoop_miss");
             _csv.Flush();
 
             GameEvents.onCrash.Add(OnCrash);
@@ -646,6 +646,9 @@ namespace MuMech
             string aPlanS = "";
             string aClipS = "";
             string handoff = "";
+            string hoopCenterS = "";
+            string predHS = "";
+            string hoopMissS = "";
 
             if (core.Landing != null)
             {
@@ -667,6 +670,12 @@ namespace MuMech
                     apPast = tsoStep.AutotestApPast ? "1" : "0";
                     burnAxis = tsoStep.AutotestBurnAxis ?? "";
                     handoff = tsoStep.AutotestHandoff ?? "";
+                    if (!double.IsNaN(tsoStep.AutotestHoopCenter))
+                        hoopCenterS = tsoStep.AutotestHoopCenter.ToString("F1", CultureInfo.InvariantCulture);
+                    if (!double.IsNaN(tsoStep.AutotestPredH))
+                        predHS = tsoStep.AutotestPredH.ToString("F1", CultureInfo.InvariantCulture);
+                    if (!double.IsNaN(tsoStep.AutotestHoopMiss))
+                        hoopMissS = tsoStep.AutotestHoopMiss.ToString("F1", CultureInfo.InvariantCulture);
                 }
                 else if (cur is LandingBurn lbStep)
                 {
@@ -716,7 +725,7 @@ namespace MuMech
             double pitch   = vs.vesselPitch;
 
             string line = string.Format(CultureInfo.InvariantCulture,
-                "{0:F3},{1},{2},{3:F3},{4:F3},{5:F3},{6:F3},{7:F3},{8:F3},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20:F3},{21:F3},{22},{23}",
+                "{0:F3},{1},{2},{3:F3},{4:F3},{5:F3},{6:F3},{7:F3},{8:F3},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20:F3},{21:F3},{22},{23},{24},{25},{26}",
                 ut - _startUt,
                 CsvEscape(state),
                 CsvEscape(stepName),
@@ -740,7 +749,10 @@ namespace MuMech
                 throttle,
                 pitch,
                 aPlanS,
-                aClipS);
+                aClipS,
+                hoopCenterS,
+                predHS,
+                hoopMissS);
 
             _csv.WriteLine(line);
             _csv.Flush();

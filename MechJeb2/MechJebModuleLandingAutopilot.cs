@@ -1318,6 +1318,7 @@ namespace MuMech
 
         void setTargetAltitude()
         {
+            TerrainHoopFloorM = 0;
             if (MainBody.atmosphere == true)
             {
                 TargetAltitude = 0.5 * MainBody.atmosphereDepth;
@@ -1552,6 +1553,180 @@ namespace MuMech
         /// localTerrainBlocked: near-term PredictAvoid wants a hop (MoveToTarget).
         /// pathTerrainBlocked: intercept samples clip before the pad (stay, raise path).
         /// </summary>
+        // Hoop band matches prior TgtAlt +/-600 shaping threshold.
+        public const double HOOP_BAND_M = 600.0;
+        // Horizontal miss at predicted CA: 2 km. LB ZEM-ZEV can clean ~2 km lateral on Vesta
+        // (hs~100-200 m/s, aPlan~2 m/s^2 => stopDist~5-20 km) while still requiring a shaped
+        // approach; 5 km is the near-pad false-fire band and too loose for handoff quality.
+        public const double HOOP_MISS_TOLERANCE_M = 2000.0;
+
+        // Optional ratchet from TSO terrain bump: never lowers hoop, only raises clearNeed.
+        public double TerrainHoopFloorM = 0;
+
+        /// <summary>
+        /// TSO->LB landing hoop above pad terrain.
+        /// gate = ComputeOptimalDeorbitAltitude() (gravity-scaled; Vesta floors at MIN_TARGET_ALTITUDE).
+        /// clearNeed = max ridge (terrainASL - padASL) along predicted inbound coast + SUBORBIT_PATH_MIN_ALTITUDE,
+        ///             also maxed with TerrainHoopFloorM from TSO bumps.
+        /// hoopCenter = max(gate, clearNeed) - never below the gate; raised only for clearance.
+        /// predH/miss from unpowered-coast ClosestPointToSurfaceTarget (height above pad terrain / arc miss).
+        /// </summary>
+        public bool TryEvaluateLandingHoop(
+            out double hoopCenter, out double gate, out double clearNeed,
+            out double predH, out double miss, out double predDt,
+            out bool pathHitsTerrain, out bool ok, out string why)
+        {
+            hoopCenter = double.NaN;
+            gate = double.NaN;
+            clearNeed = double.NaN;
+            predH = double.NaN;
+            miss = double.NaN;
+            predDt = double.NaN;
+            pathHitsTerrain = false;
+            ok = false;
+            why = "";
+
+            CelestialBody body = Vessel.mainBody;
+            if (body == null || Vessel.orbit == null)
+            {
+                why = "no-body-orbit";
+                return false;
+            }
+
+            gate = ComputeOptimalDeorbitAltitude();
+            if (double.IsNaN(gate) || double.IsInfinity(gate) || gate <= 0)
+                gate = MIN_TARGET_ALTITUDE;
+
+            Vector3d targetPosBody = Core.Target.GetPositionTargetPosition();
+            if (!IsFiniteVec(targetPosBody))
+            {
+                why = "no-target";
+                return false;
+            }
+
+            double padAsl = body.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
+            if (double.IsNaN(padAsl) || double.IsInfinity(padAsl))
+                padAsl = 0.0;
+
+            ClosestPointToSurfaceTarget(out Vector3d closestPos, out double tUT, out double bestDist, out _);
+            double now = Planetarium.GetUniversalTime();
+            if (double.IsNaN(tUT) || double.IsInfinity(tUT))
+            {
+                why = "no-closest";
+                return false;
+            }
+            if (tUT < now - 1.0)
+            {
+                why = "intercept-behind";
+                miss = bestDist;
+                predDt = tUT - now;
+                hoopCenter = Math.Max(gate, Math.Max(SUBORBIT_PATH_MIN_ALTITUDE, TerrainHoopFloorM));
+                clearNeed = hoopCenter;
+                return true;
+            }
+
+            predDt = tUT - now;
+            miss = bestDist;
+
+            Vector3d closestWorld = closestPos + body.position;
+            double closestAsl = body.GetAltitude(closestWorld);
+            if (double.IsNaN(closestAsl) || double.IsInfinity(closestAsl))
+                closestAsl = closestPos.magnitude - body.Radius;
+            predH = closestAsl - padAsl;
+
+            double maxRidgeRel = 0.0;
+            double endUT = Math.Min(tUT, now + 900.0);
+            double span = endUT - now;
+            if (span >= 1.0)
+            {
+                const int nSamples = 10;
+                for (int i = 1; i <= nSamples; i++)
+                {
+                    double ut = now + span * i / nSamples;
+                    Vector3d pos = Vessel.orbit.getPositionAtUT(ut);
+                    if (!IsFiniteVec(pos)) continue;
+                    Vector3d posBody = pos - body.position;
+                    Vector3d tgtAtUt = RotateRelativePosition(targetPosBody, ut - now);
+                    if (!IsFiniteVec(posBody) || !IsFiniteVec(tgtAtUt)) continue;
+
+                    double arcToPad = ArcDistance(posBody, tgtAtUt, body.Radius);
+                    if (arcToPad <= LANDING_BURN_PAD_FALSE_FIRE_M)
+                        continue;
+
+                    double terrainASL = body.TerrainAltitude(pos);
+                    if (double.IsNaN(terrainASL) || double.IsInfinity(terrainASL)) continue;
+                    double ridgeRel = terrainASL - padAsl;
+                    if (ridgeRel > maxRidgeRel) maxRidgeRel = ridgeRel;
+                }
+            }
+
+            clearNeed = maxRidgeRel + SUBORBIT_PATH_MIN_ALTITUDE;
+            if (clearNeed < SUBORBIT_PATH_MIN_ALTITUDE)
+                clearNeed = SUBORBIT_PATH_MIN_ALTITUDE;
+            if (TerrainHoopFloorM > clearNeed)
+                clearNeed = TerrainHoopFloorM;
+
+            hoopCenter = Math.Max(gate, clearNeed);
+
+            try { pathHitsTerrain = !SubOrbitPathClearToTarget(); }
+            catch { pathHitsTerrain = true; }
+
+            if (pathHitsTerrain)
+            {
+                why = "path-terrain hoopCenter=" + hoopCenter.ToString("F0")
+                    + " gate=" + gate.ToString("F0")
+                    + " clearNeed=" + clearNeed.ToString("F0")
+                    + " predH=" + predH.ToString("F0")
+                    + " miss=" + miss.ToString("F0");
+                return true;
+            }
+            if (double.IsNaN(predH) || double.IsInfinity(predH))
+            {
+                why = "no-predH";
+                return true;
+            }
+            if (Math.Abs(predH - hoopCenter) > HOOP_BAND_M)
+            {
+                why = "predH-out-of-band predH=" + predH.ToString("F0")
+                    + " hoopCenter=" + hoopCenter.ToString("F0")
+                    + " gate=" + gate.ToString("F0")
+                    + " clearNeed=" + clearNeed.ToString("F0")
+                    + " miss=" + miss.ToString("F0");
+                return true;
+            }
+            if (double.IsNaN(miss) || miss > HOOP_MISS_TOLERANCE_M)
+            {
+                why = "miss-high miss=" + miss.ToString("F0")
+                    + " tol=" + HOOP_MISS_TOLERANCE_M.ToString("F0")
+                    + " predH=" + predH.ToString("F0")
+                    + " hoopCenter=" + hoopCenter.ToString("F0");
+                return true;
+            }
+
+            ok = true;
+            why = "ok hoopCenter=" + hoopCenter.ToString("F0")
+                + " gate=" + gate.ToString("F0")
+                + " clearNeed=" + clearNeed.ToString("F0")
+                + " predH=" + predH.ToString("F0")
+                + " miss=" + miss.ToString("F0");
+            return true;
+        }
+
+        /// <summary>
+        /// Point TSO shaping (TgtAlt) at the hoop so pad-overflight aims at hoopCenter.
+        /// </summary>
+        public void SyncTgtAltToLandingHoop()
+        {
+            if (!TryEvaluateLandingHoop(
+                    out double hoopCenter, out _, out _, out _, out _, out _,
+                    out _, out _, out _))
+                return;
+            if (double.IsNaN(hoopCenter) || hoopCenter <= 0)
+                return;
+            TgtAlt = hoopCenter;
+        }
+
+
         // Match TargetSubOrbit DELTA_TARGET_ALT_THRESHOLD: low-side TgtAlt margin for ZEM-ZEV.
         private const double LANDING_BURN_TGTALT_LOW_MARGIN_M = 600.0;
 
@@ -1638,9 +1813,8 @@ namespace MuMech
             pathTerrainBlocked = false;
             detail = "";
 
-            // Do not teach LandingBurn to burn while climbing hard into the pad.
-            // From TSO after pad@TgtAlt shaped: allow near-crest (v~0 at Ap) — that is the
-            // ballistic overhead gate. Strict v<0 only when enforceRangeGate (non-TSO path).
+            // Descent required for non-TSO entry. TSO direct handoff uses the landing hoop
+            // (TryEvaluateLandingHoop) instead of crest/vSpd and padDh-vs-TgtAlt bands.
             if (enforceRangeGate)
             {
                 if (!(VesselState.speedVertical < 0))
@@ -1648,11 +1822,6 @@ namespace MuMech
                     detail = "ascending";
                     return false;
                 }
-            }
-            else if (VesselState.speedVertical > 0.5)
-            {
-                detail = "ascending-hard v=" + VesselState.speedVertical.ToString("F1");
-                return false;
             }
 
             ClosestPointToSurfaceTarget(out Vector3d closestPos, out double tUT, out double distanceToTarget, out Vector3d surfaceVel);
@@ -1678,11 +1847,9 @@ namespace MuMech
                 }
             }
 
-            // Low-side TgtAlt margin: do not enter while heightOverPad < TgtAlt-600 (padDh > 600).
-            // ZEM-ZEV needs room as LandingBurn reduces height over pad.
-            // Absolute floor: +/-600 band must not accept heightOverPad below the gravity-scaled
-            // ComputeOptimal gate (Vesta ~3500 floor covers ~2400 m low-g LB braking headroom).
-            if (TryPadOverflightDeltaHeight(out double padDhEntry, out _))
+            // Non-TSO: keep low-side TgtAlt margin + ComputeOptimal overhead floor.
+            // TSO direct handoff: hoop already enforced in TryDirectLandingBurnHandoff.
+            if (enforceRangeGate && TryPadOverflightDeltaHeight(out double padDhEntry, out _))
             {
                 if (padDhEntry > LANDING_BURN_TGTALT_LOW_MARGIN_M)
                 {

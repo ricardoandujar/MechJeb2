@@ -146,9 +146,24 @@ namespace MuMech.LandingAutopilot
             _aClip = aClip;
         }
 
+
+        private void CancelWarpOnBurnLatch()
+        {
+            // Any ignition latch must drop time warp (regular or physics) immediately.
+            try { Core.Warp.MinimumWarp(true); } catch { }
+            checkWarp = false;
+            warpOn = false;
+            warpOnP = false;
+        }
         private bool ShouldStartBurn(ref Vector3d posError, ref Vector3d vel)
         {
-            if (shouldBurnStarted) return true;
+            if (shouldBurnStarted)
+            {
+                // Re-assert warp cancel if latch came from any path / FixedUpdate race.
+                if (checkWarp || warpOn || warpOnP)
+                    CancelWarpOnBurnLatch();
+                return true;
+            }
 
             if (vel.magnitude < 1.0) return false;
 
@@ -177,6 +192,7 @@ namespace MuMech.LandingAutopilot
             if (current_agl <= Math.Max(distFloor, h_suicide))
             {
                 shouldBurnStarted = true;
+                CancelWarpOnBurnLatch();
                 densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h / 5.0, MainBody), FlightGlobals.getExternalTemperature(current_h / 5.0, MainBody));
                 Debug.Log($"[ShouldStartBurn2:agl] agl={current_agl:F0}, h_suicide={h_suicide:F0}, Vy={Vy:F3}, aPlan={a:F2}");
                 return true;
@@ -208,6 +224,7 @@ namespace MuMech.LandingAutopilot
                 if (rc)
                 {
                     shouldBurnStarted = true;
+                    CancelWarpOnBurnLatch();
                     densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h / 5.0, MainBody), FlightGlobals.getExternalTemperature(current_h / 5.0, MainBody));
                 }
                 else
