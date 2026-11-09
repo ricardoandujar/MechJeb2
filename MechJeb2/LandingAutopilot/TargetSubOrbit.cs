@@ -77,6 +77,13 @@ namespace MuMech
             private double _lastApPullLatchLogUt = double.NegativeInfinity;
             // Shape once entered from MoveToTarget Ap handoff (or after in-place Ap dump clears).
             private bool _apReachedForShape = false;
+            // Ricardo (Nov 9): terrain decides PRO vs RETRO before the first shaping burn.
+            // INIT owns the decision (first sample on INIT entry); LATERAL re-samples until a
+            // valid sample (predDt > 1 s) reads blocked, then it latches. Consumed at the LATERAL exit.
+            // Per-entry: TSO is constructed fresh on every entry, so initializers reset these.
+            private bool _terrainBlockedAtInit = false;
+            private bool _terrainInitSampleValid = false;
+            private double _terrainInitLastPredDt = double.NaN;
             private double _lastApPhaseLogUt = double.NegativeInfinity;
             private string _lastApPhaseLogged = "";
             private double minVerticalAngle;
@@ -157,6 +164,8 @@ namespace MuMech
 
                 // Ricardo: stay in TargetSubOrbit. Gate dump-in-place / shape only (no Ap handback).
                 Vector3d tgtPosSeq = Core.Target.GetPositionTargetPosition();
+                if (LateralFirstPending())
+                    SampleInitTerrainDecision();
                 AutopilotStep apGate = ApplyApOwnershipGate(tgtPosSeq);
                 if (apGate != null)
                     return apGate;
@@ -577,7 +586,10 @@ namespace MuMech
                     // Still too high: real dump needed - gate-driven hoop only. Terrain-driven
                     // hoop has no height band (Nov 9 rule); dumping height would re-block the
                     // terrain the hoop was raised for. Ap-past / frac checks below still apply.
-                    if (padDhShaped < -DELTA_TARGET_ALT_THRESHOLD && !TerrainHoopShaped())
+                    // Terrain blocks the coast (INIT decision): dumping height only re-blocks it.
+                    bool terrainHold = _terrainBlockedAtInit
+                        && (LateralFirstPending() || step == Step.STATE_PROGRADE);
+                    if (padDhShaped < -DELTA_TARGET_ALT_THRESHOLD && !TerrainHoopShaped() && !terrainHold)
                         return true;
                 }
                 if (ApoapsisPastDestination(targetPosBody))
@@ -945,6 +957,22 @@ namespace MuMech
                 return step == Step.STATE_INIT || step == Step.STATE_LATERAL;
             }
 
+            // Skip ClosestPoint samples at tUT~now (Ap flip branch: floor/far checks
+            // return "clear" there, LA:1555/1692). Sticky: never clears inside TSO.
+            private void SampleInitTerrainDecision()
+            {
+                if (_terrainBlockedAtInit) return;
+                if (!Core.Landing.TryPredictedHeightOverPad(out _, out double dtT, out _) || dtT <= 1.0)
+                    return;
+                _terrainInitSampleValid = true;
+                _terrainInitLastPredDt = dtT;
+                try { _terrainBlockedAtInit = !Core.Landing.SubOrbitPathClearToTarget(); }
+                catch { return; }
+                if (_terrainBlockedAtInit)
+                    Debug.Log("[TSO-init] terrain blocks coast -> PROGRADE after LATERAL step=" + step
+                        + " predDt=" + dtT.ToString("F0"));
+            }
+
             private AutopilotStep ApplyApOwnershipGate(Vector3d targetPosBody)
             {
                 // Hyperbola / Inf Ap: keep existing dump / shape path in place.
@@ -1125,6 +1153,10 @@ namespace MuMech
                     case Step.STATE_INIT: // Initial run - setup for lateral burn
                         forceHoriz = true; // Force horizontal thrust
                         step = Step.STATE_LATERAL;
+                        if (!_terrainBlockedAtInit)
+                            Debug.Log("[TSO-init] INIT done: " + (_terrainInitSampleValid ? "valid sample clear" : "no valid sample yet")
+                                + " predDt=" + (double.IsNaN(_terrainInitLastPredDt) ? "n/a" : _terrainInitLastPredDt.ToString("F0"))
+                                + " -> LATERAL re-samples");
                         desiredHorizontalVel = Vector3d.zero;
                         herror =  gainCancelHVelocity * crossrangeVec; // Add Cross range to horizontal error
                         rc = 100; // we only want horizontal thrust here
@@ -1154,6 +1186,8 @@ namespace MuMech
                                 step = Step.STATE_RETROGRADE;
                             else if (ApNeedsPullBack(targetPos))
                                 step = Step.STATE_RETROGRADE; // Ap past / frac>~0.5: pull back
+                            else if (_terrainBlockedAtInit)
+                                step = Step.STATE_PROGRADE;   // terrain blocks coast: RETRO only shortens/lowers it
                             else if (TryPadOverflightGate(targetPos, out double padDhLat, out _)
                                      && padDhLat < -DELTA_TARGET_ALT_THRESHOLD)
                                 step = Step.STATE_RETROGRADE; // overflight too high
