@@ -339,7 +339,7 @@ namespace MuMech
             _csvPath = Path.Combine(logDir, stamp + ".csv");
             _csv = new StreamWriter(_csvPath, false, Encoding.UTF8);
             _csv.WriteLine(
-                "time,autopilot_state,step,altitude,terrain_altitude,vertical_speed,horizontal_speed,distance_to_target,ApA,apoapsis_past_pad,frac,padDh,padDt,t_go,burn_axis,burn_started,zem,zev,a_cmd,handoff,throttle,pitch");
+                "time,autopilot_state,step,altitude,terrain_altitude,vertical_speed,horizontal_speed,distance_to_target,ApA,apoapsis_past_pad,frac,padDh,padDt,t_go,burn_axis,burn_started,zem,zev,a_cmd,handoff,throttle,pitch,a_plan,a_clip");
             _csv.Flush();
 
             GameEvents.onCrash.Add(OnCrash);
@@ -643,6 +643,8 @@ namespace MuMech
             string zemS = "";
             string zevS = "";
             string aCmdS = "";
+            string aPlanS = "";
+            string aClipS = "";
             string handoff = "";
 
             if (core.Landing != null)
@@ -681,6 +683,10 @@ namespace MuMech
                         zevS = lbStep.AutotestZevMag.ToString("F1", CultureInfo.InvariantCulture);
                     if (!double.IsNaN(lbStep.AutotestDesiredAccelMag))
                         aCmdS = lbStep.AutotestDesiredAccelMag.ToString("F2", CultureInfo.InvariantCulture);
+                    if (!double.IsNaN(lbStep.AutotestAPlan))
+                        aPlanS = lbStep.AutotestAPlan.ToString("F2", CultureInfo.InvariantCulture);
+                    if (!double.IsNaN(lbStep.AutotestAClip))
+                        aClipS = lbStep.AutotestAClip.ToString("F2", CultureInfo.InvariantCulture);
                 }
                 else if (cur != null)
                 {
@@ -710,7 +716,7 @@ namespace MuMech
             double pitch   = vs.vesselPitch;
 
             string line = string.Format(CultureInfo.InvariantCulture,
-                "{0:F3},{1},{2},{3:F3},{4:F3},{5:F3},{6:F3},{7:F3},{8:F3},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20:F3},{21:F3}",
+                "{0:F3},{1},{2},{3:F3},{4:F3},{5:F3},{6:F3},{7:F3},{8:F3},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20:F3},{21:F3},{22},{23}",
                 ut - _startUt,
                 CsvEscape(state),
                 CsvEscape(stepName),
@@ -732,7 +738,9 @@ namespace MuMech
                 aCmdS,
                 CsvEscape(handoff),
                 throttle,
-                pitch);
+                pitch,
+                aPlanS,
+                aClipS);
 
             _csv.WriteLine(line);
             _csv.Flush();
