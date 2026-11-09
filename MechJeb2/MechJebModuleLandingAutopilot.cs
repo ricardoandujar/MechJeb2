@@ -469,7 +469,7 @@ namespace MuMech
                 return ComputeCorrectionTerrain(landRadius, progradeFraction, radialFraction, lateralFraction, _rotatedLandingSite);
             }
 
-            // 2. No predicted impact â†’ use the alternate correction method using a shell altitude using heightASL.
+            // 2. No predicted impact → use the alternate correction method using a shell altitude using heightASL.
             //    This handles all cases where periapsis is above terrain or the solver fails.
             return ComputeCorrectionShellG(heightASL, progradeFraction, radialFraction, lateralFraction);
         }
@@ -607,7 +607,7 @@ namespace MuMech
             Vector3d prograde = Vector3d.Exclude(Vessel.up, Vessel.obt_velocity).normalized;
             Vector3d normal = Vector3d.Cross(prograde, Vessel.up).normalized;
 
-            // --- 3. Decompose raw Î”v ---
+            // --- 3. Decompose raw Δv ---
             double dvRadial = Vector3d.Dot(courseCorrection, Vessel.up);
             double dvPrograde = Vector3d.Dot(courseCorrection, prograde);
             double dvNormal   = Vector3d.Dot(courseCorrection, normal);
@@ -1198,8 +1198,8 @@ namespace MuMech
         /// <param name="body">The celestial body around which the orbit occurs.</param>
         /// <returns>The circular orbit speed in meters per second.</returns>
         /// <remarks>
-        /// This calculation is based on the vis-viva equation simplified for circular orbits: v = sqrt(Î¼ / r),
-        /// where Î¼ is the gravitational parameter (GM) and r is the orbital radius (body radius + altitude).
+        /// This calculation is based on the vis-viva equation simplified for circular orbits: v = sqrt(μ / r),
+        /// where μ is the gravitational parameter (GM) and r is the orbital radius (body radius + altitude).
         /// </remarks>
         public double GetCircularOrbitSpeed(double altitude, CelestialBody body)
         {
@@ -1639,12 +1639,8 @@ namespace MuMech
             detail = "";
 
             // Do not teach LandingBurn to burn while climbing hard into the pad.
-            // Strict v<0 when enforceRangeGate (non-TSO path).
-            // TSO direct handoff: gravity-scaled crest â€” allow small ascent if ballistic
-            // apex gain h_gain=v^2/(2g) stays inside min(100 m, band/6) and remaining
-            // high-side padDh room (band = +/- LANDING_BURN_TGTALT_LOW_MARGIN_M).
-            // Vesta g~0.25: 100 m allows ~7 m/s (covers the +1.1 crest that blocked 004036);
-            // Kerbin g~9.8: 100 m allows ~44 m/s (not a multi-second free climb).
+            // From TSO after pad@TgtAlt shaped: allow near-crest (v~0 at Ap) — that is the
+            // ballistic overhead gate. Strict v<0 only when enforceRangeGate (non-TSO path).
             if (enforceRangeGate)
             {
                 if (!(VesselState.speedVertical < 0))
@@ -1653,38 +1649,10 @@ namespace MuMech
                     return false;
                 }
             }
-            else
+            else if (VesselState.speedVertical > 0.5)
             {
-                double vSpdCrest = VesselState.speedVertical;
-                double gCrest = Math.Max(VesselState.localg, 0.05);
-                double hGain = 0.0;
-                double tApCoast = 0.0;
-                if (vSpdCrest > 0.0)
-                {
-                    hGain = (vSpdCrest * vSpdCrest) / (2.0 * gCrest);
-                    tApCoast = vSpdCrest / gCrest;
-                    const double crestGainCapM = 100.0;
-                    double hGainAllow = Math.Min(crestGainCapM, LANDING_BURN_TGTALT_LOW_MARGIN_M / 6.0);
-                    if (TryPadOverflightDeltaHeight(out double padDhCrest, out _))
-                    {
-                        // High side of +/-600 band is padDh >= -600; climb reduces padDh.
-                        double roomHigh = LANDING_BURN_TGTALT_LOW_MARGIN_M + padDhCrest;
-                        if (roomHigh > 0.0)
-                            hGainAllow = Math.Min(hGainAllow, roomHigh);
-                    }
-                    if (hGain > hGainAllow)
-                    {
-                        detail = "ascending-hard v=" + vSpdCrest.ToString("F1")
-                            + " hGain=" + hGain.ToString("F1")
-                            + " tAp=" + tApCoast.ToString("F1")
-                            + " allow=" + hGainAllow.ToString("F1");
-                        return false;
-                    }
-                }
-                // Stash crest metrics for the ok detail line below.
-                detail = "crest v=" + vSpdCrest.ToString("F1")
-                    + " hGain=" + hGain.ToString("F1")
-                    + " tAp=" + tApCoast.ToString("F1");
+                detail = "ascending-hard v=" + VesselState.speedVertical.ToString("F1");
+                return false;
             }
 
             ClosestPointToSurfaceTarget(out Vector3d closestPos, out double tUT, out double distanceToTarget, out Vector3d surfaceVel);
@@ -1769,21 +1737,18 @@ namespace MuMech
                 return false;
             }
 
-                        if (!FarInterceptPathClear(tUT, targetPos, SUBORBIT_PATH_MIN_ALTITUDE))
+            if (!FarInterceptPathClear(tUT, targetPos, SUBORBIT_PATH_MIN_ALTITUDE))
             {
                 pathTerrainBlocked = true;
                 detail = "path-terrain";
                 return false;
             }
 
-            string crestInfo = detail.StartsWith("crest ", StringComparison.Ordinal) ? (" " + detail) : "";
             detail = "ok dist=" + horizontalVec.magnitude.ToString("F0")
-                + " rangeGate=" + (enforceRangeGate ? "on" : "off")
-                + crestInfo;
+                + " rangeGate=" + (enforceRangeGate ? "on" : "off");
             return true;
         }
     }
-
 
     //A descent speed policy that gives the max safe speed if our entire velocity were straight down
     internal class SafeDescentSpeedPolicy : IDescentSpeedPolicy
