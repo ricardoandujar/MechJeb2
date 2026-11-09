@@ -96,6 +96,9 @@ namespace MuMech
         private Vector3d _closestPointCacheVel;
         private const double CLOSEST_POINT_REUSE_DT = 0.05;
         private const double CLOSEST_POINT_FULL_PERIOD = 1.0;
+        // Local refine is trusted only for an interior minimum at least this far (s) from both
+        // window edges. Edge / invalid result => the minimum is outside the window: full search.
+        private const double CLOSEST_POINT_EDGE_S = 1.0;
         private const bool LOG_CLOSEST_POINT = false;
 
         // Same-tick reuse for hop + CoastClear. Do not keep this across UT: a 0.05s
@@ -761,6 +764,7 @@ namespace MuMech
                 double aC = Math.Max(now, seedUT - window);
                 double bC = seedUT + window;
                 if (bC < aC) bC = aC + window;
+                double aWin = aC, bWin = bC;
                 double phiC = (1.0 + Math.Sqrt(5.0)) / 2.0;
                 double invPhiC = 1.0 / phiC;
                 double invPhi2C = invPhiC * invPhiC;
@@ -773,35 +777,37 @@ namespace MuMech
                     else
                         aC = x1;
                 }
-                Consider((aC + bC) / 2.0);
-                Consider(seedUT);
-                Consider(now);
-                if (!IsFiniteVec(workPos) || workDist == double.MaxValue)
+                double midC = (aC + bC) / 2.0;
+                Consider(midC);
+                // 20261109_132043: at the datum-impact edge the window fell past impact
+                // (GetDist=MaxValue), mid and seed were rejected and Consider(now) won (tUT=now);
+                // the refine then crept +20 s per call back to the impact. Only an interior, valid
+                // minimum is a real local minimum - otherwise fall through to the full search.
+                bool localOk = IsFiniteVec(workPos) && workDist < double.MaxValue
+                    && midC - aWin > CLOSEST_POINT_EDGE_S && bWin - midC > CLOSEST_POINT_EDGE_S;
+                if (localOk)
                 {
-                    workUT = now;
-                    workPos = orbit.getPositionAtUT(now) - body.position;
-                    if (!IsFiniteVec(workPos)) workPos = orbit.pos;
-                    workDist = GetDist(now);
-                    if (double.IsNaN(workDist) || double.IsInfinity(workDist)) workDist = 0;
+                    Consider(seedUT);
+                    bestDist = workDist;
+                    bestUT = workUT;
+                    bestPos = workPos;
+                    Vector3d velCheap = Vessel.orbit.getOrbitalVelocityAtUT(bestUT);
+                    Vector3d rotCheap = Vector3d.Cross(MainBody.angularVelocity, bestPos.normalized);
+                    surfaceVel = velCheap - rotCheap;
+                    if (LOG_CLOSEST_POINT)
+                        Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1") + " cheap");
+                    bestPos += body.position;
+                    _closestPointCacheValid = true;
+                    _closestPointCacheNow = now;
+                    _closestPointCacheLat = lat;
+                    _closestPointCacheLon = lon;
+                    _closestPointCachePos = bestPos;
+                    _closestPointCacheUT = bestUT;
+                    _closestPointCacheDist = bestDist;
+                    _closestPointCacheVel = surfaceVel;
+                    return;
                 }
-                bestDist = workDist;
-                bestUT = workUT;
-                bestPos = workPos;
-                Vector3d velCheap = Vessel.orbit.getOrbitalVelocityAtUT(bestUT);
-                Vector3d rotCheap = Vector3d.Cross(MainBody.angularVelocity, bestPos.normalized);
-                surfaceVel = velCheap - rotCheap;
-                if (LOG_CLOSEST_POINT)
-                    Debug.Log("bestUT:" + (bestUT - now).ToString("F1") + " dist:" + bestDist.ToString("F1") + " alt:" + (bestPos.magnitude - R).ToString("F1") + " cheap");
-                bestPos += body.position;
-                _closestPointCacheValid = true;
-                _closestPointCacheNow = now;
-                _closestPointCacheLat = lat;
-                _closestPointCacheLon = lon;
-                _closestPointCachePos = bestPos;
-                _closestPointCacheUT = bestUT;
-                _closestPointCacheDist = bestDist;
-                _closestPointCacheVel = surfaceVel;
-                return;
+                // Minimum at a window edge or past the impact horizon: full search below.
             }
             // --- 1. Binary-search horizon detection ---------------------------------
             double FindImpactUT(double nowUT, double horizon)
