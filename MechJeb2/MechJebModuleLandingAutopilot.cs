@@ -2126,6 +2126,61 @@ namespace MuMech
             return Math.Max(padAsl + gate, ridgeAsl + SUBORBIT_PATH_MIN_ALTITUDE) + gate;
         }
 
+        // ---- Trip-speed cruise floor (k > 1 only; never called at k == 1.0). Ricardo t257u. ----
+        // The powered level cruise needs obstacle clearance over the highest terrain ahead, and the
+        // pad-relative LB approach margin (900 + 1.1 * LB AGL floor = 4200 m ABOVE THE PAD) near
+        // ignition. AscentApaFloorForTerrain (k == 1.0) is untouched.
+        public const double TRIP_CRUISE_CLEARANCE_M = 2500.0;
+        public const double TRIP_PAD_OVERHEAD_M = SUBORBIT_PATH_MIN_ALTITUDE + 1.1 * LANDING_BURN_AGL_FLOOR_M;
+        public const double TRIP_CRUISE_ABORT_AGL_M = 1200.0;
+
+        /// <summary>
+        /// k > 1 trip cruise hold ASL = max(ridgeAhead + TRIP_CRUISE_CLEARANCE_M, padAsl + TRIP_PAD_OVERHEAD_M).
+        /// ridgeAhead: highest terrain on the great circle vessel -> pad (current body frame: the powered
+        /// cruise is flown on the surface bearing), pad 5 km false-fire band excluded (same as
+        /// AscentApaFloorForTerrain, finer sampling). Returns 0 when not applicable.
+        /// </summary>
+        public double TripCruiseFloorAsl(out double ridgeAsl, out double padAsl, int nSamples = 192)
+        {
+            ridgeAsl = double.NaN;
+            padAsl = double.NaN;
+            CelestialBody body = Vessel.mainBody;
+            if (body == null) return 0.0;
+            Vector3d tgt = Core.Target.GetPositionTargetPosition();
+            Vector3d ves = VesselState.CoM - body.position;
+            if (!IsFiniteVec(tgt) || !IsFiniteVec(ves) || tgt.sqrMagnitude < 1.0 || ves.sqrMagnitude < 1.0)
+                return 0.0;
+
+            Vector3d a = ves.normalized;
+            Vector3d b = tgt.normalized;
+            double theta = Math.Acos(Math.Max(-1.0, Math.Min(1.0, Vector3d.Dot(a, b))));
+            double R = body.Radius;
+            if (theta * R <= LANDING_BURN_PAD_FALSE_FIRE_M || Math.Sin(theta) < 1e-9)
+                return 0.0;
+
+            padAsl = body.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
+            if (double.IsNaN(padAsl) || double.IsInfinity(padAsl)) padAsl = 0.0;
+
+            ridgeAsl = padAsl;
+            double sinT = Math.Sin(theta);
+            for (int i = 0; i < nSamples; i++)
+            {
+                double f = (double)i / nSamples;
+                if ((1.0 - f) * theta * R <= LANDING_BURN_PAD_FALSE_FIRE_M)
+                    break;
+                Vector3d dir = (Math.Sin((1.0 - f) * theta) / sinT) * a + (Math.Sin(f * theta) / sinT) * b;
+                double h = body.TerrainAltitude(body.position + dir.normalized * R);
+                if (!double.IsNaN(h) && !double.IsInfinity(h) && h > ridgeAsl)
+                    ridgeAsl = h;
+            }
+            return Math.Max(ridgeAsl + TRIP_CRUISE_CLEARANCE_M, padAsl + TRIP_PAD_OVERHEAD_M);
+        }
+
+        public double TripCruiseFloorAsl()
+        {
+            return TripCruiseFloorAsl(out _, out _);
+        }
+
         /// <summary>
         /// Point TSO shaping (TgtAlt) at the hoop so pad-overflight aims at hoopCenter.
         /// </summary>

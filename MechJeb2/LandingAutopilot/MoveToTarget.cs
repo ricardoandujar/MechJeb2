@@ -497,10 +497,12 @@ namespace MuMech
                     // is a higher initial climb so TSO starts shaping above the ridge. Only raises.
                     try
                     {
-                        double terrainApa = Core.Landing.AscentApaFloorForTerrain();
+                        // k > 1 (trip cruise): climb to max(ridge ahead + 2.5 km, pad + 4.2 km) instead
+                        // of the k == 1.0 coast floor (ridge + 900 + gate). k == 1.0: unchanged call.
+                        double terrainApa = TripOn ? Core.Landing.TripCruiseFloorAsl() : Core.Landing.AscentApaFloorForTerrain();
                         if (terrainApa > subOrbitalApA)
                         {
-                            Debug.Log("MoveToTarget: terrain Ap floor " + terrainApa.ToString("F0")
+                            Debug.Log("MoveToTarget: " + (TripOn ? "trip cruise floor " : "terrain Ap floor ") + terrainApa.ToString("F0")
                                 + " > base " + subOrbitalApA.ToString("F0"));
                             subOrbitalApA = terrainApa;
                         }

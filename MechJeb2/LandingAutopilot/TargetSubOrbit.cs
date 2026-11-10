@@ -100,6 +100,9 @@ namespace MuMech
             private const double TRIP_PREDESCENT_M = 5000.0;  // start the -3 m/s pre-descent this far before dIgn
             private const double TRIP_HOLD_MAX_RAISE_M = 3000.0;
             private bool TripCruiseActive => _tripCruise && Core.Landing.TripSpeedOn;
+            private double _tripFloorUt = double.NegativeInfinity;
+            private double _tripFloorAsl = 0.0;
+            private double _tripFloorTryUt = double.NegativeInfinity;
 
             // Autotest / KSP.log 1 Hz guidance snapshot (no behavior change).
             private double _lastGuidanceLogUt = double.NegativeInfinity;
@@ -1297,6 +1300,13 @@ namespace MuMech
                             {
                                 // Keep PROGRADE until halfway band ├óΓé¼ΓÇ¥ do not LATERAL_FINE mid-place.
                             }
+                            else if (Core.Landing.TripSpeedOn && _apReachedForShape && !_tripCruise
+                                     && TripFloorReached() && TryStartTripCruise("trip floor reached"))
+                            {
+                                // k > 1 only (Ricardo t257u): at the trip floor the powered level cruise starts
+                                // without waiting for an unpowered coast to clear the k == 1.0 LB-floor margin.
+                                // Stay PROGRADE; TripCruiseCommand owns the burn.
+                            }
                             else if (_apReachedForShape && TerrainHoopShaped()
                                      && TerrainClearWithExitMargin())
                             {
@@ -1606,13 +1616,16 @@ namespace MuMech
                     double k = Core.Landing.TripSpeedK;
                     double vClear = VesselState.speedSurfaceHorizontal;
                     double asl = VesselState.altitudeASL;
-                    double hold = asl;
-                    double apa = VesselState.orbitApA;
-                    if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit) && apa > asl)
-                        hold = Math.Min(apa, asl + 2000.0); // level path >= the ballistic path that was clear
-                    double terrainFloor = Core.Landing.AscentApaFloorForTerrain();
-                    if (!double.IsNaN(terrainFloor) && !double.IsInfinity(terrainFloor) && terrainFloor > hold)
-                        hold = terrainFloor;
+                    // Ricardo t257u: hold = trip cruise floor max(ridge ahead + 2.5 km, pad + 4.2 km),
+                    // replacing max(asl, min(Ap, asl + 2 km), ridge + 900 + gate). This function only
+                    // runs at k > 1 (TripSpeedOn checked above).
+                    double terrainFloor = Core.Landing.TripCruiseFloorAsl(out double ridgeAsl, out double padAsl);
+                    if (double.IsNaN(terrainFloor) || double.IsInfinity(terrainFloor) || !(terrainFloor > 0))
+                    {
+                        LogTrip("TSO cruise skip (" + why + "): no trip floor", true);
+                        return false;
+                    }
+                    double hold = terrainFloor;
                     if (hold > asl + TRIP_HOLD_MAX_RAISE_M)
                     {
                         LogTrip("TSO cruise skip (" + why + "): hold " + hold.ToString("F0") + " >> asl " + asl.ToString("F0"), true);
@@ -1622,7 +1635,9 @@ namespace MuMech
                     double bm = Core.Landing.BurnMarginPerc / 100.0;
                     // LB braking cap: ignition distance at vTarget within half of the remaining distance.
                     double vBrakeCap = Math.Sqrt(2.0 * TripPlanAccel() * 0.5 * Math.Max(dist, 0.0) / (1.0 + bm));
-                    double vTarget = Math.Min(k * vClear, vBrakeCap);
+                    // Speed reference: surface circular speed at the hold height (was vClear).
+                    double vRef = TripSurfaceCircularSpeed(hold);
+                    double vTarget = Math.Min(k * vRef, vBrakeCap);
                     if (!(vTarget > vClear + 1.0))
                     {
                         LogTrip("TSO cruise skip (" + why + "): vTarget " + vTarget.ToString("F1") + " vClear " + vClear.ToString("F1"), true);
@@ -1640,8 +1655,10 @@ namespace MuMech
                     _tripHoldAsl = hold;
                     LogTrip("TSO cruise START (" + why + ") k=" + k.ToString("F2")
                         + " vClear=" + vClear.ToString("F1") + " vTarget=" + vTarget.ToString("F1")
+                        + " vRef=" + vRef.ToString("F1")
                         + " vBrakeCap=" + vBrakeCap.ToString("F1") + " holdAsl=" + hold.ToString("F0")
-                        + " asl=" + asl.ToString("F0") + " terrainApFloor=" + terrainFloor.ToString("F0")
+                        + " asl=" + asl.ToString("F0") + " tripFloor=" + terrainFloor.ToString("F0")
+                        + " ridge=" + ridgeAsl.ToString("F0") + " pad=" + padAsl.ToString("F0")
                         + " dist=" + dist.ToString("F0") + " dIgnAtTarget=" + TripIgnitionDistance(vTarget).ToString("F0"), true);
                     return true;
                 }
@@ -1650,6 +1667,49 @@ namespace MuMech
                     LogTrip("TSO cruise start failed: " + e.Message, true);
                     return false;
                 }
+            }
+
+            /// <summary>
+            /// k > 1 only: surface-relative circular speed along the pad bearing at holdAsl
+            /// (vCirc(R + hold) minus the surface rotation component along the pad bearing, scaled to hold radius).
+            /// </summary>
+            private double TripSurfaceCircularSpeed(double holdAsl)
+            {
+                Vector3d up = VesselState.up;
+                Vector3d posBody = VesselState.CoM - MainBody.position;
+                double r = Math.Max(posBody.magnitude, 1.0);
+                double rHold = Math.Max(MainBody.Radius + holdAsl, 1.0);
+                double vCirc = Math.Sqrt(MainBody.gravParameter / rHold);
+                Vector3d tgtBody = Core.Target.GetPositionTargetPosition(); // body-relative
+                Vector3d toPad = Vector3d.Exclude(up, tgtBody - posBody);
+                Vector3d vRot = Vector3d.Exclude(up, VesselState.orbitalVelocity - VesselState.surfaceVelocity);
+                double along = (toPad.sqrMagnitude > 1.0) ? Vector3d.Dot(vRot, toPad.normalized) : 0.0;
+                return vCirc - along * rHold / r;
+            }
+
+            /// <summary>
+            /// k > 1 only (Edit 4): at/near the trip cruise floor (within 150 m). Floor cached 1 s
+            /// (192-sample scan); start attempts rate-limited to 1 Hz.
+            /// </summary>
+            private bool TripFloorReached()
+            {
+                if (!Core.Landing.TripSpeedOn)
+                    return false;
+                double now = Planetarium.GetUniversalTime();
+                if (now - _tripFloorTryUt < 1.0)
+                    return false;
+                if (now - _tripFloorUt >= 1.0)
+                {
+                    _tripFloorUt = now;
+                    try { _tripFloorAsl = Core.Landing.TripCruiseFloorAsl(); }
+                    catch (Exception) { _tripFloorAsl = 0.0; }
+                }
+                if (!(_tripFloorAsl > 0))
+                    return false;
+                if (VesselState.altitudeASL < _tripFloorAsl - 150.0)
+                    return false;
+                _tripFloorTryUt = now;
+                return true;
             }
 
             private void AbortTripCruise(string why)
@@ -1682,7 +1742,9 @@ namespace MuMech
                     double g = Math.Max(VesselState.localg, 0.05);
 
                     (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
-                    double coastNeed = SUBORBIT_PATH_MIN_ALTITUDE_M + 1.1 * MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FLOOR_M;
+                    // Ricardo t257u: powered cruise abort = obstacle clearance 1200 m AGL (was 900 + 1.1 * LB floor = 4200,
+                    // the pad-relative LB margin applied as AGL). Only runs at k > 1.
+                    double coastNeed = MechJebModuleLandingAutopilot.TRIP_CRUISE_ABORT_AGL_M;
                     if (caCrash || caDv > 0)
                     {
                         AbortTripCruise("CA dV=" + caDv.ToString("F0") + " crash=" + caCrash);
