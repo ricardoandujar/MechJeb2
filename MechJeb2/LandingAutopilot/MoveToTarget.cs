@@ -181,6 +181,149 @@ namespace MuMech
                 return baseline;
             }
 
+            // ---- Trip-speed lever (Ricardo t231u). Every behaviour branch is guarded by TripOn
+            // (k > 1 + 1e-9); at k == 1.0 none of the code below changes a command. ----
+            private double TripK => Core.Landing.TripSpeedK;
+            private bool TripOn => Core.Landing.TripSpeedOn;
+            // CA owns the climb while a hop is armed or its tail is decaying; the lever waits.
+            private bool TripCaQuiet => (vCollisionCounter <= 0) && (hopBlend <= 0);
+            private double _lastTripLogUT = double.NegativeInfinity;
+
+            private void LogTrip(string msg)
+            {
+                double ut = VesselState.time;
+                if ((ut - _lastTripLogUT) < DOWNRANGE_H_LOG_INTERVAL)
+                    return;
+                _lastTripLogUT = ut;
+                Debug.Log("[TripSpeed] " + msg);
+            }
+
+            // 1.15x vacuum Ap strip / dump threshold. Relaxed to 1.15*k only while the lever is on
+            // AND CA is quiet (a powered climb braking at k*g peaks its Kepler Ap at ~h + k*(cruise-h)).
+            // k == 1.0 (or CA active): exactly 1.15, the pre-lever constant.
+            private double ApStripFactor()
+            {
+                if (TripOn && TripCaQuiet)
+                    return 1.15 * TripK;
+                return 1.15;
+            }
+
+            // Same preconditions as setVerticalSpeed's lowGSubOrbitalClimb (vacuum low-g far hop).
+            private bool TripLowGFarHop(double hTargetError)
+            {
+                return (MainBody.atmosphere == false)
+                    && (Core.Landing.LandingType == 1)
+                    && (Core.Landing.g <= Core.Landing.LOW_GRAVITY)
+                    && (hTargetError > H_SUBORBITAL_DISTANCE_THRESHOLD_CONSTANT)
+                    && (errStep < Ascend2Target.FineTune)
+                    && (suppressThrottle == 0);
+            }
+
+            /// <summary>
+            /// Step 3 (k > 1 only, CA quiet): powered climb to the cruise ASL with active vertical-speed
+            /// cancel there instead of today's ballistic lob + coast-up. Below the braking curve
+            /// vz = sqrt(2 k g (cruise - h)) climb at up to (k-1)*200 m/s; on/above it command the curve
+            /// (vz -> 0 at cruise) - the existing dump/pitch-over path supplies the (k-1) g of down-thrust.
+            /// At/above cruise hold ASL (+/-5 m/s). Cruise = CruiseApaTarget() (terrain Ap floor, unchanged).
+            /// </summary>
+            private void TripPoweredClimb(ref double desiredVerticalSpeed)
+            {
+                double cruise = CruiseApaTarget();
+                double cruiseHold = cruise + 100.0; // small bias so Ap ends >= cruise (TargetSubOrbital gate)
+                double asl = VesselState.altitudeASL;
+                double vz = VesselState.speedVertical;
+                double gk = TripK * Math.Max(VesselState.localg, 0.05);
+                double toGo = cruiseHold - asl;
+                double vzArrive = (toGo > 0) ? Math.Sqrt(2.0 * gk * toGo) : 0.0;
+                double vzCap = Math.Max(3.0, (TripK - 1.0) * 200.0);
+                string phase;
+                if ((toGo > 0) && (vz < vzArrive))
+                {
+                    desiredVerticalSpeed = Math.Max(3.0, Math.Min(vzCap, vzArrive));
+                    phase = "climb";
+                }
+                else if (toGo > 0)
+                {
+                    desiredVerticalSpeed = vzArrive; // on the k*g braking curve: cancel vz under power
+                    phase = "brake";
+                }
+                else
+                {
+                    desiredVerticalSpeed = Math.Max(-5.0, Math.Min(5.0, toGo / 30.0)); // hold cruise ASL
+                    phase = "hold";
+                }
+                LogTrip("MTT " + phase + " k=" + TripK.ToString("F2")
+                    + " asl=" + asl.ToString("F0") + " cruise=" + cruise.ToString("F0")
+                    + " vz=" + vz.ToString("F1") + " desV=" + desiredVerticalSpeed.ToString("F1")
+                    + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1")
+                    + " ApA=" + VesselState.orbitApA.ToString("F0"));
+            }
+
+            // k-scaled downrange H gate (same formula as HasMeaningfulDownrangeTowardTarget).
+            private double TripHNeed()
+            {
+                double need = MIN_DOWNRANGE_H_TOWARD_TARGET;
+                double circ = Core.Landing.GetCircularOrbitSpeed(Math.Max(1000.0, subOrbitalApA), MainBody);
+                if (!double.IsNaN(circ) && !double.IsInfinity(circ) && circ > 0)
+                    need = Math.Max(need, 0.25 * circ);
+                return need * TripK;
+            }
+
+            /// <summary>
+            /// k > 1 only: the powered climb reaches cruise in ~1/3 of today's time, so the apex is near the
+            /// start. MTT has no coast-floor check, so cap the climb H command at 1.2x the k-scaled H gate;
+            /// the real speed-up happens in TSO at cruise height (terrain-checked there).
+            /// </summary>
+            private void TripCapClimbH(ref Vector3d desiredHorizontalVel, ref Vector3d herror)
+            {
+                double cap = 1.2 * TripHNeed();
+                if (desiredHorizontalVel.magnitude > cap && desiredHorizontalVel.sqrMagnitude > 1e-9)
+                {
+                    desiredHorizontalVel = desiredHorizontalVel.normalized * cap;
+                    herror = desiredHorizontalVel - Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
+                }
+            }
+
+            /// <summary>
+            /// Step 1: read-only headroom line at the MTT -> TSO handoff (no command changes).
+            /// </summary>
+            private void LogTripSpeedHeadroom()
+            {
+                try
+                {
+                    Vector3d posBody = VesselState.CoM - MainBody.position;
+                    double r = posBody.magnitude;
+                    double vCirc = Math.Sqrt(MainBody.gravParameter / Math.Max(r, 1.0));
+                    Vector3d tgtBody = Core.Target.GetPositionTargetPosition(); // body-relative
+                    Vector3d toTgt = Vector3d.Exclude(VesselState.up, tgtBody - posBody);
+                    // Surface rotation velocity at the vessel = orbital - surface velocity (exact).
+                    Vector3d vRot = Vector3d.Exclude(VesselState.up, VesselState.orbitalVelocity - VesselState.surfaceVelocity);
+                    double vRotAlong = (toTgt.sqrMagnitude > 1.0) ? Vector3d.Dot(vRot, toTgt.normalized) : 0.0;
+                    double g = Math.Max(VesselState.localg, 0.05);
+                    // Same args as move()/CoastClearForSubOrbitHandOff this tick -> per-UT cache.
+                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, AVOID_MIN_ALTITUDE);
+                    Debug.Log("[TripSpeed] k=" + TripK.ToString("F2")
+                        + " ut=" + VesselState.time.ToString("F1")
+                        + " vH=" + VesselState.speedSurfaceHorizontal.ToString("F1")
+                        + " vCircSurf=" + (vCirc - vRotAlong).ToString("F1")
+                        + " vCirc=" + vCirc.ToString("F1")
+                        + " vRotAlong=" + vRotAlong.ToString("F1")
+                        + " vz=" + VesselState.speedVertical.ToString("F1")
+                        + " coastUp=" + (Math.Max(0, VesselState.speedVertical) / g).ToString("F0")
+                        + " cruiseApA=" + CruiseApaTarget().ToString("F0")
+                        + " ApA=" + VesselState.orbitApA.ToString("F0")
+                        + " aMax=" + VesselState.limitedMaxThrustAccel.ToString("F2")
+                        + " aMaxFull=" + VesselState.maxThrustAccel.ToString("F2")
+                        + " g=" + g.ToString("F3")
+                        + " caDv=" + caDv.ToString("F0")
+                        + " caCrash=" + caCrash);
+                }
+                catch (Exception e)
+                {
+                    Debug.Log("[TripSpeed] headroom log failed: " + e.Message);
+                }
+            }
+
             private void LogDownrangeH(string msg)
             {
                 double ut = VesselState.time;
@@ -209,6 +352,8 @@ namespace MuMech
                 double circ = Core.Landing.GetCircularOrbitSpeed(cruiseAlt, MainBody);
                 if (!double.IsNaN(circ) && !double.IsInfinity(circ) && circ > 0)
                     need = Math.Max(need, 0.25 * circ);
+                if (TripOn)
+                    need *= TripK; // Step 2: H gate scales with the trip-speed factor (k > 1 only)
 
                 return toward >= need;
             }
@@ -230,7 +375,7 @@ namespace MuMech
                 double targetApa = (checkApa > 0) ? checkApa : CruiseApaTarget();
                 bool hyperbolic = (apaSigned < 0) || double.IsInfinity(apa) || (apa > 1e8);
                 // High-TWR/low-g: hard-dump once Ap > ~1.15x cruise (was 2x; soft-hold let Ap runaway).
-                if (hyperbolic || (targetApa > 0 && apa > 1.15 * targetApa))
+                if (hyperbolic || (targetApa > 0 && apa > ApStripFactor() * targetApa))
                 {
                     // 203350: mountain ASL/Ap already > cruise at AGL~2; dumping V
                     // into the pad with hop H-strip left thr=0 forever. Clear AGL
@@ -912,7 +1057,7 @@ velocityPID.AntiWindup(rawAccel, accel);
                     || ((errStep > Ascend2Target.Disabled) && (errStep < Ascend2Target.FineTune));
                 bool vacuumApOver = loftPhaseAp && (MainBody.atmosphere == false)
                     && ((VesselState.orbitApA < 0)
-                        || (Math.Abs(VesselState.orbitApA) > 1.15 * Math.Max(1000.0, CruiseApaTarget())));
+                        || (Math.Abs(VesselState.orbitApA) > ApStripFactor() * Math.Max(1000.0, CruiseApaTarget())));
                 // 195311: departure-mountain hop set hopArmed/collisionHopActive and skipped
                 // this strip while HoldAp desV=-25 -> thr=0.85 pitch90 lofted Ap 33k->774k.
                 // Ap already >1.15x cruise: always strip upward / thrCap (hop must not mint Mm Ap).
@@ -1004,6 +1149,8 @@ velocityPID.AntiWindup(rawAccel, accel);
                 if (Core.Landing.increaseVertical == true)
                 {
                     setSubOrbitalHorizontal(ref desiredHorizontalVel, ref herror);
+                    if (TripOn && TripCaQuiet && TripLowGFarHop(hTargetError))
+                        TripCapClimbH(ref desiredHorizontalVel, ref herror); // k > 1 only
                 }
 
                 // Hop-phase collision: LOCAL rim/terrain vs our ASL.
@@ -1134,7 +1281,7 @@ velocityPID.AntiWindup(rawAccel, accel);
                     && (MainBody.atmosphere == false)
                     && (VesselState.altitudeTrue >= ASCENT_AOA_MIN_ALT)
                     && ((VesselState.orbitApA < 0)
-                        || (Math.Abs(VesselState.orbitApA) > 1.15 * Math.Max(1000.0, CruiseApaTarget()))))
+                        || (Math.Abs(VesselState.orbitApA) > ApStripFactor() * Math.Max(1000.0, CruiseApaTarget()))))
                 {
                     if (desiredVerticalSpeed > 0)
                         desiredVerticalSpeed = -Math.Max(5.0, Math.Min(25.0, 12.0 * Math.Max(Core.Landing.g, 0.05)));
@@ -1233,7 +1380,11 @@ velocityPID.AntiWindup(rawAccel, accel);
                                 && (VesselState.altitudeTrue > ASCENT_AOA_MIN_ALT);
                             if (MainBody.atmosphere == false)
                             {
-                                if (apAlreadyAtCruise || apGate)
+                                if (TripOn && TripCaQuiet && TripLowGFarHop(hTargetError))
+                                {
+                                    TripPoweredClimb(ref desiredVerticalSpeed); // Step 3 (k > 1 only)
+                                }
+                                else if (apAlreadyAtCruise || apGate)
                                 {
                                     if (!HasMeaningfulDownrangeTowardTarget() || !ApaSaneForVacuumCoast(checkApaHold))
                                         HoldApWhileBuildingDownrangeH(ref desiredVerticalSpeed, checkApaHold);
@@ -1260,7 +1411,11 @@ velocityPID.AntiWindup(rawAccel, accel);
                             && (errStep > Ascend2Target.Disabled)
                             && (errStep < Ascend2Target.FineTune)
                             && (suppressThrottle == 0);
-                        if (lowGSubOrbitalClimb)
+                        if (lowGSubOrbitalClimb && TripOn && TripCaQuiet && (MainBody.atmosphere == false))
+                        {
+                            TripPoweredClimb(ref desiredVerticalSpeed); // Step 3 (k > 1 only)
+                        }
+                        else if (lowGSubOrbitalClimb)
                         {
                             double checkApaClimb = CruiseApaTarget();
                             // Same mountain-start fix: ASL/Ap at cruise beats altitudeTrue gate.
@@ -1374,6 +1529,8 @@ velocityPID.AntiWindup(rawAccel, accel);
                     else if (errStep == Ascend2Target.InitialBurn)
                     {
                         maxHorizontalSpeed = Core.Landing.GetCircularOrbitSpeed(VesselState.altitudeTrue, MainBody);
+                        if (TripOn)
+                            maxHorizontalSpeed *= TripK; // Step 2: H command scales with k (k > 1 only)
 
                         if (hCurrentError < 0.1 * hTargetError)
                         {
@@ -1650,6 +1807,16 @@ velocityPID.AntiWindup(rawAccel, accel);
                                 + " ApA=" + VesselState.orbitApA.ToString("F0")
                                 + " cruise=" + checkApa.ToString("F0"));
                         }
+                        else if (TripOn && TripCaQuiet && (MainBody.atmosphere == false)
+                                 && (VesselState.speedVertical > 1.0))
+                        {
+                            // Step 3 (k > 1 only): keep the powered vz cancel; no ballistic coast/warp.
+                            // FineTune (else below) once vz <= 1 m/s at cruise.
+                            LogTrip("MTT wait vz cancel before TSO handoff vz="
+                                + VesselState.speedVertical.ToString("F1")
+                                + " ApA=" + VesselState.orbitApA.ToString("F0")
+                                + " cruise=" + checkApa.ToString("F0"));
+                        }
                         else if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
                         {
                             suppressThrottle++; // suppress throttle during initial burn
@@ -1837,6 +2004,7 @@ velocityPID.AntiWindup(rawAccel, accel);
                                 + " TgtAlt=" + Core.Landing.TgtAlt.ToString("F0")
                                 + " hErr=" + hCurrentError.ToString("F0")
                                 + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1"));
+                            LogTripSpeedHeadroom(); // Step 1: read-only
                             return new TargetSubOrbit(Core);
                         }
                         else

@@ -162,6 +162,31 @@ namespace MuMech
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble BurnMarginPerc = 0.0;
 
+        // Trip-speed lever (Ricardo, Nov 10 t231u/t232u). One factor for the MoveToTarget ascent and
+        // TargetSubOrbit. 1.0 = today's path (cheapest, gravity-shaped). > 1: powered climb with active
+        // vertical-speed cancel at cruise (MTT), then a faster powered level cruise in TSO once the
+        // path to the pad is clear. Every behaviour branch is guarded by TripSpeedOn (k > 1 + 1e-9),
+        // so 1.0 runs the pre-lever code path. Clamped to [TRIP_SPEED_MIN, TRIP_SPEED_MAX].
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble TripSpeedFactor = 1.0;
+        public const double TRIP_SPEED_MIN = 1.0;
+        public const double TRIP_SPEED_MAX = 1.6;
+
+        /// <summary>Clamped trip-speed factor k in [1.0, 1.6]; NaN/Inf -> 1.0.</summary>
+        public double TripSpeedK
+        {
+            get
+            {
+                double k = TripSpeedFactor;
+                if (double.IsNaN(k) || double.IsInfinity(k))
+                    return TRIP_SPEED_MIN;
+                return Math.Max(TRIP_SPEED_MIN, Math.Min(TRIP_SPEED_MAX, k));
+            }
+        }
+
+        /// <summary>True only when the lever is on (k > 1). Guards every trip-speed branch.</summary>
+        public bool TripSpeedOn => TripSpeedK > 1.0 + 1e-9;
+
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble TargetAltPercent = 0;
         public double TgtAlt;

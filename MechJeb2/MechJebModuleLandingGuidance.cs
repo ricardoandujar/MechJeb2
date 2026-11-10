@@ -235,6 +235,13 @@ namespace MuMech
                     Core.Landing.vesselAngle.Text = GUILayout.TextField(Core.Landing.vesselAngle.Text, GUILayout.Width(35));
                     GUILayout.EndHorizontal();
 
+                    // Trip-speed lever: 1.0 = today's path; clamped to [1.0, 1.6] by Core.Landing.TripSpeedK.
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("Trip speed x", noWrap, GUILayout.ExpandWidth(false));
+                    Core.Landing.TripSpeedFactor.Text = GUILayout.TextField(Core.Landing.TripSpeedFactor.Text, GUILayout.Width(35));
+                    GUILayout.Label(" (1-1.6) k=" + Core.Landing.TripSpeedK.ToString("F2"), noWrap, GUILayout.ExpandWidth(false));
+                    GUILayout.EndHorizontal();
+
                     GUILayout.BeginHorizontal();
                     GUILayout.Label("LOffset:", noWrap, GUILayout.ExpandWidth(false));
                     Core.Landing.TargetOffset.Text = GUILayout.TextField(Core.Landing.TargetOffset.Text, GUILayout.Width(35));

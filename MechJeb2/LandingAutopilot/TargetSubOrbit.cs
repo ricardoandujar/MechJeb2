@@ -88,6 +88,19 @@ namespace MuMech
             private string _lastApPhaseLogged = "";
             private double minVerticalAngle;
 
+            // ---- Trip-speed lever, steps 3+4 (k > 1 only; never set when k == 1.0) ----
+            // Powered level cruise: started where PROGRADE would exit to LATERAL_FINE once the path
+            // to the pad is clear; holds ASL (down-thrust when faster than circular) at k x the
+            // path-clear speed, then hands LandingBurn the ignition point on LB's own formula.
+            private bool _tripCruise = false;
+            private double _tripVClear = double.NaN;
+            private double _tripVTarget = double.NaN;
+            private double _tripHoldAsl = double.NaN;
+            private double _lastTripLogUt = double.NegativeInfinity;
+            private const double TRIP_PREDESCENT_M = 5000.0;  // start the -3 m/s pre-descent this far before dIgn
+            private const double TRIP_HOLD_MAX_RAISE_M = 3000.0;
+            private bool TripCruiseActive => _tripCruise && Core.Landing.TripSpeedOn;
+
             // Autotest / KSP.log 1 Hz guidance snapshot (no behavior change).
             private double _lastGuidanceLogUt = double.NegativeInfinity;
             private Step _prevLoggedStep = Step.STATE_INIT;
@@ -254,7 +267,10 @@ namespace MuMech
                     double desiredVerticalSpeed = 0; // for now just set to zero vertical velocity
 
                     // Calculate Thrust Amount and Direction
-                    SetPathToTarget(ref desiredVerticalSpeed, ref thrustDir);
+                    if (TripCruiseActive)
+                        TripCruiseCommand(ref thrustDir); // k > 1 only (never active at k == 1.0)
+                    else
+                        SetPathToTarget(ref desiredVerticalSpeed, ref thrustDir);
 
                     // Desired thrust direction in inertial frame
                     Quaternion targetRot = Quaternion.LookRotation(thrustDir.normalized, Vessel.up)
@@ -699,6 +715,14 @@ namespace MuMech
             /// </summary>
             private bool ApNeedsPullBack(Vector3d targetPosBody, out double frac)
             {
+                // k > 1 trip cruise only: a level cruise faster than circular sits at periapsis, so
+                // Ap-past/frac would force RETRO and undo the cruise (deadlock). The cruise owns height;
+                // its abort hands back to these rules. Never true at k == 1.0.
+                if (TripCruiseActive)
+                {
+                    frac = double.NaN;
+                    return false;
+                }
                 UpdateApPullLatch(targetPosBody);
                 frac = double.NaN;
                 bool haveFrac = TryApAlongTrackFraction(targetPosBody, out frac, out _);
@@ -813,6 +837,11 @@ namespace MuMech
                 if (!_apReachedForShape || ApNeedsPullBack(targetPosBody))
                     return null;
 
+                // k > 1 trip cruise: level hold ASL >= terrain Ap floor and the CA heading scan own
+                // terrain (TripCruiseCommand aborts on CA); no TgtAlt bumps. Never true at k == 1.0.
+                if (TripCruiseActive)
+                    return null;
+
                 // Ricardo order: LATERAL first (point to the pad), then PRO/RETRO shape length and
                 // terrain. 20261109_025729: forcing PROGRADE here from INIT skipped LATERAL and
                 // left ~20 deg heading error / 41.5 km crossrange at handoff. Local collision
@@ -885,6 +914,8 @@ namespace MuMech
             private bool TryDirectLandingBurnHandoff(Vector3d targetPosBody, out string reason)
             {
                 reason = "";
+                if (TripCruiseActive)
+                    return TryTripCruiseHandoff(targetPosBody, out reason); // k > 1 only
                 if (!_apReachedForShape)
                 {
                     reason = "shape-not-ready";
@@ -1269,12 +1300,19 @@ namespace MuMech
                             else if (_apReachedForShape && TerrainHoopShaped()
                                      && TerrainClearWithExitMargin())
                             {
+                                if (Core.Landing.TripSpeedOn && TryStartTripCruise("terrain-hoop path clear"))
+                                {
+                                    // k > 1 only: stay PROGRADE; TripCruiseCommand owns the burn.
+                                }
+                                else
+                                {
                                 // Terrain-driven hoop and inbound coast now clears terrain:
                                 // nothing better to shape in height (Nov 9). Finish crossrange.
                                 ProgradeCount = throttleCount;
                                 throttleCount = 0;
                                 Debug.Log("PROGRADE exit -> LATERAL_FINE terrain-hoop path clear");
                                 step = Step.STATE_LATERAL_FINE;
+                                }
                             }
                             else if (_apReachedForShape && ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD))))
                             {
@@ -1285,9 +1323,16 @@ namespace MuMech
                                     && padDhPg > DELTA_TARGET_ALT_THRESHOLD;
                                 if (!padStillTooLow)
                                 {
+                                    if (Core.Landing.TripSpeedOn && TryStartTripCruise("prograde done"))
+                                    {
+                                        // k > 1 only: stay PROGRADE; TripCruiseCommand owns the burn.
+                                    }
+                                    else
+                                    {
                                     ProgradeCount = throttleCount;
                                     throttleCount = 0;
                                     step = Step.STATE_LATERAL_FINE;
+                                    }
                                 }
                             }
                             // Calculate horizontal correction angle using horizontal herror.
@@ -1510,6 +1555,249 @@ namespace MuMech
                 }
 
                 return rc;
+            }
+
+            // ================= Trip-speed lever (k > 1 only) =================
+
+            private void LogTrip(string msg, bool force = false)
+            {
+                double now = Planetarium.GetUniversalTime();
+                if (!force && now - _lastTripLogUt < 1.0)
+                    return;
+                _lastTripLogUt = now;
+                Debug.Log("[TripSpeed] " + msg);
+            }
+
+            /// LandingBurn ignition distance on LB's own budget (LandingBurn.ComputeBrakeBudget /
+            /// ShouldStartBurn d_horiz; same formula as LA CoastBelowLbFloorBeforeIgnition).
+            private double TripIgnitionDistance(double vH)
+            {
+                double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
+                double g = Math.Max(VesselState.localg, 0.05);
+                double aPlan = Math.Min(8.0 * g, 0.7 * aMax);
+                aPlan = Math.Max(aPlan, g + 0.05);
+                aPlan = Math.Min(aPlan, aMax);
+                double bm = Core.Landing.BurnMarginPerc / 100.0;
+                return Math.Max(MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FLOOR_M,
+                    (1.0 + bm) * vH * vH / (2.0 * aPlan));
+            }
+
+            private double TripPlanAccel()
+            {
+                double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
+                double g = Math.Max(VesselState.localg, 0.05);
+                double aPlan = Math.Min(8.0 * g, 0.7 * aMax);
+                aPlan = Math.Max(aPlan, g + 0.05);
+                return Math.Min(aPlan, aMax);
+            }
+
+            /// <summary>
+            /// Step 4 entry (k > 1 only): called where PROGRADE would exit to LATERAL_FINE (path to the
+            /// pad clear). Latches vClear, vTarget = min(k vClear, LB-braking cap) and the hold ASL =
+            /// max(ASL, Ap (<= +2 km), terrain Ap floor). Refuses (today's exit runs) when CA is not quiet,
+            /// the hold would need a big climb, or the speed-up is negligible.
+            /// </summary>
+            private bool TryStartTripCruise(string why)
+            {
+                if (!Core.Landing.TripSpeedOn || _tripCruise)
+                    return false;
+                try
+                {
+                    double k = Core.Landing.TripSpeedK;
+                    double vClear = VesselState.speedSurfaceHorizontal;
+                    double asl = VesselState.altitudeASL;
+                    double hold = asl;
+                    double apa = VesselState.orbitApA;
+                    if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit) && apa > asl)
+                        hold = Math.Min(apa, asl + 2000.0); // level path >= the ballistic path that was clear
+                    double terrainFloor = Core.Landing.AscentApaFloorForTerrain();
+                    if (!double.IsNaN(terrainFloor) && !double.IsInfinity(terrainFloor) && terrainFloor > hold)
+                        hold = terrainFloor;
+                    if (hold > asl + TRIP_HOLD_MAX_RAISE_M)
+                    {
+                        LogTrip("TSO cruise skip (" + why + "): hold " + hold.ToString("F0") + " >> asl " + asl.ToString("F0"), true);
+                        return false;
+                    }
+                    double dist = Core.Landing.getHDistanceToTarget();
+                    double bm = Core.Landing.BurnMarginPerc / 100.0;
+                    // LB braking cap: ignition distance at vTarget within half of the remaining distance.
+                    double vBrakeCap = Math.Sqrt(2.0 * TripPlanAccel() * 0.5 * Math.Max(dist, 0.0) / (1.0 + bm));
+                    double vTarget = Math.Min(k * vClear, vBrakeCap);
+                    if (!(vTarget > vClear + 1.0))
+                    {
+                        LogTrip("TSO cruise skip (" + why + "): vTarget " + vTarget.ToString("F1") + " vClear " + vClear.ToString("F1"), true);
+                        return false;
+                    }
+                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
+                    if (caCrash || caDv > 0)
+                    {
+                        LogTrip("TSO cruise skip (" + why + "): CA not quiet dV=" + caDv.ToString("F0"), true);
+                        return false;
+                    }
+                    _tripCruise = true;
+                    _tripVClear = vClear;
+                    _tripVTarget = vTarget;
+                    _tripHoldAsl = hold;
+                    LogTrip("TSO cruise START (" + why + ") k=" + k.ToString("F2")
+                        + " vClear=" + vClear.ToString("F1") + " vTarget=" + vTarget.ToString("F1")
+                        + " vBrakeCap=" + vBrakeCap.ToString("F1") + " holdAsl=" + hold.ToString("F0")
+                        + " asl=" + asl.ToString("F0") + " terrainApFloor=" + terrainFloor.ToString("F0")
+                        + " dist=" + dist.ToString("F0") + " dIgnAtTarget=" + TripIgnitionDistance(vTarget).ToString("F0"), true);
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    LogTrip("TSO cruise start failed: " + e.Message, true);
+                    return false;
+                }
+            }
+
+            private void AbortTripCruise(string why)
+            {
+                _tripCruise = false;
+                ProgradeCount = throttleCount;
+                throttleCount = 0;
+                step = Step.STATE_LATERAL_FINE; // today's next state; normal Ap/hoop rules resume
+                Core.Thrust.ThrustOff();
+                LogTrip("TSO cruise ABORT " + why + " -> LATERAL_FINE (normal rules)", true);
+            }
+
+            /// <summary>
+            /// Steps 3+4 (k > 1 only): powered level cruise toward the pad at _tripVTarget.
+            /// Vertical: a_up = g - vOrbH^2/r + 0.2 (vzCmd - vz) (down-thrust when faster than circular),
+            /// vzCmd holds _tripHoldAsl; -3 m/s pre-descent within TRIP_PREDESCENT_M of dIgn so LB sees
+            /// Vy >= 1 at handoff. Horizontal: 0.1 s^-1 tracking of vTarget along the pad bearing (nulls
+            /// crossrange). Accel capped at 8 g (same g/a_max thrCap as every TSO burn).
+            /// Aborts to today's rules on CA (15 s / 900 m incl. heading scan) or AGL < coast need.
+            /// </summary>
+            private void TripCruiseCommand(ref Vector3d desiredThrustVector)
+            {
+                try
+                {
+                    Vector3d up = VesselState.up;
+                    Vector3d posBody = VesselState.CoM - MainBody.position;
+                    double r = posBody.magnitude;
+                    double asl = VesselState.altitudeASL;
+                    double vz = VesselState.speedVertical;
+                    double g = Math.Max(VesselState.localg, 0.05);
+
+                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
+                    double coastNeed = SUBORBIT_PATH_MIN_ALTITUDE_M + 1.1 * MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FLOOR_M;
+                    if (caCrash || caDv > 0)
+                    {
+                        AbortTripCruise("CA dV=" + caDv.ToString("F0") + " crash=" + caCrash);
+                        desiredThrustVector = VesselState.forward;
+                        return;
+                    }
+                    if (VesselState.altitudeTrue < coastNeed)
+                    {
+                        AbortTripCruise("AGL " + VesselState.altitudeTrue.ToString("F0") + " < " + coastNeed.ToString("F0"));
+                        desiredThrustVector = VesselState.forward;
+                        return;
+                    }
+
+                    Vector3d tgtBody = Core.Target.GetPositionTargetPosition(); // body-relative
+                    Vector3d toPad = Vector3d.Exclude(up, tgtBody - posBody);
+                    Vector3d dir = (toPad.sqrMagnitude > 1.0) ? toPad.normalized
+                        : Vector3d.Exclude(up, VesselState.surfaceVelocity).normalized;
+                    Vector3d vHs = Vector3d.Exclude(up, VesselState.surfaceVelocity);
+                    double vH = vHs.magnitude;
+                    double dist = Core.Landing.getHDistanceToTarget();
+                    double dIgn = TripIgnitionDistance(vH);
+
+                    double aCap = Math.Min(Math.Max(VesselState.limitedMaxThrustAccel, 1e-3), 8.0 * g);
+                    Vector3d aH = 0.1 * (_tripVTarget * dir - vHs);
+                    if (aH.magnitude > 0.7 * aCap)
+                        aH *= 0.7 * aCap / aH.magnitude;
+
+                    double vzCmd = Math.Max(-5.0, Math.Min(5.0, (_tripHoldAsl - asl) / 30.0));
+                    if (dist <= dIgn + TRIP_PREDESCENT_M)
+                        vzCmd = Math.Min(vzCmd, (dist <= dIgn) ? -5.0 : -3.0);
+                    double vOrbH = Vector3d.Exclude(up, VesselState.orbitalVelocity).magnitude;
+                    double gEff = VesselState.localg - vOrbH * vOrbH / Math.Max(r, 1.0);
+                    double aV = gEff + 0.2 * (vzCmd - vz);
+
+                    Vector3d a = aH + aV * up;
+                    if (a.magnitude > aCap)
+                        a *= aCap / a.magnitude;
+                    desiredThrustVector = (a.sqrMagnitude > 1e-12) ? a.normalized : up;
+
+                    double aMaxCap = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
+                    double thrCap = Math.Max(0.03, Math.Min(1.0, 8.0 * g / aMaxCap));
+                    double thr = a.magnitude / Math.Max(VesselState.maxThrustAccel, 1e-6);
+                    if (thr > thrCap) thr = thrCap;
+                    lastHorizontalThrust = (float)thr;
+                    forceHoriz = false;
+                    Core.Thrust.Tmode = MechJebModuleThrustController.TMode.OFF;
+                    Core.Thrust.TransKillH = false;
+                    Core.Thrust.RequestActiveThrottle((float)thr);
+
+                    Status = "Trip cruise k=" + Core.Landing.TripSpeedK.ToString("F2")
+                        + " vH " + vH.ToString("F0") + "/" + _tripVTarget.ToString("F0")
+                        + " hold " + _tripHoldAsl.ToString("F0");
+                    LogTrip("TSO cruise vH=" + vH.ToString("F1") + " vT=" + _tripVTarget.ToString("F1")
+                        + " asl=" + asl.ToString("F0") + " hold=" + _tripHoldAsl.ToString("F0")
+                        + " vz=" + vz.ToString("F2") + " vzCmd=" + vzCmd.ToString("F1")
+                        + " gEff=" + gEff.ToString("F3") + " aH=" + aH.magnitude.ToString("F3")
+                        + " aV=" + aV.ToString("F3") + " thr=" + thr.ToString("F3")
+                        + " dist=" + dist.ToString("F0") + " dIgn=" + dIgn.ToString("F0")
+                        + " AGL=" + VesselState.altitudeTrue.ToString("F0"));
+                }
+                catch (Exception e)
+                {
+                    AbortTripCruise("exception " + e.Message);
+                    desiredThrustVector = VesselState.forward;
+                }
+            }
+
+            /// <summary>
+            /// Step 4 handoff (k > 1 only): replaces the hoop/Ap-past test, which assumes an unpowered
+            /// coast (a faster-than-circular level cruise never descends into the hoop). Hand LB the
+            /// ignition point on LB's own formula: dist <= 0.97 dIgn(vH), descending (vz <= -1, LB needs
+            /// Vy >= 1 to light on d_horiz), local CA clear. Pad behind -> "pad-behind" (MTT recovery).
+            /// </summary>
+            private bool TryTripCruiseHandoff(Vector3d targetPosBody, out string reason)
+            {
+                reason = "";
+                try
+                {
+                    if (PadOverflightBehind(targetPosBody))
+                    {
+                        reason = "pad-behind";
+                        return false;
+                    }
+                    double dist = Core.Landing.getHDistanceToTarget();
+                    double vH = VesselState.speedSurfaceHorizontal;
+                    double dIgn = TripIgnitionDistance(vH);
+                    if (dist > 0.97 * dIgn)
+                    {
+                        reason = "trip-cruise dist=" + dist.ToString("F0") + " dIgn=" + dIgn.ToString("F0");
+                        return false;
+                    }
+                    if (VesselState.speedVertical > -1.0)
+                    {
+                        reason = "trip-predescent vz=" + VesselState.speedVertical.ToString("F2");
+                        LogTrip("TSO->LB wait " + reason + " dist=" + dist.ToString("F0") + " dIgn=" + dIgn.ToString("F0"));
+                        return false;
+                    }
+                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
+                    if (caCrash || caDv > 0)
+                    {
+                        reason = "trip-local-terrain dV=" + caDv.ToString("F0");
+                        return false;
+                    }
+                    reason = "trip-cruise k=" + Core.Landing.TripSpeedK.ToString("F2")
+                        + " vH=" + vH.ToString("F1") + " dist=" + dist.ToString("F0")
+                        + " dIgn=" + dIgn.ToString("F0") + " vz=" + VesselState.speedVertical.ToString("F2")
+                        + " AGL=" + VesselState.altitudeTrue.ToString("F0");
+                    LogTrip("TSO->LB " + reason, true);
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    reason = "trip-handoff-failed " + e.Message;
+                    return false;
+                }
             }
 
             Vector3d calculateHerror(ref Vector3d closestPos, ref Vector3d targetPos, ref double distanceToTarget, ref Vector3d surfaceVel)
