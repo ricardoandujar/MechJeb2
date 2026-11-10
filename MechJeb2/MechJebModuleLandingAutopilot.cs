@@ -1720,6 +1720,7 @@ namespace MuMech
             const int nSamples = 10;
             double span = endUT - now;
             if (span < 1.0) return true;
+            double omegaDeg = (body.rotates && body.rotationPeriod != 0) ? 360.0 / body.rotationPeriod : 0.0;
 
             for (int i = 1; i <= nSamples; i++)
             {
@@ -1740,7 +1741,10 @@ namespace MuMech
                     continue;
 
                 double posASL = body.GetAltitude(pos);
-                double terrainASL = body.TerrainAltitude(pos);
+                // Terrain under the sample at time ut: the body has rotated by omega*tAhead since now
+                // (same convention as CoastBelowLbFloorBeforeIgnition / hoop ridge scan, ReentrySimulation.cs:1001).
+                double tAhead = ut - now;
+                double terrainASL = body.TerrainAltitude(body.GetLatitude(pos), body.GetLongitude(pos) - omegaDeg * tAhead);
                 if (double.IsNaN(posASL) || double.IsInfinity(posASL)
                     || double.IsNaN(terrainASL) || double.IsInfinity(terrainASL))
                     continue;
