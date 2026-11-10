@@ -561,6 +561,18 @@ namespace MuMech
                 return driven && pathClear;
             }
 
+            // CA enters PROGRADE when the coast is below 900 + 1.1*floor (margin < 0) and used to leave
+            // at margin >= 0, i.e. exactly on the threshold (171027: minMargin -31/+2/0/+1 m ->
+            // FINE->PRO->FINE->PRO->FINE, TgtAlt +800 m per re-entry). Leave only with +100 m.
+            private const double SUBORBIT_PATH_MIN_ALTITUDE_M = 900.0; // mirror LA SUBORBIT_PATH_MIN_ALTITUDE
+            private const double TERRAIN_HOOP_EXIT_MARGIN_M = 100.0;
+
+            private bool TerrainClearWithExitMargin()
+            {
+                try { return Core.Landing.SubOrbitPathClearToTarget(SUBORBIT_PATH_MIN_ALTITUDE_M + TERRAIN_HOOP_EXIT_MARGIN_M); }
+                catch (System.Exception) { return true; } // fall back to the previous exit
+            }
+
             private bool ApApproximatelyHalfwayBeforePad(Vector3d targetPosBody)
             {
                 if (!TryApAlongTrackFraction(targetPosBody, out double frac, out _))
@@ -1254,7 +1266,8 @@ namespace MuMech
                             {
                                 // Keep PROGRADE until halfway band ├óΓé¼ΓÇ¥ do not LATERAL_FINE mid-place.
                             }
-                            else if (_apReachedForShape && TerrainHoopShaped())
+                            else if (_apReachedForShape && TerrainHoopShaped()
+                                     && TerrainClearWithExitMargin())
                             {
                                 // Terrain-driven hoop and inbound coast now clears terrain:
                                 // nothing better to shape in height (Nov 9). Finish crossrange.
