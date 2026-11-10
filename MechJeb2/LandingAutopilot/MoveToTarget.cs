@@ -404,10 +404,29 @@ namespace MuMech
                 }
                 else
                 {
-                    desiredVerticalSpeed = -2.0; // hold-ish Ap; negative keeps allowPitchOver on for H
+                    // F1 (Ricardo Nov 10, impact_ap_dump_spread.txt): proportional Ap hold.
+                    // Fixed -2 m/s with vz ~40 m/s was a saturated full-throttle dump that
+                    // bang-banged against the 50.7 m/s climb branch at ApA == cruise (handoff ApA
+                    // quantized 45225..45483). Command the vz that coasts exactly to cruise + bias:
+                    // ApA - h = vz^2/(2 g_eff)  ->  vzHold = vz * sqrt((apHold - h)/(ApA - h)) (g_eff cancels).
+                    // Fallback -2 (previous value) when vz < 3 m/s or inputs are degenerate.
+                    const double AP_HOLD_BIAS_M = 250.0;
+                    double apHold = targetApa + AP_HOLD_BIAS_M;
+                    double hNow = VesselState.altitudeASL;
+                    double vzNow = VesselState.speedVertical;
+                    double holdV = -2.0;
+                    if ((vzNow > 3.0) && ((apa - hNow) > 50.0) && (apHold > hNow))
+                    {
+                        double v = vzNow * Math.Sqrt((apHold - hNow) / (apa - hNow));
+                        if (!double.IsNaN(v) && !double.IsInfinity(v))
+                            holdV = v;
+                    }
+                    desiredVerticalSpeed = holdV;
                     LogDownrangeH("setVerticalSpeed: vacuum Ap ready, pitch for H toward pad ApA="
                         + apaSigned.ToString("F0") + " target=" + targetApa.ToString("F0")
-                        + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1"));
+                        + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1")
+                        + " apHold=" + apHold.ToString("F0") + " vz=" + vzNow.ToString("F1")
+                        + " desV=" + desiredVerticalSpeed.ToString("F1"));
                 }
             }
 
