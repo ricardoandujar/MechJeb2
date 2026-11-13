@@ -284,6 +284,25 @@ namespace MuMech
                 }
             }
 
+            // Body-general H cap during the Ap hold: keep commanded H near the gate so the
+            // vertical bleed can finish at the cruise floor. No-brake if current H is already above cap.
+            private void CapHDuringApHold(ref Vector3d desiredHorizontalVel, ref Vector3d herror)
+            {
+                double cap = 1.05 * TripHNeed();
+                double currentH = VesselState.speedSurfaceHorizontal;
+                if (currentH > cap)
+                    cap = currentH;
+                if (desiredHorizontalVel.magnitude > cap && desiredHorizontalVel.sqrMagnitude > 1e-9)
+                {
+                    desiredHorizontalVel = desiredHorizontalVel.normalized * cap;
+                    herror = desiredHorizontalVel - Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity);
+                    LogDownrangeH("CapHDuringApHold: cap=" + cap.ToString("F1")
+                        + " need=" + TripHNeed().ToString("F1")
+                        + " H=" + currentH.ToString("F1")
+                        + " ApA=" + VesselState.orbitApA.ToString("F0"));
+                }
+            }
+
             /// <summary>
             /// Step 1: read-only headroom line at the MTT -> TSO handoff (no command changes).
             /// </summary>
@@ -1171,7 +1190,11 @@ velocityPID.AntiWindup(rawAccel, accel);
                 {
                     setSubOrbitalHorizontal(ref desiredHorizontalVel, ref herror);
                     if (TripOn && TripCaQuiet && TripLowGFarHop(hTargetError))
-                        TripCapClimbH(ref desiredHorizontalVel, ref herror); // k > 1 only
+                        TripCapClimbH(ref desiredHorizontalVel, ref herror); // k>1 climb, 1.2x, unchanged
+                    if (TripCaQuiet && TripLowGFarHop(hTargetError)
+                        && ((Math.Abs(VesselState.orbitApA) >= CruiseApaTarget())
+                            || (VesselState.altitudeASL >= CruiseApaTarget())))
+                        CapHDuringApHold(ref desiredHorizontalVel, ref herror);
                 }
 
                 // Hop-phase collision: LOCAL rim/terrain vs our ASL.
