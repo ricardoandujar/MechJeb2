@@ -1822,17 +1822,48 @@ velocityPID.AntiWindup(rawAccel, accel);
                 previousDesiredVerticalSpeed = desiredVerticalSpeed; // save previous desired vertical speed to determine if we are in a deceleration phase.
             }
 
+            // FineTune / TSO only when vz is bled and coast is clear. Otherwise stay in
+            // InitialBurn with increaseVertical still set so H is not zeroed while waiting.
+            private bool TryArmSubOrbitFineTune(string reason)
+            {
+                if (VesselState.speedVertical > 1.0)
+                    return false;
+                if (!CoastClearForSubOrbitHandOff(Core.Landing.targetingResult.hTargetError))
+                {
+                    LogDownrangeH("TargetSubOrbital: hold at target, coast not clear H="
+                        + VesselState.speedSurfaceHorizontal.ToString("F1")
+                        + " asl=" + VesselState.altitudeASL.ToString("F0")
+                        + " vz=" + VesselState.speedVertical.ToString("F1")
+                        + " vCol=" + vCollisionCounter);
+                    return false;
+                }
+                stopIncrease = true;
+                suppressThrottle = 2;
+                trace += 'U';
+                if (errStep < Ascend2Target.FineTune)
+                    errStep = Ascend2Target.FineTune;
+                Debug.Log("TargetSubOrbital: " + reason
+                    + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1")
+                    + " asl=" + VesselState.altitudeASL.ToString("F0")
+                    + " ApA=" + VesselState.orbitApA.ToString("F0")
+                    + " vz=" + VesselState.speedVertical.ToString("F1")
+                    + " tAp=" + VesselState.orbitTimeToAp.ToString("F1")
+                    + " errStep=" + ((int)errStep).ToString());
+                return true;
+            }
+
             public void TargetSubOrbital(ref Vector3d desiredThrustVector)
             {
                 double _hCurrentError = hCurrentError;
                 double decelerationStartTime = VesselState.orbitTimeToAp - 4;
+                double checkApa = CruiseApaTarget();
+                bool reachedTargetAlt = VesselState.altitudeASL >= checkApa;
 
                 // Use correction attitude if apoapsis is high enough.
                 // Determine when we can stop burning when target apoapsis has been reached
                 // Once stopped a secondary burn will be performed to reach target
                 if (suppressThrottle == 0)
                 {
-                    double checkApa = CruiseApaTarget();
                     if (Math.Abs(VesselState.orbitApA) >= checkApa)
                     {
                         // Vacuum: do not arm coast/warp on ApA height alone - need H toward pad
@@ -1851,32 +1882,38 @@ velocityPID.AntiWindup(rawAccel, accel);
                                 + " ApA=" + VesselState.orbitApA.ToString("F0")
                                 + " cruise=" + checkApa.ToString("F0"));
                         }
+                        else if (reachedTargetAlt && (VesselState.speedVertical > 1.0))
+                        {
+                            // At/above target height: bleed vz under power. Do not warp on to Ap
+                            // (k=1.0 leftover vz after an early warp exit, or k>1 !TripCaQuiet).
+                            LogDownrangeH("TargetSubOrbital: at target height, bleed vz before handoff vz="
+                                + VesselState.speedVertical.ToString("F1")
+                                + " asl=" + VesselState.altitudeASL.ToString("F0")
+                                + " ApA=" + VesselState.orbitApA.ToString("F0")
+                                + " cruise=" + checkApa.ToString("F0"));
+                        }
                         else if (TripOn && TripCaQuiet && (MainBody.atmosphere == false)
                                  && (VesselState.speedVertical > 1.0))
                         {
-                            // Step 3 (k > 1 only): keep the powered vz cancel; no ballistic coast/warp.
-                            // FineTune (else below) once vz <= 1 m/s at cruise.
+                            // Step 3 (k > 1 only): keep the powered vz cancel below the floor;
+                            // no ballistic coast/warp. FineTune once vz <= 1 m/s at cruise.
                             LogTrip("MTT wait vz cancel before TSO handoff vz="
                                 + VesselState.speedVertical.ToString("F1")
                                 + " ApA=" + VesselState.orbitApA.ToString("F0")
                                 + " cruise=" + checkApa.ToString("F0"));
                         }
-                        else if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
+                        else if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0)
+                                 && !reachedTargetAlt)
                         {
+                            // Below target height: warp still carries the craft up to cruise ASL.
                             suppressThrottle++; // suppress throttle during initial burn
                             trace += 'S' + 'a';
                         }
                         else
                         {
-                            // Ap already high and at/past Ap: skip warp, hand FineTune now.
-                            // Without this, suppressThrottle stays 0 forever when climb ends first.
-                            stopIncrease = true;
-                            suppressThrottle = 2;
-                            trace += 'U';
-                            if (errStep < Ascend2Target.FineTune)
-                                errStep = Ascend2Target.FineTune;
-                            Debug.Log("TargetSubOrbital: Ap ready, already at/past Ap -> FineTune H="
-                                + VesselState.speedSurfaceHorizontal.ToString("F1"));
+                            // At/past Ap or already at target height with vz bled: FineTune only
+                            // if coast is clear. Otherwise hold and keep H.
+                            TryArmSubOrbitFineTune("Ap ready, vz bled -> FineTune");
                         }
                     }
                 }
@@ -1884,8 +1921,9 @@ velocityPID.AntiWindup(rawAccel, accel);
                 // While throttle is disabled monitor it until the second burn can start
                 if (suppressThrottle == 1)
                 {
-                    // Hold on until we get to point where we can burn to target.
-                    if ((decelerationStartTime > 0) && (VesselState.speedVertical > 0))
+                    // Stay in warp only while still climbing toward target height.
+                    // Exit prior to apoapsis once altitudeASL has reached the cruise floor.
+                    if (!reachedTargetAlt && (decelerationStartTime > 0) && (VesselState.speedVertical > 0))
                     {
                         Debug.Log("warp");
                         if (Core.Node.Autowarp && (decelerationStartTime > 0))
@@ -1897,18 +1935,24 @@ velocityPID.AntiWindup(rawAccel, accel);
                             Core.Warp.MinimumWarp();
                         }
                     }
+                    else if (reachedTargetAlt && (VesselState.speedVertical > 1.0))
+                    {
+                        Core.Warp.MinimumWarp();
+                        suppressThrottle = 0;
+                        trace += 'E';
+                        Debug.Log("TargetSubOrbital: warp exit at target height, bleed vz asl="
+                            + VesselState.altitudeASL.ToString("F0")
+                            + " cruise=" + checkApa.ToString("F0")
+                            + " vz=" + VesselState.speedVertical.ToString("F1")
+                            + " H=" + VesselState.speedSurfaceHorizontal.ToString("F1")
+                            + " ApA=" + VesselState.orbitApA.ToString("F0"));
+                    }
                     else
                     {
-                        stopIncrease = true;
-                        suppressThrottle++;
-                        trace += 'U';
+                        // At Ap, or at target height with vz already bled.
                         Core.Warp.MinimumWarp();
-                        errStep++; trace += ((int)errStep).ToString();
-                        Debug.Log("TargetSubOrbital: coast/warp reached Ap -> FineTune ApA="
-                            + VesselState.orbitApA.ToString("F0")
-                            + " tAp=" + VesselState.orbitTimeToAp.ToString("F1")
-                            + " alt=" + VesselState.altitudeTrue.ToString("F0")
-                            + " errStep=" + ((int)errStep).ToString());
+                        if (!TryArmSubOrbitFineTune("coast/warp reached target height -> FineTune"))
+                            suppressThrottle = 0;
                     }
                 }
             }
