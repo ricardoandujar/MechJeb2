@@ -11,7 +11,7 @@ namespace MuMech
     {
         public class TargetSubOrbit : AutopilotStep
         {
-            enum Step { STATE_INIT, STATE_LATERAL, STATE_PROGRADE, STATE_LATERAL_FINE, STATE_RETROGRADE, STATE_CORRECT, STATE_COAST_AP };
+            enum Step { STATE_INIT, STATE_LATERAL, STATE_PROGRADE, STATE_LATERAL_FINE, STATE_RETROGRADE, STATE_CORRECT, STATE_COAST_AP, STATE_TRIP_HOOP, STATE_TRIP_DESCEND };
             Step step = Step.STATE_INIT;
             private const float H_CORRECTION_ANGLE_CONSTANT = 0.4f; // Used to determine horizontal correction angle 
             private const double OVERSHOOT_ANGLE_FRACTION = 0.9; // Small margin to avoid losing vertical control
@@ -99,6 +99,11 @@ namespace MuMech
             private double _lastTripLogUt = double.NegativeInfinity;
             private const double TRIP_PREDESCENT_M = 5000.0;  // start the -3 m/s pre-descent this far before dIgn
             private const double TRIP_HOLD_MAX_RAISE_M = 3000.0;
+            private const double TRIP_HOOP_CLEARANCE_M = 2000.0; // remaining-path AGL at targetAsl to enter DESCEND
+            private const double TRIP_DESCEND_VZ_MAX = 8.0;      // cap on P-arrival vzCmd
+            private double _tripTargetAsl = double.NaN;
+            private double _tripRidgeAsl = double.NaN;
+            private double _lastTripHoopEvalUt = double.NegativeInfinity;
             private bool TripCruiseActive => _tripCruise && Core.Landing.TripSpeedOn;
             private double _tripFloorUt = double.NegativeInfinity;
             private double _tripFloorAsl = 0.0;
@@ -1148,6 +1153,8 @@ namespace MuMech
             private string DescribeBurnAxis(Vector3d thrustDir, Vector3d herror, Vector3d downrange)
             {
                 if (step == Step.STATE_PROGRADE) return "prograde";
+                if (step == Step.STATE_TRIP_HOOP) return "trip-hoop";
+                if (step == Step.STATE_TRIP_DESCEND) return "trip-descend";
                 if (step == Step.STATE_RETROGRADE) return "retrograde";
                 if (step == Step.STATE_CORRECT) return "idle-correct";
                 if (step == Step.STATE_COAST_AP) return "coast-ap";
@@ -1305,14 +1312,14 @@ namespace MuMech
                             {
                                 // k > 1 only (Ricardo t257u): at the trip floor the powered level cruise starts
                                 // without waiting for an unpowered coast to clear the k == 1.0 LB-floor margin.
-                                // Stay PROGRADE; TripCruiseCommand owns the burn.
+                                // k > 1: TryStartTripCruise enters STATE_TRIP_HOOP; TripCruiseCommand owns the burn.
                             }
                             else if (_apReachedForShape && TerrainHoopShaped()
                                      && TerrainClearWithExitMargin())
                             {
                                 if (Core.Landing.TripSpeedOn && TryStartTripCruise("terrain-hoop path clear"))
                                 {
-                                    // k > 1 only: stay PROGRADE; TripCruiseCommand owns the burn.
+                                    // k > 1: TryStartTripCruise enters STATE_TRIP_HOOP; TripCruiseCommand owns the burn.
                                 }
                                 else
                                 {
@@ -1335,7 +1342,7 @@ namespace MuMech
                                 {
                                     if (Core.Landing.TripSpeedOn && TryStartTripCruise("prograde done"))
                                     {
-                                        // k > 1 only: stay PROGRADE; TripCruiseCommand owns the burn.
+                                        // k > 1: TryStartTripCruise enters STATE_TRIP_HOOP; TripCruiseCommand owns the burn.
                                     }
                                     else
                                     {
@@ -1517,6 +1524,15 @@ namespace MuMech
                             }
                         }
                         break;
+                    case Step.STATE_TRIP_HOOP:
+                    case Step.STATE_TRIP_DESCEND:
+                        // TripCruiseCommand owns the burn while _tripCruise is set; this is only a
+                        // safety no-op if SetPathToTarget is reached with these steps.
+                        forceHoriz = false;
+                        desiredHorizontalVel = Vector3d.zero;
+                        herror = Vector3d.zero;
+                        rc = 0;
+                        break;
                     case Step.STATE_LATERAL_FINE: // Fine tune horizontal velocity to target using closest approach vector instead of crossRange vector
                         {
                             forceHoriz = true; // Force horizontal thrust
@@ -1650,6 +1666,7 @@ namespace MuMech
                         return false;
                     }
                     _tripCruise = true;
+                    step = Step.STATE_TRIP_HOOP;
                     _tripVClear = vClear;
                     _tripVTarget = vTarget;
                     _tripHoldAsl = hold;
@@ -1723,6 +1740,116 @@ namespace MuMech
             }
 
             /// <summary>
+            /// k > 1 only: PROGRADE -> TRIP_HOOP once cruise is latched, then TRIP_HOOP ->
+            /// TRIP_DESCEND when padAsl+hoopCenter has >= 2000 m clearance over the remaining
+            /// ridge ahead and the drop is reachable before 0.97*dIgn. hoopOk/pathHits are not
+            /// required (unpowered coast is not a valid predictor at cruise H).
+            /// </summary>
+            private void UpdateTripHoopState()
+            {
+                if (!TripCruiseActive)
+                    return;
+                if (step == Step.STATE_PROGRADE)
+                    step = Step.STATE_TRIP_HOOP;
+                if (step != Step.STATE_TRIP_HOOP && step != Step.STATE_TRIP_DESCEND)
+                    return;
+
+                double now = Planetarium.GetUniversalTime();
+                bool due = now - _lastTripHoopEvalUt >= 1.0;
+                if (!(due || double.IsNaN(_tripTargetAsl)))
+                    return;
+
+                _lastTripHoopEvalUt = now;
+                if (!TryEvalTripHoopTarget(out double targetAsl, out double ridgeAsl, out double padAsl,
+                        out double remClear, out double tAvail, out double vNeed, out string why))
+                {
+                    LogTrip("TSO hoop wait " + why);
+                    return;
+                }
+                _tripTargetAsl = targetAsl;
+                _tripRidgeAsl = ridgeAsl;
+                if (step != Step.STATE_TRIP_HOOP)
+                    return;
+
+                LogTrip("TSO hoop wait clear=" + remClear.ToString("F0")
+                    + " need=" + TRIP_HOOP_CLEARANCE_M.ToString("F0")
+                    + " targetAsl=" + targetAsl.ToString("F0")
+                    + " ridge=" + ridgeAsl.ToString("F0")
+                    + " pad=" + padAsl.ToString("F0")
+                    + " tAvail=" + tAvail.ToString("F0")
+                    + " vNeed=" + vNeed.ToString("F2")
+                    + " asl=" + VesselState.altitudeASL.ToString("F0"));
+                if (remClear >= TRIP_HOOP_CLEARANCE_M
+                    && tAvail > 5.0
+                    && vNeed <= TRIP_DESCEND_VZ_MAX)
+                {
+                    step = Step.STATE_TRIP_DESCEND;
+                    LogTrip("TSO hoop -> DESCEND targetAsl=" + targetAsl.ToString("F0")
+                        + " clear=" + remClear.ToString("F0")
+                        + " tAvail=" + tAvail.ToString("F0")
+                        + " vNeed=" + vNeed.ToString("F2"), true);
+                }
+            }
+
+            private bool TryEvalTripHoopTarget(out double targetAsl, out double ridgeAsl, out double padAsl,
+                out double remClear, out double tAvail, out double vNeed, out string why)
+            {
+                targetAsl = double.NaN;
+                ridgeAsl = double.NaN;
+                padAsl = double.NaN;
+                remClear = double.NaN;
+                tAvail = double.NaN;
+                vNeed = double.NaN;
+                why = "";
+                try
+                {
+                    // Remaining-path ridge: same great-circle scan as the trip cruise floor
+                    // (current position -> pad, pad false-fire excluded).
+                    Core.Landing.TripCruiseFloorAsl(out ridgeAsl, out padAsl);
+                    if (double.IsNaN(ridgeAsl) || double.IsNaN(padAsl)
+                        || double.IsInfinity(ridgeAsl) || double.IsInfinity(padAsl))
+                    {
+                        why = "no-ridge";
+                        return false;
+                    }
+
+                    if (!Core.Landing.TryEvaluateLandingHoop(
+                            out double hoopCenter, out _, out _,
+                            out double predH, out double miss, out _,
+                            out _, out _, out string hoopWhy))
+                    {
+                        why = "hoop-eval-failed " + hoopWhy;
+                        return false;
+                    }
+                    if (double.IsNaN(hoopCenter) || double.IsInfinity(hoopCenter) || hoopCenter <= 0)
+                    {
+                        why = "no-hoopCenter " + hoopWhy;
+                        return false;
+                    }
+                    // Live columns only; do not require hoopOk / !pathHits.
+                    AutotestHoopCenter = hoopCenter;
+                    AutotestPredH = predH;
+                    AutotestHoopMiss = miss;
+
+                    targetAsl = padAsl + hoopCenter;
+                    remClear = targetAsl - ridgeAsl;
+                    double asl = VesselState.altitudeASL;
+                    double vH = Math.Max(VesselState.speedSurfaceHorizontal, 1.0);
+                    double dIgn = TripIgnitionDistance(vH);
+                    double dist = Core.Landing.getHDistanceToTarget();
+                    tAvail = (dist - 0.97 * dIgn) / vH;
+                    double drop = asl - targetAsl;
+                    vNeed = (tAvail > 0.0 && drop > 0.0) ? drop / tAvail : 0.0;
+                    why = "ok";
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    why = "eval-failed " + e.Message;
+                    return false;
+                }
+            }
+            /// <summary>
             /// Steps 3+4 (k > 1 only): powered level cruise toward the pad at _tripVTarget.
             /// Vertical: a_up = g - vOrbH^2/r + 0.2 (vzCmd - vz) (down-thrust when faster than circular),
             /// vzCmd holds _tripHoldAsl; -3 m/s pre-descent within TRIP_PREDESCENT_M of dIgn so LB sees
@@ -1758,6 +1885,8 @@ namespace MuMech
                         return;
                     }
 
+                    UpdateTripHoopState();
+
                     Vector3d tgtBody = Core.Target.GetPositionTargetPosition(); // body-relative
                     Vector3d toPad = Vector3d.Exclude(up, tgtBody - posBody);
                     Vector3d dir = (toPad.sqrMagnitude > 1.0) ? toPad.normalized
@@ -1772,7 +1901,19 @@ namespace MuMech
                     if (aH.magnitude > 0.7 * aCap)
                         aH *= 0.7 * aCap / aH.magnitude;
 
-                    double vzCmd = Math.Max(-5.0, Math.Min(5.0, (_tripHoldAsl - asl) / 30.0));
+                    double vzCmd;
+                    if (step == Step.STATE_TRIP_DESCEND && !double.IsNaN(_tripTargetAsl) && _tripTargetAsl > 0)
+                    {
+                        double tGo = Math.Max((dist - 0.97 * dIgn) / Math.Max(vH, 1.0), 5.0);
+                        vzCmd = (_tripTargetAsl - asl) / tGo;
+                        if (vzCmd < -TRIP_DESCEND_VZ_MAX) vzCmd = -TRIP_DESCEND_VZ_MAX;
+                        if (vzCmd > TRIP_DESCEND_VZ_MAX) vzCmd = TRIP_DESCEND_VZ_MAX;
+                    }
+                    else
+                    {
+                        // STATE_TRIP_HOOP and default hold: keep _tripHoldAsl
+                        vzCmd = Math.Max(-5.0, Math.Min(5.0, (_tripHoldAsl - asl) / 30.0));
+                    }
                     if (dist <= dIgn + TRIP_PREDESCENT_M)
                         vzCmd = Math.Min(vzCmd, (dist <= dIgn) ? -5.0 : -3.0);
                     double vOrbH = Vector3d.Exclude(up, VesselState.orbitalVelocity).magnitude;
@@ -1794,11 +1935,13 @@ namespace MuMech
                     Core.Thrust.TransKillH = false;
                     Core.Thrust.RequestActiveThrottle((float)thr);
 
-                    Status = "Trip cruise k=" + Core.Landing.TripSpeedK.ToString("F2")
+                    string tripMode = (step == Step.STATE_TRIP_DESCEND) ? "descend"
+                        : (step == Step.STATE_TRIP_HOOP) ? "hoop" : "cruise";
+                    Status = "Trip " + tripMode + " k=" + Core.Landing.TripSpeedK.ToString("F2")
                         + " vH " + vH.ToString("F0") + "/" + _tripVTarget.ToString("F0")
                         + " hold " + _tripHoldAsl.ToString("F0");
-                    LogTrip("TSO cruise vH=" + vH.ToString("F1") + " vT=" + _tripVTarget.ToString("F1")
-                        + " asl=" + asl.ToString("F0") + " hold=" + _tripHoldAsl.ToString("F0")
+                    LogTrip("TSO " + tripMode + " vH=" + vH.ToString("F1") + " vT=" + _tripVTarget.ToString("F1")
+                        + " asl=" + asl.ToString("F0") + " hold=" + _tripHoldAsl.ToString("F0") + " tgt=" + (double.IsNaN(_tripTargetAsl) ? "n/a" : _tripTargetAsl.ToString("F0"))
                         + " vz=" + vz.ToString("F2") + " vzCmd=" + vzCmd.ToString("F1")
                         + " gEff=" + gEff.ToString("F3") + " aH=" + aH.magnitude.ToString("F3")
                         + " aV=" + aV.ToString("F3") + " thr=" + thr.ToString("F3")
