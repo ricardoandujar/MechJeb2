@@ -99,7 +99,8 @@ namespace MuMech
             private double _lastTripLogUt = double.NegativeInfinity;
             private const double TRIP_PREDESCENT_M = 5000.0;  // start the -3 m/s pre-descent this far before dIgn
             private const double TRIP_HOLD_MAX_RAISE_M = 3000.0;
-            private const double TRIP_HOOP_CLEARANCE_M = 2000.0; // remaining-path AGL at targetAsl to enter DESCEND
+            private const double TRIP_DESCEND_TERRAIN_MARGIN_M = 2000.0; // Ricardo t294u: descent target floor above remaining ridge
+            private const double TRIP_HOOP_CLEARANCE_M = TRIP_DESCEND_TERRAIN_MARGIN_M; // remaining-path clearance at targetAsl (holds by construction)
             private const double TRIP_DESCEND_VZ_MAX = 8.0;      // cap on P-arrival vzCmd
             private double _tripTargetAsl = double.NaN;
             private double _tripRidgeAsl = double.NaN;
@@ -1590,7 +1591,8 @@ namespace MuMech
                 double now = Planetarium.GetUniversalTime();
                 if (!force && now - _lastTripLogUt < 1.0)
                     return;
-                _lastTripLogUt = now;
+                if (!force)
+                    _lastTripLogUt = now; // forced gate lines (own 1 s eval timer) don't starve the cruise line
                 Debug.Log("[TripSpeed] " + msg);
             }
 
@@ -1763,23 +1765,25 @@ namespace MuMech
                 if (!TryEvalTripHoopTarget(out double targetAsl, out double ridgeAsl, out double padAsl,
                         out double remClear, out double tAvail, out double vNeed, out string why))
                 {
-                    LogTrip("TSO hoop wait " + why);
+                    LogTrip("TSO hoop wait " + why + " hoopCenter=" + AutotestHoopCenter.ToString("F0"), true);
                     return;
                 }
                 _tripTargetAsl = targetAsl;
                 _tripRidgeAsl = ridgeAsl;
-                if (step != Step.STATE_TRIP_HOOP)
-                    return;
 
-                LogTrip("TSO hoop wait clear=" + remClear.ToString("F0")
+                LogTrip("TSO hoop gate remClear=" + remClear.ToString("F0")
                     + " need=" + TRIP_HOOP_CLEARANCE_M.ToString("F0")
                     + " targetAsl=" + targetAsl.ToString("F0")
-                    + " ridge=" + ridgeAsl.ToString("F0")
+                    + " hoopCenter=" + AutotestHoopCenter.ToString("F0")
+                    + " remRidge=" + ridgeAsl.ToString("F0")
                     + " pad=" + padAsl.ToString("F0")
                     + " tAvail=" + tAvail.ToString("F0")
                     + " vNeed=" + vNeed.ToString("F2")
-                    + " asl=" + VesselState.altitudeASL.ToString("F0"));
-                if (remClear >= TRIP_HOOP_CLEARANCE_M
+                    + " asl=" + VesselState.altitudeASL.ToString("F0")
+                    + " step=" + (step == Step.STATE_TRIP_DESCEND ? "descend" : "hoop"), true);
+                if (step != Step.STATE_TRIP_HOOP)
+                    return;
+                if (remClear >= TRIP_HOOP_CLEARANCE_M - 1e-3
                     && tAvail > 5.0
                     && vNeed <= TRIP_DESCEND_VZ_MAX)
                 {
@@ -1831,7 +1835,8 @@ namespace MuMech
                     AutotestPredH = predH;
                     AutotestHoopMiss = miss;
 
-                    targetAsl = padAsl + hoopCenter;
+                    // Ricardo t294u: never target below remRidge + margin (pad sits in a crater below the rim).
+                    targetAsl = Math.Max(padAsl + hoopCenter, ridgeAsl + TRIP_DESCEND_TERRAIN_MARGIN_M);
                     remClear = targetAsl - ridgeAsl;
                     double asl = VesselState.altitudeASL;
                     double vH = Math.Max(VesselState.speedSurfaceHorizontal, 1.0);
