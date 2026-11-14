@@ -106,7 +106,7 @@ namespace MuMech
             // floor = max(padAsl + gate, max terrain within dIgn of pad + TRIP_HOOP_VIC_MARGIN_M),
             // ceiling = floor + TRIP_HOOP_CEIL_ABOVE_M; active within TRIP_HOOP_LIMIT_DIGN * dIgn.
             private const double TRIP_HOOP_LIMIT_DIGN = 6.0;     // Ricardo Nov 14 12:18 (was 3.0; t314u 2.25)
-            private const double TRIP_HOOP_CEIL_ABOVE_M = 2500.0;    // Ricardo Nov 14 12:15 (was 2000)
+            private const double TRIP_HOOP_CEIL_ABOVE_M = 2000.0;    // Ricardo Nov 14 12:20: stays 2000 (2500 briefly in 66295d00)
             private const double TRIP_HOOP_VIC_MARGIN_M = 4000.0;    // Ricardo Nov 14 12:15: wide-hoop terrain term vic + 4 km (small-body curvature); DESCEND target margin stays 2 km
             private const double TRIP_HOOP_VY_IGN_MIN = -20.0;   // predicted vy (m/s, + down) at LB ignition: climb <= 20 m/s (Nov 14 t314u; LB distance-ignites while climbing)
             private const double TRIP_HOOP_COAST_MAX_S = 600.0;
@@ -1985,7 +1985,7 @@ namespace MuMech
             /// two-tier LB AGL floor until the LB ignition point (>= 2 km beyond 1.85*dIgn, >= 1.5 km
             /// inside it) and climbs no faster than 20 m/s there (Ricardo Nov 14; LB's narrow climb
             /// guard lets a fast horizontal coast distance-ignite). Evaluated 1/s; one forced log line.
-            /// floor = max(pad + gate, vicinity terrain + 4 km), ceiling = floor + 2.5 km (Nov 14 12:15). Was: pad term on flat/non-crater
+            /// floor = max(pad + gate, vicinity terrain + 4 km), ceiling = floor + 2 km (Nov 14 12:20). Was: pad term on flat/non-crater
             /// pads (vicinity ~ pad), the terrain term inside craters; both and the winner are logged.
             /// </summary>
             private bool TryTripWideHoop(double dist, double vH, double dIgn, out string why)
