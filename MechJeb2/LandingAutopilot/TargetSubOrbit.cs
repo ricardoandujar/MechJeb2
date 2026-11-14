@@ -101,7 +101,15 @@ namespace MuMech
             private const double TRIP_HOLD_MAX_RAISE_M = 3000.0;
             private const double TRIP_DESCEND_TERRAIN_MARGIN_M = 2000.0; // Ricardo t294u: descent target floor above remaining ridge
             private const double TRIP_HOOP_CLEARANCE_M = TRIP_DESCEND_TERRAIN_MARGIN_M; // remaining-path clearance at targetAsl (holds by construction)
-            private const double TRIP_DESCEND_VZ_MAX = 8.0;      // cap on P-arrival vzCmd
+            private const double TRIP_DESCEND_VZ_MAX = 12.0;     // cap on P-arrival vzCmd (Ricardo t304u: 12 m/s)
+            // Ricardo t304u: widened trip hoop near the pad (powered state, trip vH kept).
+            // floor = max(padAsl + gate, max terrain within dIgn of pad + TRIP_DESCEND_TERRAIN_MARGIN_M),
+            // ceiling = floor + TRIP_HOOP_CEIL_ABOVE_M; active within TRIP_HOOP_LIMIT_DIGN * dIgn.
+            private const double TRIP_HOOP_LIMIT_DIGN = 2.25;
+            private const double TRIP_HOOP_CEIL_ABOVE_M = 2000.0;
+            private const double TRIP_HOOP_VY_IGN_MIN = 2.0;     // predicted sink (m/s down) at LB ignition point
+            private const double TRIP_HOOP_COAST_MAX_S = 600.0;
+            private double _lastTripWideEvalUt = double.NegativeInfinity;
             private double _tripTargetAsl = double.NaN;
             private double _tripRidgeAsl = double.NaN;
             private double _lastTripHoopEvalUt = double.NegativeInfinity;
@@ -1966,6 +1974,58 @@ namespace MuMech
             /// ignition point on LB's own formula: dist <= 0.97 dIgn(vH), descending (vz <= -1, LB needs
             /// Vy >= 1 to light on d_horiz), local CA clear. Pad behind -> "pad-behind" (MTT recovery).
             /// </summary>
+            /// <summary>
+            /// Ricardo t301u/t304u (k > 1 only, STATE_TRIP_DESCEND): widened hoop on the CURRENT powered
+            /// state. Hand off to LB (engines off, LB coasts / warps) once dist <= 2.25*dIgn,
+            /// floor <= asl <= ceiling, sinking >= 1 m/s, CA quiet, the engine-off coast stays above the
+            /// LB 3 km AGL floor until the LB ignition point and still sinks >= 2 m/s there (else LB's
+            /// Vy < 1 rule would never distance-ignite). Evaluated 1/s; one forced log line per eval.
+            /// </summary>
+            private bool TryTripWideHoop(double dist, double vH, double dIgn, out string why)
+            {
+                why = "";
+                if (step != Step.STATE_TRIP_DESCEND)
+                    return false;
+                double lim = TRIP_HOOP_LIMIT_DIGN * dIgn;
+                if (dist > lim)
+                    return false;
+                double now = Planetarium.GetUniversalTime();
+                if (now - _lastTripWideEvalUt < 1.0)
+                    return false;
+                _lastTripWideEvalUt = now;
+
+                double asl = VesselState.altitudeASL;
+                double vz = VesselState.speedVertical;
+                double vicAsl = Core.Landing.TripPadVicinityTerrainAsl(dIgn, out double padAsl);
+                double gate = Core.Landing.ComputeOptimalDeorbitAltitude();
+                if (double.IsNaN(vicAsl) || double.IsNaN(padAsl) || double.IsNaN(gate) || double.IsInfinity(gate))
+                {
+                    LogTrip("TSO wide-hoop wait no-terrain dist=" + dist.ToString("F0"), true);
+                    return false;
+                }
+                double floorAsl = Math.Max(padAsl + gate, vicAsl + TRIP_DESCEND_TERRAIN_MARGIN_M);
+                double ceilAsl = floorAsl + TRIP_HOOP_CEIL_ABOVE_M;
+                bool inWin = asl >= floorAsl && asl <= ceilAsl;
+                bool sinking = vz <= -1.0;
+                (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
+                bool caQuiet = !caCrash && caDv <= 0;
+                double minAgl = double.NaN, vyIgn = double.NaN, tIgn = double.NaN;
+                bool coastOk = inWin && sinking && caQuiet
+                    && Core.Landing.TripCoastToIgnition(dIgn, TRIP_HOOP_COAST_MAX_S, out minAgl, out vyIgn, out tIgn);
+                bool aglOk = coastOk && minAgl >= MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FLOOR_M;
+                bool vyOk = coastOk && vyIgn >= TRIP_HOOP_VY_IGN_MIN;
+                bool pass = inWin && sinking && caQuiet && coastOk && aglOk && vyOk;
+                why = "dist=" + dist.ToString("F0") + " lim=" + lim.ToString("F0") + " dIgn=" + dIgn.ToString("F0")
+                    + " asl=" + asl.ToString("F0") + " floor=" + floorAsl.ToString("F0") + " ceil=" + ceilAsl.ToString("F0")
+                    + " pad=" + padAsl.ToString("F0") + " gate=" + gate.ToString("F0") + " vic=" + vicAsl.ToString("F0")
+                    + " vz=" + vz.ToString("F2") + " vH=" + vH.ToString("F1") + " caDv=" + caDv.ToString("F0") + " crash=" + caCrash
+                    + " coastMinAgl=" + minAgl.ToString("F0") + " vyIgn=" + vyIgn.ToString("F2") + " tIgn=" + tIgn.ToString("F0")
+                    + " inWin=" + inWin + " sink=" + sinking + " ca=" + caQuiet + " coast=" + coastOk
+                    + " agl=" + aglOk + " vy=" + vyOk + " pass=" + pass;
+                LogTrip("TSO wide-hoop " + why, true);
+                return pass;
+            }
+
             private bool TryTripCruiseHandoff(Vector3d targetPosBody, out string reason)
             {
                 reason = "";
@@ -1981,6 +2041,12 @@ namespace MuMech
                     double dIgn = TripIgnitionDistance(vH);
                     if (dist > 0.97 * dIgn)
                     {
+                        if (TryTripWideHoop(dist, vH, dIgn, out string hoopWhy))
+                        {
+                            reason = "trip-hoop k=" + Core.Landing.TripSpeedK.ToString("F2") + " " + hoopWhy;
+                            LogTrip("TSO->LB " + reason, true);
+                            return true;
+                        }
                         reason = "trip-cruise dist=" + dist.ToString("F0") + " dIgn=" + dIgn.ToString("F0");
                         return false;
                     }

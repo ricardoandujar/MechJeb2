@@ -2182,6 +2182,91 @@ namespace MuMech
         }
 
         /// <summary>
+        /// Ricardo t304u (k > 1 trip widened hoop): highest terrain ASL on the great circle from the pad
+        /// toward the vessel within radiusM of the pad (pad zone INCLUDED; LB ignition distance radius).
+        /// Returns NaN when the geometry is unavailable.
+        /// </summary>
+        public double TripPadVicinityTerrainAsl(double radiusM, out double padAsl, int nSamples = 64)
+        {
+            padAsl = double.NaN;
+            CelestialBody body = Vessel.mainBody;
+            if (body == null) return double.NaN;
+            Vector3d tgt = Core.Target.GetPositionTargetPosition();
+            Vector3d ves = VesselState.CoM - body.position;
+            if (!IsFiniteVec(tgt) || !IsFiniteVec(ves) || tgt.sqrMagnitude < 1.0 || ves.sqrMagnitude < 1.0)
+                return double.NaN;
+            padAsl = body.TerrainAltitude(Core.Target.targetLatitude, Core.Target.targetLongitude);
+            if (double.IsNaN(padAsl) || double.IsInfinity(padAsl)) padAsl = 0.0;
+            double maxAsl = padAsl;
+            Vector3d a = ves.normalized;
+            Vector3d b = tgt.normalized;
+            double theta = Math.Acos(Math.Max(-1.0, Math.Min(1.0, Vector3d.Dot(a, b))));
+            double R = body.Radius;
+            double sinT = Math.Sin(theta);
+            if (theta < 1e-9 || sinT < 1e-9 || radiusM <= 0)
+                return maxAsl;
+            double span = Math.Min(theta, radiusM / R); // angle from the pad
+            for (int i = 1; i <= nSamples; i++)
+            {
+                double f = 1.0 - span * i / nSamples / theta; // fraction from vessel (a) to pad (b)
+                Vector3d dir = (Math.Sin((1.0 - f) * theta) / sinT) * a + (Math.Sin(f * theta) / sinT) * b;
+                double h = body.TerrainAltitude(body.position + dir.normalized * R);
+                if (!double.IsNaN(h) && !double.IsInfinity(h) && h > maxAsl)
+                    maxAsl = h;
+            }
+            return maxAsl;
+        }
+
+        /// <summary>
+        /// Ricardo t304u (k > 1 trip widened hoop): sample the real engine-off orbit from now until the
+        /// arc to the (rotating) pad reaches dIgnM (LB ignition point). minAgl = lowest AGL on the way
+        /// (terrain rotated, same convention as CoastBelowLbFloorBeforeIgnition), vyIgnDown = sink rate
+        /// (m/s, + down) at that point, tIgn = seconds to it. False if the point is not reached.
+        /// </summary>
+        public bool TripCoastToIgnition(double dIgnM, double maxSec, out double minAgl, out double vyIgnDown, out double tIgn)
+        {
+            minAgl = double.PositiveInfinity;
+            vyIgnDown = double.NaN;
+            tIgn = double.NaN;
+            CelestialBody body = Vessel.mainBody;
+            Orbit orbit = Vessel.orbit;
+            if (body == null || orbit == null) return false;
+            Vector3d targetPos = Core.Target.GetPositionTargetPosition();
+            if (!IsFiniteVec(targetPos)) return false;
+            double now = Planetarium.GetUniversalTime();
+            double omegaDeg = (body.rotates && body.rotationPeriod != 0) ? 360.0 / body.rotationPeriod : 0.0;
+            const double dt = 2.0;
+            double altPrev = VesselState.altitudeASL;
+            double arcPrev = double.PositiveInfinity;
+            for (double tA = dt; tA <= maxSec; tA += dt)
+            {
+                Vector3d pos = orbit.getPositionAtUT(now + tA);
+                if (!IsFiniteVec(pos)) continue;
+                Vector3d posBody = pos - body.position;
+                Vector3d tgtAtUt = RotateRelativePosition(targetPos, tA);
+                if (!IsFiniteVec(posBody) || !IsFiniteVec(tgtAtUt)) continue;
+                double posASL = body.GetAltitude(pos);
+                if (double.IsNaN(posASL) || double.IsInfinity(posASL)) continue;
+                double vDown = (altPrev - posASL) / dt;
+                altPrev = posASL;
+                double terrainASL = body.TerrainAltitude(body.GetLatitude(pos), body.GetLongitude(pos) - omegaDeg * tA);
+                if (!double.IsNaN(terrainASL) && !double.IsInfinity(terrainASL) && posASL - terrainASL < minAgl)
+                    minAgl = posASL - terrainASL;
+                double arc = ArcDistance(posBody, tgtAtUt, body.Radius);
+                if (arc <= dIgnM)
+                {
+                    vyIgnDown = vDown;
+                    tIgn = tA;
+                    return !double.IsInfinity(minAgl);
+                }
+                if (arc > arcPrev + 1.0)
+                    return false; // passed abeam the pad without reaching the ignition radius
+                arcPrev = arc;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Point TSO shaping (TgtAlt) at the hoop so pad-overflight aims at hoopCenter.
         /// </summary>
         public void SyncTgtAltToLandingHoop()
