@@ -107,7 +107,7 @@ namespace MuMech
             // ceiling = floor + TRIP_HOOP_CEIL_ABOVE_M; active within TRIP_HOOP_LIMIT_DIGN * dIgn.
             private const double TRIP_HOOP_LIMIT_DIGN = 6.0;     // Ricardo Nov 14 12:18 (was 3.0; t314u 2.25)
             private const double TRIP_HOOP_CEIL_ABOVE_M = 2000.0;    // Ricardo Nov 14 12:20: stays 2000 (2500 briefly in 66295d00)
-            private const double TRIP_HOOP_VIC_MARGIN_M = 4000.0;    // Ricardo Nov 14 12:15: wide-hoop terrain term vic + 4 km (small-body curvature); DESCEND target margin stays 2 km
+            private const double TRIP_HOOP_VIC_MARGIN_M = 1500.0;    // Ricardo Nov 14 16:28 (was 4000): ignition-floor terrain term vic + 1.5 km (wide hoop + arc push); pad term pad+gate unchanged; DESCEND target margin stays 2 km
             private const double TRIP_HOOP_VY_IGN_MIN = -20.0;   // predicted vy (m/s, + down) at LB ignition: climb <= 20 m/s (Nov 14 t314u; LB distance-ignites while climbing)
             private const double TRIP_HOOP_COAST_MAX_S = 600.0;
             // Ricardo Nov 14 12:31 (arc push): in TRIP_DESCEND within 6x dIgn (+ approach) push down until the predicted
@@ -2073,6 +2073,8 @@ namespace MuMech
                     && (bottomAgl <= TRIP_ARC_BOTTOM_TARGET_M + TRIP_ARC_HANDOFF_TOL_M
                         || ignAsl - floorAsl <= TRIP_ARC_IGN_MARGIN_M + TRIP_ARC_HANDOFF_TOL_M
                         || dist <= TRIP_ARC_FORCE_DIGN * dIgn);
+                string arcBy = !arcReady ? "none" : bottomAgl <= TRIP_ARC_BOTTOM_TARGET_M + TRIP_ARC_HANDOFF_TOL_M ? "bottom"
+                    : ignAsl - floorAsl <= TRIP_ARC_IGN_MARGIN_M + TRIP_ARC_HANDOFF_TOL_M ? "ignFloor" : "3x";
                 bool pass = sinking && caQuiet && coastOk && ignOk && aglOk && vyOk && arcReady;
                 why = "dist=" + dist.ToString("F0") + " lim=" + lim.ToString("F0") + " dIgn=" + dIgn.ToString("F0")
                     + " asl=" + asl.ToString("F0") + " floor=" + floorAsl.ToString("F0") + " ceil=" + ceilAsl.ToString("F0")
@@ -2089,7 +2091,7 @@ namespace MuMech
                     + " ignOverCeil=" + (ignAsl - ceilAsl).ToString("F0") + " ignOverPad=" + (ignAsl - padAsl).ToString("F0")
                     + " ignOverVic=" + (ignAsl - vicAsl).ToString("F0")
                     + " ign=" + ignOk + " sink=" + sinking + " ca=" + caQuiet + " coast=" + coastOk
-                    + " agl=" + aglOk + " vy=" + vyOk + " arcReady=" + arcReady + " pass=" + pass;
+                    + " agl=" + aglOk + " vy=" + vyOk + " arcReady=" + arcReady + " arcBy=" + arcBy + " pass=" + pass;
                 LogTrip("TSO wide-hoop " + why, true);
                 return pass;
             }
