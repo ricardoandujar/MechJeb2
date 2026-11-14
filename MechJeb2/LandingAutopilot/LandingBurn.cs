@@ -150,6 +150,7 @@ namespace MuMech.LandingAutopilot
         private void CancelWarpOnBurnLatch()
         {
             // Any ignition latch must drop time warp (regular or physics) immediately.
+            if (warpOn || warpOnP) Core.Landing.NoteWarp("LB exit:burn-latch");
             try { Core.Warp.MinimumWarp(true); } catch { }
             checkWarp = false;
             warpOn = false;
@@ -184,43 +185,56 @@ namespace MuMech.LandingAutopilot
             double current_agl = VesselState.altitudeTrue;
 
             // Terrain / AGL suicide: always evaluated so a flat coast cannot fly into the ground
-            // while sin_theta keeps h_vert at 0. Uses aPlan vertical stop + baseline 3 km floor.
-            const double distFloor = 3000.0;
+            // while sin_theta keeps h_vert at 0. Uses aPlan vertical stop + two-tier AGL trigger
+            // (Ricardo Nov 14, t310u/t311u/t314u): LANDING_BURN_IGN_PROX_AGL_M (1.5 km) inside the
+            // no-warp zone (current_d <= 1.85 * d_horiz, just before ignition), LANDING_BURN_AGL_FAR_M
+            // (2 km) beyond it. h_vert / d_horiz keep the LANDING_BURN_AGL_FLOOR_M (3 km) minimum.
+            const double distFloor = MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FLOOR_M;
             double vDown = Math.Max(Vy, 0.0);
             double ayNet = Math.Max(a - g, 0.1);
             double h_suicide = (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (vDown * vDown) / (2.0 * ayNet);
-            if (current_agl <= Math.Max(distFloor, h_suicide))
+
+            double Vx = vel.magnitude * cos_theta;
+            // Effective accelerations along retrograde direction at aPlan
+            double ay = a * sin_theta - g;                  // vertical (downward positive)
+            double ax = a * cos_theta;                      // horizontal
+            double dStopRaw = (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * Math.Max(ax, 0.1));
+            double dIgnZone = 1.85 * Math.Max(distFloor, dStopRaw);
+            double aglTrig = current_d <= dIgnZone
+                ? MechJebModuleLandingAutopilot.LANDING_BURN_IGN_PROX_AGL_M
+                : MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FAR_M;
+            if (current_agl <= Math.Max(aglTrig, h_suicide))
             {
                 shouldBurnStarted = true;
                 CancelWarpOnBurnLatch();
                 densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h / 5.0, MainBody), FlightGlobals.getExternalTemperature(current_h / 5.0, MainBody));
-                Debug.Log($"[ShouldStartBurn2:agl] agl={current_agl:F0}, h_suicide={h_suicide:F0}, Vy={Vy:F3}, aPlan={a:F2}");
+                Debug.Log($"[ShouldStartBurn2:agl] agl={current_agl:F0}, aglTrig={aglTrig:F0}, h_suicide={h_suicide:F0}, Vy={Vy:F3}, current_d={current_d:F0}, zone={dIgnZone:F0}, aPlan={a:F2}");
                 return true;
             }
 
-            if (Vy < 1.0)
+            // Ricardo Nov 14 (t310u): the old "Vy < 1 -> never ignite" gate is replaced by a narrow
+            // guard. While not sinking, h_vert is ignored (a steep climb must not light via h_vert and
+            // point retrograde at the ground); distance ignition stays allowed only for a genuinely fast
+            // horizontal approach (unclamped stop distance > floor), e.g. a climbing k>1 trip coast.
+            // Slow / short-hop climbs keep the old behaviour (no ignition). Warp logic below still runs.
+            bool vertOn = Vy >= 1.0;
+            if (!vertOn && dStopRaw <= distFloor)
             {
-                Debug.Log($"[ShouldStartBurn2] sin_theta={sin_theta:F3}, cos_theta={cos_theta:F3}, Vy={Vy:F3}");
+                Debug.Log($"[ShouldStartBurn2] climb-guard sin_theta={sin_theta:F3}, cos_theta={cos_theta:F3}, Vy={Vy:F3}, dStop={dStopRaw:F0}");
                 rc = false;
             }
             else
             {
-                double Vx = vel.magnitude * cos_theta;
-
-                // Effective accelerations along retrograde direction at aPlan
-                double ay = a * sin_theta - g;                  // vertical (downward positive)
-                double ax = a * cos_theta;                      // horizontal
-
                 // Baseline 3 km floor (no TWR-scaled expansion — that lit at ~8 km / 33 km AGL on Vesta).
                 double h_vert  = Math.Max(distFloor, (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (Vy * Vy) / (2.0 * Math.Max(ay, 0.1)));
-                double d_horiz = Math.Max(distFloor, (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * Math.Max(ax, 0.1)));
+                double d_horiz = Math.Max(distFloor, dStopRaw);
 
-                if (sin_theta < 0.25)
+                if (sin_theta < 0.25 || !vertOn)
                 {
-                    h_vert = 0; // Nearly horizontal: horizontal range owns ignition; AGL suicide above covers terrain
+                    h_vert = 0; // Nearly horizontal (or not sinking): horizontal range owns ignition; AGL suicide above covers terrain
                 }
 
-                rc = (current_h <= (h_vert)) || (current_d <= (d_horiz));
+                rc = (vertOn && current_h <= (h_vert)) || (current_d <= (d_horiz));
                 if (rc)
                 {
                     shouldBurnStarted = true;
@@ -229,7 +243,7 @@ namespace MuMech.LandingAutopilot
                 }
                 else
                 {
-                    rc = (current_h <= (1.85 * h_vert)) || (current_d <= (1.85 * d_horiz));
+                    rc = (vertOn && current_h <= (1.85 * h_vert)) || (current_d <= (1.85 * d_horiz));
 
                     // Perform warp if allowed and requested
                     if (checkWarp && (rc == false) && Core.Node.Autowarp && !Vessel.LandedOrSplashed)
@@ -253,6 +267,7 @@ namespace MuMech.LandingAutopilot
                     if (warpOnP == false)
                     {
                         //too low to use any regular warp rates. Use physics warp at a max of x2:
+                        Core.Landing.NoteWarp("LB coast(physics)");
                         Core.Warp.WarpPhysicsAtRate(2);
                         warpOnP = true;
                     }
@@ -264,6 +279,7 @@ namespace MuMech.LandingAutopilot
                     // Safe warp rate: limit based on altitude and orbital period
                     float warpRate = (float)Math.Min(VesselState.altitudeTrue / (5 * velocityGuess), (Orbit.period / 6));
 
+                    if (!warpOn) Core.Landing.NoteWarp("LB coast");
                     Core.Warp.WarpRegularAtRate(warpRate);
                     warpOnP = false;
                     warpOn = true;
@@ -271,6 +287,9 @@ namespace MuMech.LandingAutopilot
             }
             else if (warpOn)
             {
+                Core.Landing.NoteWarp(rc ? "LB exit:no-warp-zone(1.85*dIgn)"
+                    : !Core.Node.Autowarp ? "LB exit:autowarp-off"
+                    : Vessel.LandedOrSplashed ? "LB exit:landed" : "LB exit:checkWarp-off");
                 Core.Warp.MinimumWarp(true);
                 checkWarp = warpOn = warpOnP = false;
             }

@@ -473,6 +473,66 @@ namespace MuMech
             _vesselAverageDrag = VesselAverageDrag();
             base.OnFixedUpdate();
             DeployParachutes();
+            LogWarpEdges();
+        }
+
+        // Ricardo Nov 14: forced "WARP begin" / "WARP rate" / "WARP end" lines at every time-warp segment
+        // edge (any requester: LB, TSO, MTT, KSP itself) so charts can mark warps. Requesters tag the
+        // reason with NoteWarp(...) before warping / dropping warp; "end" logs the last tag as the exit reason.
+        public string WarpReason = "none";
+        private bool _warpLogActive;
+        private double _warpLogStartUt;
+        private float _warpLogRate = 1f;
+        private float _warpLogMaxRate = 1f;
+        private string _warpLogBeginReason = "";
+
+        public void NoteWarp(string reason) { WarpReason = reason ?? "none"; }
+
+        private string WarpStateText()
+        {
+            double dist = double.NaN;
+            try { if (Core.Target.PositionTargetExists) dist = getHDistanceToTarget(); } catch { }
+            return "ut=" + Planetarium.GetUniversalTime().ToString("F1")
+                + " dist=" + dist.ToString("F0") + " asl=" + VesselState.altitudeASL.ToString("F0")
+                + " agl=" + VesselState.altitudeTrue.ToString("F0") + " vz=" + VesselState.speedVertical.ToString("F2")
+                + " vH=" + VesselState.speedSurfaceHorizontal.ToString("F1");
+        }
+
+        private void LogWarpEdges()
+        {
+            try
+            {
+                float rate = TimeWarp.CurrentRate;
+                bool on = rate > 1.01f;
+                if (on && !_warpLogActive)
+                {
+                    _warpLogActive = true;
+                    _warpLogStartUt = Planetarium.GetUniversalTime();
+                    _warpLogRate = _warpLogMaxRate = rate;
+                    _warpLogBeginReason = WarpReason;
+                    Debug.Log("[LA] WARP begin " + WarpStateText() + " rate=" + rate.ToString("F1")
+                        + " mode=" + TimeWarp.WarpMode + " by=" + WarpReason);
+                }
+                else if (on && Math.Abs(rate - _warpLogRate) > 0.01f)
+                {
+                    _warpLogRate = rate;
+                    if (rate > _warpLogMaxRate) _warpLogMaxRate = rate;
+                    Debug.Log("[LA] WARP rate " + WarpStateText() + " rate=" + rate.ToString("F1") + " by=" + WarpReason);
+                }
+                else if (!on && _warpLogActive)
+                {
+                    _warpLogActive = false;
+                    double dur = Planetarium.GetUniversalTime() - _warpLogStartUt;
+                    Debug.Log("[LA] WARP end " + WarpStateText() + " rate=" + rate.ToString("F1")
+                        + " maxRate=" + _warpLogMaxRate.ToString("F1") + " dur=" + dur.ToString("F1")
+                        + " began=" + _warpLogBeginReason + " reason=" + WarpReason);
+                    _warpLogRate = _warpLogMaxRate = 1f;
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.Log("[LA] WARP log failed: " + e.Message);
+            }
         }
 
         protected override void OnModuleEnabled()
@@ -1580,9 +1640,15 @@ namespace MuMech
             catch (Exception e) { Debug.Log("[LB-floor] diag failed: " + e.Message); }
         }
 
-        // LandingBurn.ShouldStartBurn AGL ignition floor: LandingBurn.cs:188 distFloor.
-        // KEEP IN SYNC with LandingBurn.cs (mirrored value, LandingBurn unchanged).
+        // LandingBurn.ShouldStartBurn h_vert / d_horiz minimum (LandingBurn.cs distFloor uses this constant).
+        // Also k=1 coast shaping (CoastBelowLbFloorBeforeIgnition) and TRIP_PAD_OVERHEAD_M. Unchanged 3 km.
         public const double LANDING_BURN_AGL_FLOOR_M = 3000.0;
+        // Ricardo Nov 14 (t310u/t311u/t314u): two-tier LB AGL suicide trigger / trip-coast clearance.
+        // PROX applies inside the LB no-warp zone (dist <= 1.85 * ignition distance, just before ignition),
+        // FAR applies to the rest of the coast. Neither changes the 3 km floor above or the CA 900 m floor.
+        public const double LANDING_BURN_IGN_PROX_AGL_M = 1500.0;
+        public const double LANDING_BURN_AGL_FAR_M = 2000.0;
+        public const double LANDING_BURN_NO_WARP_DIGN = 1.85; // LandingBurn warp factor on d_horiz
 
         /// <summary>
         /// True when the coast from now until LB's predicted ignition point (arc to pad > dIgn)
@@ -2219,13 +2285,17 @@ namespace MuMech
 
         /// <summary>
         /// Ricardo t304u (k > 1 trip widened hoop): sample the real engine-off orbit from now until the
-        /// arc to the (rotating) pad reaches dIgnM (LB ignition point). minAgl = lowest AGL on the way
-        /// (terrain rotated, same convention as CoastBelowLbFloorBeforeIgnition), vyIgnDown = sink rate
-        /// (m/s, + down) at that point, tIgn = seconds to it. False if the point is not reached.
+        /// arc to the (rotating) pad reaches dIgnM (LB ignition point). Lowest AGL on the way (terrain
+        /// rotated, same convention as CoastBelowLbFloorBeforeIgnition) split two-tier (Ricardo Nov 14):
+        /// minAglFar = samples with arc > 1.85 * dIgnM, minAglNear = samples inside it (LB no-warp zone).
+        /// vyIgnDown = sink rate (m/s, + down) at the ignition point, tIgn = seconds to it.
+        /// False if the point is not reached. A segment with no samples stays +Infinity.
         /// </summary>
-        public bool TripCoastToIgnition(double dIgnM, double maxSec, out double minAgl, out double vyIgnDown, out double tIgn)
+        public bool TripCoastToIgnition(double dIgnM, double maxSec, out double minAglFar, out double minAglNear, out double vyIgnDown, out double tIgn)
         {
-            minAgl = double.PositiveInfinity;
+            minAglFar = double.PositiveInfinity;
+            minAglNear = double.PositiveInfinity;
+            double nearArc = LANDING_BURN_NO_WARP_DIGN * dIgnM;
             vyIgnDown = double.NaN;
             tIgn = double.NaN;
             CelestialBody body = Vessel.mainBody;
@@ -2250,14 +2320,18 @@ namespace MuMech
                 double vDown = (altPrev - posASL) / dt;
                 altPrev = posASL;
                 double terrainASL = body.TerrainAltitude(body.GetLatitude(pos), body.GetLongitude(pos) - omegaDeg * tA);
-                if (!double.IsNaN(terrainASL) && !double.IsInfinity(terrainASL) && posASL - terrainASL < minAgl)
-                    minAgl = posASL - terrainASL;
                 double arc = ArcDistance(posBody, tgtAtUt, body.Radius);
+                if (!double.IsNaN(terrainASL) && !double.IsInfinity(terrainASL))
+                {
+                    double agl = posASL - terrainASL;
+                    if (arc <= nearArc) { if (agl < minAglNear) minAglNear = agl; }
+                    else if (agl < minAglFar) minAglFar = agl;
+                }
                 if (arc <= dIgnM)
                 {
                     vyIgnDown = vDown;
                     tIgn = tA;
-                    return !double.IsInfinity(minAgl);
+                    return !double.IsInfinity(minAglFar) || !double.IsInfinity(minAglNear);
                 }
                 if (arc > arcPrev + 1.0)
                     return false; // passed abeam the pad without reaching the ignition radius

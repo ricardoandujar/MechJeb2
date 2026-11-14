@@ -1928,15 +1928,18 @@ velocityPID.AntiWindup(rawAccel, accel);
                         Debug.Log("warp");
                         if (Core.Node.Autowarp && (decelerationStartTime > 0))
                         {
+                            Core.Landing.NoteWarp("MTT coast->decel(WarpToUT)");
                             Core.Warp.WarpToUT(decelerationStartTime + VesselState.time);
                         }
                         else
                         {
+                            Core.Landing.NoteWarp("MTT exit:autowarp-off");
                             Core.Warp.MinimumWarp();
                         }
                     }
                     else if (reachedTargetAlt && (VesselState.speedVertical > 1.0))
                     {
+                        Core.Landing.NoteWarp("MTT exit:target-height");
                         Core.Warp.MinimumWarp();
                         suppressThrottle = 0;
                         trace += 'E';
@@ -1950,6 +1953,7 @@ velocityPID.AntiWindup(rawAccel, accel);
                     else
                     {
                         // At Ap, or at target height with vz already bled.
+                        Core.Landing.NoteWarp("MTT exit:ap-or-target-height");
                         Core.Warp.MinimumWarp();
                         if (!TryArmSubOrbitFineTune("coast/warp reached target height -> FineTune"))
                             suppressThrottle = 0;
@@ -2162,11 +2166,13 @@ velocityPID.AntiWindup(rawAccel, accel);
                     // Make sure if we're hovering that we don't go straight into too fast of a warp
                     // (g * 5 is average velocity falling for 10 seconds from a hover)
                     double velocityGuess = Math.Max(Math.Abs(VesselState.speedVertical), VesselState.localg * 5);
+                    if (!warpOn) Core.Landing.NoteWarp("MTT coast");
                     Core.Warp.WarpRegularAtRate((float)Math.Min(VesselState.altitudeASL / (6 * velocityGuess), (Orbit.period / 6)));
                     warpOn = true;
                 }
                 else if ((warpOn == true) /*|| !MuUtils.PhysicsRunning()*/)
                 {
+                    Core.Landing.NoteWarp("MTT exit:checkWarp-off");
                     Core.Warp.MinimumWarp();
                     warpOn = false;
                 }
