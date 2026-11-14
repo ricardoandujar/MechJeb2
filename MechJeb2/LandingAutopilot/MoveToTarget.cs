@@ -134,7 +134,7 @@ namespace MuMech
             private const double HOP_REARM_RATIO = 1.5; // re-arm in-progress hop only if new dV is well above remaining and the armed peak
             // PredictAvoid clearance for departure climb-out (not pad).
             // Was 1500: with long localRimLook it held vertical-first past the rim.
-            private const double AVOID_MIN_ALTITUDE = 900.0;
+            private const double AVOID_MIN_ALTITUDE = 700.0; // Ricardo Nov 14 15:06 CA floor (was 900)
             // Soft leftover-V dump band (desired V ~ 0 cruise). Hard cut at +2 slammed
             // vertical command on/off as V oscillated around that threshold.
             private const double DUMP_V_FULL_EXCESS = 5.0; // m/s above desired: full pitch-over dump

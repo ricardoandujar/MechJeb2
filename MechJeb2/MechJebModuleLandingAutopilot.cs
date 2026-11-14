@@ -1570,7 +1570,7 @@ namespace MuMech
         // Pad false-fire: same 5 km band as MoveToTarget CoastClear / hop suppress.
         private const double LANDING_BURN_PAD_FALSE_FIRE_M = 5000.0;
         // Match MoveToTarget AVOID_MIN_ALTITUDE for suborbit path terrain.
-        private const double SUBORBIT_PATH_MIN_ALTITUDE = 900.0;
+        private const double SUBORBIT_PATH_MIN_ALTITUDE = 700.0; // Ricardo Nov 14 15:06 CA floor (was 900)
 
         /// <summary>
         /// True when the coast from now to ClosestPoint does not clip terrain before the

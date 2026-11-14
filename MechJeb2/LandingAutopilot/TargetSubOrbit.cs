@@ -122,7 +122,8 @@ namespace MuMech
             private const double TRIP_ARC_IGN_MARGIN_M = 300.0;   // stop pushing when predicted ignition ASL <= floor + this
             private const double TRIP_ARC_APPROACH_M = 20000.0;   // start pushing this far before the 6x dIgn limit
             private const double TRIP_ARC_RATE_K = 5000.0;        // vzCmd rate (m/s^2) = error (m) / K, capped by slew
-            private const double TRIP_ARC_SLEW = 0.2;             // max |d vzCmd / dt| (m/s^2): no step changes
+            private const double TRIP_ARC_SLEW = 0.4; // Ricardo Nov 14 15:06 (was 0.2)             // max |d vzCmd / dt| (m/s^2): no step changes
+            private const double TRIP_ARC_VZ_MAX = 25.0; // Ricardo Nov 14 15:06: arc-push down cap (glide cap TRIP_DESCEND_VZ_MAX stays 15)
             private const double TRIP_ARC_CLIMB_MAX = 3.0;        // max vzCmd up while backing off
             private const double TRIP_ARC_HANDOFF_VZ_MAX = 1.0;   // wide-hoop sink rule relaxed: vz <= +1 (LB narrow guard)
             private const double TRIP_ARC_FORCE_DIGN = 3.0;       // below 3x dIgn hand off on the other checks alone
@@ -621,7 +622,7 @@ namespace MuMech
             // CA enters PROGRADE when the coast is below 900 + 1.1*floor (margin < 0) and used to leave
             // at margin >= 0, i.e. exactly on the threshold (171027: minMargin -31/+2/0/+1 m ->
             // FINE->PRO->FINE->PRO->FINE, TgtAlt +800 m per re-entry). Leave only with +100 m.
-            private const double SUBORBIT_PATH_MIN_ALTITUDE_M = 900.0; // mirror LA SUBORBIT_PATH_MIN_ALTITUDE
+            private const double SUBORBIT_PATH_MIN_ALTITUDE_M = 700.0; // Ricardo Nov 14 15:06 CA floor (was 900); // mirror LA SUBORBIT_PATH_MIN_ALTITUDE
             private const double TERRAIN_HOOP_EXIT_MARGIN_M = 100.0;
 
             private bool TerrainClearWithExitMargin()
@@ -856,7 +857,7 @@ namespace MuMech
                 // vSpd~-78 / AGL~40 while pad still 87 km away. Local suicide always checked.
                 try
                 {
-                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, 900.0);
+                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M); // was literal 900
                     if ((willCrash || deltaV > 0)
                         && VesselState.altitudeTrue < CA_LOCAL_AGL_M
                         && VesselState.speedVertical < -5.0)
@@ -2117,7 +2118,7 @@ namespace MuMech
                 double dt = double.IsNaN(_arcLastUt) ? 0.0 : Math.Max(0.0, Math.Min(1.0, now - _arcLastUt));
                 _arcLastUt = now;
                 if (double.IsNaN(_arcVzCmd))
-                    _arcVzCmd = Math.Max(-TRIP_DESCEND_VZ_MAX, Math.Min(TRIP_ARC_CLIMB_MAX, vz)); // seed: no step
+                    _arcVzCmd = Math.Max(-TRIP_ARC_VZ_MAX, Math.Min(TRIP_ARC_CLIMB_MAX, vz)); // seed: no step
                 string reason;
                 double err = double.NaN, ignErr = double.NaN, minErr = double.NaN;
                 if (!_arcPredOk)
@@ -2145,7 +2146,7 @@ namespace MuMech
                     }
                     _arcVzCmd += rate * dt;
                 }
-                _arcVzCmd = Math.Max(-TRIP_DESCEND_VZ_MAX, Math.Min(TRIP_ARC_CLIMB_MAX, _arcVzCmd));
+                _arcVzCmd = Math.Max(-TRIP_ARC_VZ_MAX, Math.Min(TRIP_ARC_CLIMB_MAX, _arcVzCmd));
                 vzCmd = _arcVzCmd;
                 if (now - _arcLogUt >= 1.0)
                 {
