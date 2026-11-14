@@ -110,6 +110,23 @@ namespace MuMech
             private const double TRIP_HOOP_VIC_MARGIN_M = 4000.0;    // Ricardo Nov 14 12:15: wide-hoop terrain term vic + 4 km (small-body curvature); DESCEND target margin stays 2 km
             private const double TRIP_HOOP_VY_IGN_MIN = -20.0;   // predicted vy (m/s, + down) at LB ignition: climb <= 20 m/s (Nov 14 t314u; LB distance-ignites while climbing)
             private const double TRIP_HOOP_COAST_MAX_S = 600.0;
+            // Ricardo Nov 14 12:31 (arc push): in TRIP_DESCEND within 6x dIgn (+ approach) push down until the predicted
+            // engine-off arc bottoms out at the far coast floor (2000) + margin, then hand off. Margin 150 m: coast samples
+            // are 2 s (~420 m at 211 m/s) apart and the vz loop settles to ~+/-1 m/s (~100-150 m of arc bottom).
+            private const double TRIP_ARC_BOTTOM_TARGET_M = MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FAR_M + 150.0;
+            private const double TRIP_ARC_HANDOFF_TOL_M = 250.0;  // hand off once predicted bottom <= target + tol
+            private const double TRIP_ARC_IGN_MARGIN_M = 300.0;   // stop pushing when predicted ignition ASL <= floor + this
+            private const double TRIP_ARC_APPROACH_M = 20000.0;   // start pushing this far before the 6x dIgn limit
+            private const double TRIP_ARC_RATE_K = 5000.0;        // vzCmd rate (m/s^2) = error (m) / K, capped by slew
+            private const double TRIP_ARC_SLEW = 0.2;             // max |d vzCmd / dt| (m/s^2): no step changes
+            private const double TRIP_ARC_CLIMB_MAX = 3.0;        // max vzCmd up while backing off
+            private const double TRIP_ARC_HANDOFF_VZ_MAX = 1.0;   // wide-hoop sink rule relaxed: vz <= +1 (LB narrow guard)
+            private const double TRIP_ARC_FORCE_DIGN = 3.0;       // below 3x dIgn hand off on the other checks alone
+            private double _arcPredUt = double.NegativeInfinity, _arcLastUt = double.NaN, _arcLogUt = double.NegativeInfinity;
+            private double _arcVzCmd = double.NaN;
+            private bool _arcPredOk;
+            private double _arcMinFar = double.NaN, _arcMinNear = double.NaN, _arcVyIgn = double.NaN, _arcTIgn = double.NaN,
+                _arcIgnAsl = double.NaN, _arcIgnFloor = double.NaN;
             private double _lastTripWideEvalUt = double.NegativeInfinity;
             private double _tripTargetAsl = double.NaN;
             private double _tripRidgeAsl = double.NaN;
@@ -1919,8 +1936,15 @@ namespace MuMech
                         aH *= 0.7 * aCap / aH.magnitude;
 
                     double vzCmd;
-                    if (step == Step.STATE_TRIP_DESCEND && !double.IsNaN(_tripTargetAsl) && _tripTargetAsl > 0)
+                    if (step == Step.STATE_TRIP_DESCEND
+                        && dist <= TRIP_HOOP_LIMIT_DIGN * dIgn + TRIP_ARC_APPROACH_M
+                        && TripArcVzCmd(dist, dIgn, asl, vz, out double arcCmd))
                     {
+                        vzCmd = arcCmd;
+                    }
+                    else if (step == Step.STATE_TRIP_DESCEND && !double.IsNaN(_tripTargetAsl) && _tripTargetAsl > 0)
+                    {
+                        _arcVzCmd = double.NaN;
                         double tGo = Math.Max((dist - 0.97 * dIgn) / Math.Max(vH, 1.0), 5.0);
                         vzCmd = (_tripTargetAsl - asl) / tGo;
                         if (vzCmd < -TRIP_DESCEND_VZ_MAX) vzCmd = -TRIP_DESCEND_VZ_MAX;
@@ -2019,7 +2043,9 @@ namespace MuMech
                 // not to the current height. Arc bottom >= far coast floor (minAglFar), near floor, CA, climb <= 20 m/s.
                 // ceil (floor + TRIP_HOOP_CEIL_ABOVE_M) is logged only: a valid climbing arc ends well above it.
                 double ceilAsl = floorAsl + TRIP_HOOP_CEIL_ABOVE_M;
-                bool sinking = vz <= -1.0;
+                // Nov 14 12:31: sink rule relaxed to vz <= +1 (arc push may level off at the bottom target; LB's narrow
+                // climb guard distance-ignites a fast climbing coast).
+                bool sinking = vz <= TRIP_ARC_HANDOFF_VZ_MAX;
                 (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
                 bool caQuiet = !caCrash && caDv <= 0;
                 double minAglFar = double.NaN, minAglNear = double.NaN, vyIgn = double.NaN, tIgn = double.NaN, ignAsl = double.NaN;
@@ -2030,7 +2056,13 @@ namespace MuMech
                     && minAglFar >= MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FAR_M
                     && minAglNear >= MechJebModuleLandingAutopilot.LANDING_BURN_IGN_PROX_AGL_M;
                 bool vyOk = coastOk && vyIgn >= TRIP_HOOP_VY_IGN_MIN;
-                bool pass = sinking && caQuiet && coastOk && ignOk && aglOk && vyOk;
+                // Arc push: hand off once the predicted bottom reached its target, or the ignition floor stops the push,
+                // or inside 3x dIgn (old behaviour) as a backstop.
+                bool arcReady = coastOk
+                    && ((double.IsInfinity(minAglFar) ? minAglNear : minAglFar) <= TRIP_ARC_BOTTOM_TARGET_M + TRIP_ARC_HANDOFF_TOL_M
+                        || ignAsl - floorAsl <= TRIP_ARC_IGN_MARGIN_M + TRIP_ARC_HANDOFF_TOL_M
+                        || dist <= TRIP_ARC_FORCE_DIGN * dIgn);
+                bool pass = sinking && caQuiet && coastOk && ignOk && aglOk && vyOk && arcReady;
                 why = "dist=" + dist.ToString("F0") + " lim=" + lim.ToString("F0") + " dIgn=" + dIgn.ToString("F0")
                     + " asl=" + asl.ToString("F0") + " floor=" + floorAsl.ToString("F0") + " ceil=" + ceilAsl.ToString("F0")
                     + " pad=" + padAsl.ToString("F0") + " gate=" + gate.ToString("F0") + " vic=" + vicAsl.ToString("F0")
@@ -2044,9 +2076,74 @@ namespace MuMech
                     + " ignOverCeil=" + (ignAsl - ceilAsl).ToString("F0") + " ignOverPad=" + (ignAsl - padAsl).ToString("F0")
                     + " ignOverVic=" + (ignAsl - vicAsl).ToString("F0")
                     + " ign=" + ignOk + " sink=" + sinking + " ca=" + caQuiet + " coast=" + coastOk
-                    + " agl=" + aglOk + " vy=" + vyOk + " pass=" + pass;
+                    + " agl=" + aglOk + " vy=" + vyOk + " arcReady=" + arcReady + " pass=" + pass;
                 LogTrip("TSO wide-hoop " + why, true);
                 return pass;
+            }
+
+            /// <summary>
+            /// Ricardo Nov 14 12:31 arc push (k > 1, TRIP_DESCEND near the wide hoop): vzCmd is integrated (rate-limited,
+            /// no steps) so the predicted engine-off arc bottom (TripCoastToIgnition far min AGL) converges on
+            /// TRIP_ARC_BOTTOM_TARGET_M, without letting the predicted ignition ASL drop below max(pad+gate, vic+4000).
+            /// Bottom too low or ignition at its floor -> back off (up to +3 m/s). One forced log line per second.
+            /// </summary>
+            private bool TripArcVzCmd(double dist, double dIgn, double asl, double vz, out double vzCmd)
+            {
+                vzCmd = double.NaN;
+                double now = Planetarium.GetUniversalTime();
+                if (now - _arcPredUt >= 1.0)
+                {
+                    _arcPredUt = now;
+                    double vicAsl = Core.Landing.TripPadVicinityTerrainAsl(dIgn, out double padAsl);
+                    double gate = Core.Landing.ComputeOptimalDeorbitAltitude();
+                    _arcIgnFloor = (double.IsNaN(vicAsl) || double.IsNaN(padAsl) || double.IsNaN(gate) || double.IsInfinity(gate))
+                        ? double.NaN : Math.Max(padAsl + gate, vicAsl + TRIP_HOOP_VIC_MARGIN_M);
+                    _arcPredOk = !double.IsNaN(_arcIgnFloor)
+                        && Core.Landing.TripCoastToIgnition(dIgn, TRIP_HOOP_COAST_MAX_S, out _arcMinFar, out _arcMinNear,
+                            out _arcVyIgn, out _arcTIgn, out _arcIgnAsl);
+                }
+                double dt = double.IsNaN(_arcLastUt) ? 0.0 : Math.Max(0.0, Math.Min(1.0, now - _arcLastUt));
+                _arcLastUt = now;
+                if (double.IsNaN(_arcVzCmd))
+                    _arcVzCmd = Math.Max(-TRIP_DESCEND_VZ_MAX, Math.Min(TRIP_ARC_CLIMB_MAX, vz)); // seed: no step
+                string reason;
+                double err = double.NaN, ignErr = double.NaN;
+                if (!_arcPredOk)
+                {
+                    reason = "hold-nopred";
+                }
+                else
+                {
+                    double predMin = double.IsInfinity(_arcMinFar) ? _arcMinNear : _arcMinFar;
+                    err = predMin - TRIP_ARC_BOTTOM_TARGET_M;
+                    ignErr = _arcIgnAsl - _arcIgnFloor - TRIP_ARC_IGN_MARGIN_M;
+                    double rate;
+                    if (err < 0.0 || ignErr < 0.0)
+                    {
+                        rate = Math.Min(TRIP_ARC_SLEW, Math.Max(-err, -ignErr) / TRIP_ARC_RATE_K);
+                        reason = err < 0.0 ? "backoff-bottom" : "backoff-ign";
+                    }
+                    else
+                    {
+                        rate = -Math.Min(TRIP_ARC_SLEW, Math.Min(err, ignErr) / TRIP_ARC_RATE_K);
+                        reason = err <= ignErr ? "push-bottom" : "push-ign";
+                    }
+                    _arcVzCmd += rate * dt;
+                }
+                _arcVzCmd = Math.Max(-TRIP_DESCEND_VZ_MAX, Math.Min(TRIP_ARC_CLIMB_MAX, _arcVzCmd));
+                vzCmd = _arcVzCmd;
+                if (now - _arcLogUt >= 1.0)
+                {
+                    _arcLogUt = now;
+                    LogTrip("TSO arc-push dist=" + dist.ToString("F0") + " asl=" + asl.ToString("F0")
+                        + " agl=" + VesselState.altitudeTrue.ToString("F0") + " vz=" + vz.ToString("F2")
+                        + " vzCmd=" + vzCmd.ToString("F2") + " predMinAgl=" + _arcMinFar.ToString("F0")
+                        + " predNearAgl=" + _arcMinNear.ToString("F0") + " predIgnAsl=" + _arcIgnAsl.ToString("F0")
+                        + " ignFloor=" + _arcIgnFloor.ToString("F0") + " predVyIgn=" + _arcVyIgn.ToString("F2")
+                        + " tIgn=" + _arcTIgn.ToString("F0") + " err=" + err.ToString("F0") + " ignErr=" + ignErr.ToString("F0")
+                        + " reason=" + reason, true);
+                }
+                return true;
             }
 
             private bool TryTripCruiseHandoff(Vector3d targetPosBody, out string reason)
