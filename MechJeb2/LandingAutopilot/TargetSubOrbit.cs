@@ -113,8 +113,12 @@ namespace MuMech
             // Ricardo Nov 14 12:31 (arc push): in TRIP_DESCEND within 6x dIgn (+ approach) push down until the predicted
             // engine-off arc bottoms out at the far coast floor (2000) + margin, then hand off. Margin 150 m: coast samples
             // are 2 s (~420 m at 211 m/s) apart and the vz loop settles to ~+/-1 m/s (~100-150 m of arc bottom).
-            private const double TRIP_ARC_BOTTOM_TARGET_M = MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FAR_M + 150.0;
-            private const double TRIP_ARC_HANDOFF_TOL_M = 250.0;  // hand off once predicted bottom <= target + tol
+            // Ricardo Nov 14 14:09: steer on the AGL at the arc's lowest-ASL point (bottomAgl), target 1500; whole-arc
+            // minimum (far and near) >= 1000 at handoff, push backs off below 1000 + 100.
+            private const double TRIP_ARC_BOTTOM_TARGET_M = 1500.0;
+            private const double TRIP_ARC_HANDOFF_TOL_M = 100.0;  // hand off once predicted bottomAgl <= target + tol
+            private const double TRIP_ARC_MIN_AGL_M = 1000.0;     // whole-arc min AGL at handoff (replaces the 2000 far floor here)
+            private const double TRIP_ARC_MIN_MARGIN_M = 100.0;   // push backs off when whole-arc min < 1000 + this
             private const double TRIP_ARC_IGN_MARGIN_M = 300.0;   // stop pushing when predicted ignition ASL <= floor + this
             private const double TRIP_ARC_APPROACH_M = 20000.0;   // start pushing this far before the 6x dIgn limit
             private const double TRIP_ARC_RATE_K = 5000.0;        // vzCmd rate (m/s^2) = error (m) / K, capped by slew
@@ -126,7 +130,7 @@ namespace MuMech
             private double _arcVzCmd = double.NaN;
             private bool _arcPredOk;
             private double _arcMinFar = double.NaN, _arcMinNear = double.NaN, _arcVyIgn = double.NaN, _arcTIgn = double.NaN,
-                _arcIgnAsl = double.NaN, _arcIgnFloor = double.NaN;
+                _arcIgnAsl = double.NaN, _arcIgnFloor = double.NaN, _arcBottomAgl = double.NaN, _arcBottomDist = double.NaN;
             private double _lastTripWideEvalUt = double.NegativeInfinity;
             private double _tripTargetAsl = double.NaN;
             private double _tripRidgeAsl = double.NaN;
@@ -2049,17 +2053,23 @@ namespace MuMech
                 (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
                 bool caQuiet = !caCrash && caDv <= 0;
                 double minAglFar = double.NaN, minAglNear = double.NaN, vyIgn = double.NaN, tIgn = double.NaN, ignAsl = double.NaN;
+                double bottomAgl = double.NaN, bottomDist = double.NaN;
                 bool coastOk = sinking && caQuiet
-                    && Core.Landing.TripCoastToIgnition(dIgn, TRIP_HOOP_COAST_MAX_S, out minAglFar, out minAglNear, out vyIgn, out tIgn, out ignAsl);
+                    && Core.Landing.TripCoastToIgnition(dIgn, TRIP_HOOP_COAST_MAX_S, out minAglFar, out minAglNear, out vyIgn, out tIgn, out ignAsl,
+                        out bottomAgl, out bottomDist);
                 bool ignOk = coastOk && ignAsl >= floorAsl;
-                bool aglOk = coastOk
-                    && minAglFar >= MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FAR_M
-                    && minAglNear >= MechJebModuleLandingAutopilot.LANDING_BURN_IGN_PROX_AGL_M;
+                // Nov 14 14:09: whole-arc min >= 1000 (far and near). Near-ignition floor stays 1500 unless the arc bottom
+                // itself lies inside 1.85*dIgn, then it is 1000 (a 1500 bottom there would otherwise always fail).
+                double wholeMin = Math.Min(minAglFar, minAglNear);
+                bool bottomNear = !double.IsNaN(bottomDist)
+                    && bottomDist <= MechJebModuleLandingAutopilot.LANDING_BURN_NO_WARP_DIGN * dIgn;
+                double nearFloor = bottomNear ? TRIP_ARC_MIN_AGL_M : MechJebModuleLandingAutopilot.LANDING_BURN_IGN_PROX_AGL_M;
+                bool aglOk = coastOk && wholeMin >= TRIP_ARC_MIN_AGL_M && minAglNear >= nearFloor;
                 bool vyOk = coastOk && vyIgn >= TRIP_HOOP_VY_IGN_MIN;
-                // Arc push: hand off once the predicted bottom reached its target, or the ignition floor stops the push,
+                // Arc push: hand off once the predicted bottomAgl reached its target, or the ignition floor stops the push,
                 // or inside 3x dIgn (old behaviour) as a backstop.
                 bool arcReady = coastOk
-                    && ((double.IsInfinity(minAglFar) ? minAglNear : minAglFar) <= TRIP_ARC_BOTTOM_TARGET_M + TRIP_ARC_HANDOFF_TOL_M
+                    && (bottomAgl <= TRIP_ARC_BOTTOM_TARGET_M + TRIP_ARC_HANDOFF_TOL_M
                         || ignAsl - floorAsl <= TRIP_ARC_IGN_MARGIN_M + TRIP_ARC_HANDOFF_TOL_M
                         || dist <= TRIP_ARC_FORCE_DIGN * dIgn);
                 bool pass = sinking && caQuiet && coastOk && ignOk && aglOk && vyOk && arcReady;
@@ -2071,6 +2081,8 @@ namespace MuMech
                     + " hOverPad=" + (asl - padAsl).ToString("F0") + " hOverVic=" + (asl - vicAsl).ToString("F0")
                     + " vz=" + vz.ToString("F2") + " vH=" + vH.ToString("F1") + " caDv=" + caDv.ToString("F0") + " crash=" + caCrash
                     + " coastMinAglFar=" + minAglFar.ToString("F0") + " coastMinAglNear=" + minAglNear.ToString("F0")
+                    + " bottomAgl=" + bottomAgl.ToString("F0") + " bottomDist=" + bottomDist.ToString("F0")
+                    + " wholeMin=" + wholeMin.ToString("F0") + " nearFloor=" + nearFloor.ToString("F0")
                     + " vyIgn=" + vyIgn.ToString("F2") + " tIgn=" + tIgn.ToString("F0")
                     + " ignAsl=" + ignAsl.ToString("F0") + " ignOverFloor=" + (ignAsl - floorAsl).ToString("F0")
                     + " ignOverCeil=" + (ignAsl - ceilAsl).ToString("F0") + " ignOverPad=" + (ignAsl - padAsl).ToString("F0")
@@ -2100,33 +2112,36 @@ namespace MuMech
                         ? double.NaN : Math.Max(padAsl + gate, vicAsl + TRIP_HOOP_VIC_MARGIN_M);
                     _arcPredOk = !double.IsNaN(_arcIgnFloor)
                         && Core.Landing.TripCoastToIgnition(dIgn, TRIP_HOOP_COAST_MAX_S, out _arcMinFar, out _arcMinNear,
-                            out _arcVyIgn, out _arcTIgn, out _arcIgnAsl);
+                            out _arcVyIgn, out _arcTIgn, out _arcIgnAsl, out _arcBottomAgl, out _arcBottomDist);
                 }
                 double dt = double.IsNaN(_arcLastUt) ? 0.0 : Math.Max(0.0, Math.Min(1.0, now - _arcLastUt));
                 _arcLastUt = now;
                 if (double.IsNaN(_arcVzCmd))
                     _arcVzCmd = Math.Max(-TRIP_DESCEND_VZ_MAX, Math.Min(TRIP_ARC_CLIMB_MAX, vz)); // seed: no step
                 string reason;
-                double err = double.NaN, ignErr = double.NaN;
+                double err = double.NaN, ignErr = double.NaN, minErr = double.NaN;
                 if (!_arcPredOk)
                 {
                     reason = "hold-nopred";
                 }
                 else
                 {
-                    double predMin = double.IsInfinity(_arcMinFar) ? _arcMinNear : _arcMinFar;
-                    err = predMin - TRIP_ARC_BOTTOM_TARGET_M;
+                    // Nov 14 14:09: steer on the AGL at the arc's lowest-ASL point; whole-arc min >= 1000 + 100 hard back-off.
+                    err = _arcBottomAgl - TRIP_ARC_BOTTOM_TARGET_M;
+                    minErr = Math.Min(_arcMinFar, _arcMinNear) - (TRIP_ARC_MIN_AGL_M + TRIP_ARC_MIN_MARGIN_M);
                     ignErr = _arcIgnAsl - _arcIgnFloor - TRIP_ARC_IGN_MARGIN_M;
+                    if (double.IsNaN(err)) err = minErr;
                     double rate;
-                    if (err < 0.0 || ignErr < 0.0)
+                    if (err < 0.0 || minErr < 0.0 || ignErr < 0.0)
                     {
-                        rate = Math.Min(TRIP_ARC_SLEW, Math.Max(-err, -ignErr) / TRIP_ARC_RATE_K);
-                        reason = err < 0.0 ? "backoff-bottom" : "backoff-ign";
+                        rate = Math.Min(TRIP_ARC_SLEW, Math.Max(-err, Math.Max(-minErr, -ignErr)) / TRIP_ARC_RATE_K);
+                        reason = minErr < 0.0 ? "backoff-min" : ignErr < 0.0 ? "backoff-ign" : "backoff-bottom";
                     }
                     else
                     {
-                        rate = -Math.Min(TRIP_ARC_SLEW, Math.Min(err, ignErr) / TRIP_ARC_RATE_K);
-                        reason = err <= ignErr ? "push-bottom" : "push-ign";
+                        double lim = Math.Min(err, Math.Min(minErr, ignErr));
+                        rate = -Math.Min(TRIP_ARC_SLEW, lim / TRIP_ARC_RATE_K);
+                        reason = lim == err ? "push-bottom" : lim == minErr ? "push-min" : "push-ign";
                     }
                     _arcVzCmd += rate * dt;
                 }
@@ -2140,7 +2155,9 @@ namespace MuMech
                         + " vzCmd=" + vzCmd.ToString("F2") + " predMinAgl=" + _arcMinFar.ToString("F0")
                         + " predNearAgl=" + _arcMinNear.ToString("F0") + " predIgnAsl=" + _arcIgnAsl.ToString("F0")
                         + " ignFloor=" + _arcIgnFloor.ToString("F0") + " predVyIgn=" + _arcVyIgn.ToString("F2")
-                        + " tIgn=" + _arcTIgn.ToString("F0") + " err=" + err.ToString("F0") + " ignErr=" + ignErr.ToString("F0")
+                        + " bottomAgl=" + _arcBottomAgl.ToString("F0") + " bottomDist=" + _arcBottomDist.ToString("F0")
+                        + " tIgn=" + _arcTIgn.ToString("F0") + " err=" + err.ToString("F0") + " minErr=" + minErr.ToString("F0")
+                        + " ignErr=" + ignErr.ToString("F0")
                         + " reason=" + reason, true);
                 }
                 return true;

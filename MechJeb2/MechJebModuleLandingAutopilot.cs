@@ -1647,7 +1647,7 @@ namespace MuMech
         // PROX applies inside the LB no-warp zone (dist <= 1.85 * ignition distance, just before ignition),
         // FAR applies to the rest of the coast. Neither changes the 3 km floor above or the CA 900 m floor.
         public const double LANDING_BURN_IGN_PROX_AGL_M = 1500.0;
-        public const double LANDING_BURN_AGL_FAR_M = 2000.0;
+        public const double LANDING_BURN_AGL_FAR_M = 1000.0; // Ricardo Nov 14 14:09 (was 2000): LB far-zone AGL trigger
         public const double LANDING_BURN_NO_WARP_DIGN = 1.85; // LandingBurn warp factor on d_horiz
 
         /// <summary>
@@ -2296,8 +2296,17 @@ namespace MuMech
 
         /// Same as above plus ignAsl = predicted ASL at the ignition point (Ricardo Nov 14 12:22: arc rule).
         public bool TripCoastToIgnition(double dIgnM, double maxSec, out double minAglFar, out double minAglNear, out double vyIgnDown, out double tIgn, out double ignAsl)
+            => TripCoastToIgnition(dIgnM, maxSec, out minAglFar, out minAglNear, out vyIgnDown, out tIgn, out ignAsl, out _, out _);
+
+        /// Plus the arc bottom (Ricardo Nov 14 14:09): bottomAgl = AGL at the sample with the LOWEST predicted ASL, against
+        /// the rotated terrain under that sample; bottomDist = arc distance from that sample to the pad.
+        public bool TripCoastToIgnition(double dIgnM, double maxSec, out double minAglFar, out double minAglNear, out double vyIgnDown, out double tIgn, out double ignAsl,
+            out double bottomAgl, out double bottomDist)
         {
             ignAsl = double.NaN;
+            bottomAgl = double.NaN;
+            bottomDist = double.NaN;
+            double bottomAsl = double.PositiveInfinity;
             minAglFar = double.PositiveInfinity;
             minAglNear = double.PositiveInfinity;
             double nearArc = LANDING_BURN_NO_WARP_DIGN * dIgnM;
@@ -2331,6 +2340,12 @@ namespace MuMech
                     double agl = posASL - terrainASL;
                     if (arc <= nearArc) { if (agl < minAglNear) minAglNear = agl; }
                     else if (agl < minAglFar) minAglFar = agl;
+                    if (posASL < bottomAsl)
+                    {
+                        bottomAsl = posASL;
+                        bottomAgl = agl;
+                        bottomDist = arc;
+                    }
                 }
                 if (arc <= dIgnM)
                 {

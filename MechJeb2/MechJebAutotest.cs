@@ -385,7 +385,9 @@ namespace MuMech
                 return;
 
             Vessel vessel = FlightGlobals.ActiveVessel;
-            if (!vessel.loaded || vessel.packed)
+            // Ricardo Nov 14 14:09: keep writing CSV rows while packed by on-rails time warp during the run
+            // (VesselState keeps updating), so charts show the real coast arc.
+            if (!vessel.loaded || (vessel.packed && !(_phase == Phase.Running && TimeWarp.CurrentRate > 1f)))
                 return;
 
             if (_readyRealtime < 0f)
