@@ -1985,7 +1985,8 @@ namespace MuMech
             /// two-tier LB AGL floor until the LB ignition point (>= 2 km beyond 1.85*dIgn, >= 1.5 km
             /// inside it) and climbs no faster than 20 m/s there (Ricardo Nov 14; LB's narrow climb
             /// guard lets a fast horizontal coast distance-ignite). Evaluated 1/s; one forced log line.
-            /// floor = max(pad + gate, vicinity terrain + 4 km), ceiling = floor + 2 km (Nov 14 12:20). Was: pad term on flat/non-crater
+            /// Nov 14 12:22 arc rule: predicted IGNITION height >= floor = max(pad + gate, vicinity terrain + 4 km) (current height
+            /// not gated); ceiling floor + 2 km logged only. Earlier: band on current height; pad term on flat/non-crater
             /// pads (vicinity ~ pad), the terrain term inside craters; both and the winner are logged.
             /// </summary>
             private bool TryTripWideHoop(double dist, double vH, double dIgn, out string why)
@@ -2014,19 +2015,22 @@ namespace MuMech
                 double vicTerm = vicAsl + TRIP_HOOP_VIC_MARGIN_M;
                 double floorAsl = Math.Max(padTerm, vicTerm);
                 string floorBy = padTerm >= vicTerm ? "pad" : "terrain";
+                // Ricardo Nov 14 12:22 (arc rule): the floor applies to the PREDICTED height at the LB ignition point,
+                // not to the current height. Arc bottom >= far coast floor (minAglFar), near floor, CA, climb <= 20 m/s.
+                // ceil (floor + TRIP_HOOP_CEIL_ABOVE_M) is logged only: a valid climbing arc ends well above it.
                 double ceilAsl = floorAsl + TRIP_HOOP_CEIL_ABOVE_M;
-                bool inWin = asl >= floorAsl && asl <= ceilAsl;
                 bool sinking = vz <= -1.0;
                 (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
                 bool caQuiet = !caCrash && caDv <= 0;
-                double minAglFar = double.NaN, minAglNear = double.NaN, vyIgn = double.NaN, tIgn = double.NaN;
-                bool coastOk = inWin && sinking && caQuiet
-                    && Core.Landing.TripCoastToIgnition(dIgn, TRIP_HOOP_COAST_MAX_S, out minAglFar, out minAglNear, out vyIgn, out tIgn);
+                double minAglFar = double.NaN, minAglNear = double.NaN, vyIgn = double.NaN, tIgn = double.NaN, ignAsl = double.NaN;
+                bool coastOk = sinking && caQuiet
+                    && Core.Landing.TripCoastToIgnition(dIgn, TRIP_HOOP_COAST_MAX_S, out minAglFar, out minAglNear, out vyIgn, out tIgn, out ignAsl);
+                bool ignOk = coastOk && ignAsl >= floorAsl;
                 bool aglOk = coastOk
                     && minAglFar >= MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FAR_M
                     && minAglNear >= MechJebModuleLandingAutopilot.LANDING_BURN_IGN_PROX_AGL_M;
                 bool vyOk = coastOk && vyIgn >= TRIP_HOOP_VY_IGN_MIN;
-                bool pass = inWin && sinking && caQuiet && coastOk && aglOk && vyOk;
+                bool pass = sinking && caQuiet && coastOk && ignOk && aglOk && vyOk;
                 why = "dist=" + dist.ToString("F0") + " lim=" + lim.ToString("F0") + " dIgn=" + dIgn.ToString("F0")
                     + " asl=" + asl.ToString("F0") + " floor=" + floorAsl.ToString("F0") + " ceil=" + ceilAsl.ToString("F0")
                     + " pad=" + padAsl.ToString("F0") + " gate=" + gate.ToString("F0") + " vic=" + vicAsl.ToString("F0")
@@ -2036,7 +2040,10 @@ namespace MuMech
                     + " vz=" + vz.ToString("F2") + " vH=" + vH.ToString("F1") + " caDv=" + caDv.ToString("F0") + " crash=" + caCrash
                     + " coastMinAglFar=" + minAglFar.ToString("F0") + " coastMinAglNear=" + minAglNear.ToString("F0")
                     + " vyIgn=" + vyIgn.ToString("F2") + " tIgn=" + tIgn.ToString("F0")
-                    + " inWin=" + inWin + " sink=" + sinking + " ca=" + caQuiet + " coast=" + coastOk
+                    + " ignAsl=" + ignAsl.ToString("F0") + " ignOverFloor=" + (ignAsl - floorAsl).ToString("F0")
+                    + " ignOverCeil=" + (ignAsl - ceilAsl).ToString("F0") + " ignOverPad=" + (ignAsl - padAsl).ToString("F0")
+                    + " ignOverVic=" + (ignAsl - vicAsl).ToString("F0")
+                    + " ign=" + ignOk + " sink=" + sinking + " ca=" + caQuiet + " coast=" + coastOk
                     + " agl=" + aglOk + " vy=" + vyOk + " pass=" + pass;
                 LogTrip("TSO wide-hoop " + why, true);
                 return pass;

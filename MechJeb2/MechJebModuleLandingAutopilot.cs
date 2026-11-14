@@ -2292,7 +2292,12 @@ namespace MuMech
         /// False if the point is not reached. A segment with no samples stays +Infinity.
         /// </summary>
         public bool TripCoastToIgnition(double dIgnM, double maxSec, out double minAglFar, out double minAglNear, out double vyIgnDown, out double tIgn)
+            => TripCoastToIgnition(dIgnM, maxSec, out minAglFar, out minAglNear, out vyIgnDown, out tIgn, out _);
+
+        /// Same as above plus ignAsl = predicted ASL at the ignition point (Ricardo Nov 14 12:22: arc rule).
+        public bool TripCoastToIgnition(double dIgnM, double maxSec, out double minAglFar, out double minAglNear, out double vyIgnDown, out double tIgn, out double ignAsl)
         {
+            ignAsl = double.NaN;
             minAglFar = double.PositiveInfinity;
             minAglNear = double.PositiveInfinity;
             double nearArc = LANDING_BURN_NO_WARP_DIGN * dIgnM;
@@ -2331,6 +2336,7 @@ namespace MuMech
                 {
                     vyIgnDown = vDown;
                     tIgn = tA;
+                    ignAsl = posASL;
                     return !double.IsInfinity(minAglFar) || !double.IsInfinity(minAglNear);
                 }
                 if (arc > arcPrev + 1.0)
