@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Live / incremental monitor for MechJeb Sol autotest (CSV + KSP.log).
 
@@ -189,7 +189,7 @@ function Handle-DataRow([string]$line) {
     }
     if ($null -ne $hm -and $hm -gt 2000) { $bad = $true; $why += "miss=$hm" }
     # Legacy CSVs without hoop columns: fall back to |padDh|>600 as rough reject signal
-    if ($null -eq $hc -and $null -eq $ph) {
+    if ($null -eq $hc -and $null -eq $ph -and -not $script:col.ContainsKey('hoop_center')) {
       $pd = Get-D $padDh
       if (($null -ne $pd -and [Math]::Abs($pd) -gt 600) -or $past -eq '1') {
         $bad = $true; $why += "legacy-padDh=$padDh"
@@ -249,7 +249,10 @@ function Tail-Log {
         if ($ln -match 'hoopCenter=([-\d.]+)') { $hc = [double]$Matches[1] }
         if ($ln -match 'predH=([-\d.]+)') { $ph = [double]$Matches[1] }
         if ($ln -match 'miss=([-\d.]+)') { $ms = [double]$Matches[1] }
-        if ($null -ne $hc -and $null -ne $ph) {
+        $terrainHoop = $ln -match 'mode=terrain-hoop'
+        if ($terrainHoop) {
+          if ($ln -match 'apPast=1|ok=0') { Write-Fail "handoff-hoop-bad" ("terrain-hoop log hoopCenter={0} predH={1} miss={2}" -f $hc,$ph,$ms) } else { Write-Host ("HOOP-LOG terrain-hoop hoopCenter={0} predH={1} miss={2}" -f $hc,$ph,$ms) }
+        } elseif ($null -ne $hc -and $null -ne $ph) {
           if ([Math]::Abs($ph - $hc) -gt 600 -or ($null -ne $ms -and $ms -gt 2000) -or $ln -match 'apPast=1') {
             Write-Fail "handoff-hoop-bad" ("log hoopCenter={0} predH={1} miss={2}" -f $hc,$ph,$ms)
           } else {
@@ -258,7 +261,7 @@ function Tail-Log {
         } elseif ($ln -match 'ok=0|hoop-fail') {
           Write-Fail "handoff-hoop-bad" $ln.Substring(0, [Math]::Min(220, $ln.Length))
         }
-        if ($ln -match 'step=STATE_PROGRADE' -and $ln -match 'dist=(\d+)') {
+        if (-not $terrainHoop -and $ln -match 'step=STATE_PROGRADE' -and $ln -match 'dist=(\d+)') {
           if ([int]$Matches[1] -gt 30000) {
             Write-Fail "early-prograde-handoff" ("PROGRADE handoff dist={0}" -f $Matches[1])
           }
@@ -273,7 +276,7 @@ function Tail-Log {
       if ($ln -match 'burnStarted=True' -and $ln -match 'TimeWarp|warp rate|WarpRate') {
         Write-Fail "burn-while-warp" $ln.Substring(0, [Math]::Min(220, $ln.Length))
       }
-      # Physics-warp while burn: LB-1Hz after agl latch often still under warp â€” flag if agl ignite then crash soon
+      # Physics-warp while burn: LB-1Hz after agl latch often still under warp — flag if agl ignite then crash soon
       if ($ln -match 'RESULT outcome=timeout') {
         Write-Fail "timeout" $ln.Substring(0, [Math]::Min(220, $ln.Length))
       }

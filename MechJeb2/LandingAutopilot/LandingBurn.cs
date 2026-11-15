@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using MuMech.Landing;
 using UnityEngine;
 using static alglib;
@@ -31,6 +31,9 @@ namespace MuMech.LandingAutopilot
 
         // Downrange distance (meters) below which vertical ZEV gain is reduced for smoother final descent (used if ZevV<0 for conditional vertical braking boost)
         private const float DOWNRANGE_THRESHOLD_CONSTANT = 1500.0f;
+
+        private const double LB_AIM_ABOVE_PAD_M = 100;
+        private const float ZEV_FULL_RANGE_M = 3000.0f;
 
         private double targetOffset;      // Removed once reached.
         //private double zevCounter;        // Used to enable zevV via a smoothing function.
@@ -370,6 +373,7 @@ namespace MuMech.LandingAutopilot
             double t_vert = (v_down + Math.Sqrt(Math.Max(disc, 0.0))) / a_brake_f;
             double v_horiz = Vector3d.Exclude(Vessel.up, vel).magnitude;
             double t_horiz = v_horiz / a_used; // downrange stop time
+            float downrange = (float)downrangeVec.magnitude;
             double t_go = Math.Max(1.0, Math.Max(t_vert, t_horiz));
             // Mild low-pass only (was Min(prev-dt/5, t_go) which held multi-minute t_go).
             if (prev_t_go > 0)
@@ -380,7 +384,8 @@ namespace MuMech.LandingAutopilot
 
             // Correct ZEM and ZEV signs (desired - predicted)
             Vector3d predicted_pos = vel * t_go + 0.5 * VesselState.gravityForce * t_go * t_go;
-            Vector3d zem = posError - (predicted_pos);   // = target - predicted_position   NOTE: pos was canceled out
+            // Aim at a point LB_AIM_ABOVE_PAD_M above the pad (radial). Velocity target stays 0.
+            Vector3d zem = posError + targetPos.normalized * LB_AIM_ABOVE_PAD_M - predicted_pos;
             Vector3d zem_x = Vector3d.Exclude(Vessel.up, zem);
             Vector3d zev_x = -VesselState.horizontalSurface;
             Vector3d zem_y = Vector3d.Exclude(zem_x, zem);
@@ -389,7 +394,8 @@ namespace MuMech.LandingAutopilot
             // Vertical ZEV: soft TWR-scaled fade (no hard zero outside 1500 m). Hard gate left
             // ZevV=0 for the whole Vesta approach so the vertical channel never shaped descent.
             double ZevV = Core.Landing.ZevV;
-            float downrange = (float)downrangeVec.magnitude;
+            float zevFade = 1.0f;
+
             if (ZevV < 0)
             {
                 double stopRef = (v_horiz * v_horiz) / Math.Max(2.0 * a_used, 0.1);
@@ -397,9 +403,9 @@ namespace MuMech.LandingAutopilot
                     Math.Min(80000.0, 3.0 * stopRef + 1500.0));
                 minDownRange = Math.Min(minDownRange, downrange);
                 float rangeForFade = Math.Min(minDownRange, downrange);
-                ZevV *= Mathf.Clamp01((zevGate - rangeForFade) / Math.Max(zevGate - 10.0f, 1.0f));
+                zevFade = Mathf.Clamp01((zevGate - rangeForFade) / Math.Max(zevGate - ZEV_FULL_RANGE_M, 1.0f));
+                ZevV *= zevFade;
             }
-
 
             // Commanded acceleration (ZEM/ZEV formula)
             Vector3d a_cmd = (Core.Landing.ZemH / (t_go * t_go)) * zem_x + (Core.Landing.ZevH / t_go) * zev_x +
@@ -489,11 +495,11 @@ namespace MuMech.LandingAutopilot
                     debugCounter = 2;
                 }
 
-                MaybeLogGuidanceTick(t_go, zem, zev_x + zev_y, desired_accel, downrangeVec, alt, vy, throttle);
+                MaybeLogGuidanceTick(t_go, zem, zev_x + zev_y, desired_accel, downrangeVec, alt, vy, throttle, zevFade);
             }
             else
             {
-                MaybeLogGuidanceTick(t_go, zem, zev_x + zev_y, desired_accel, downrangeVec, alt, vy, 0f);
+                MaybeLogGuidanceTick(t_go, zem, zev_x + zev_y, desired_accel, downrangeVec, alt, vy, 0f, zevFade);
             }
 
             // Set attitude to point thrust along desired_accel
@@ -505,7 +511,7 @@ namespace MuMech.LandingAutopilot
         }
 
         private void MaybeLogGuidanceTick(double t_go, Vector3d zem, Vector3d zev, Vector3d desiredAccel,
-            Vector3d downrangeVec, double alt, double vy, float throttle)
+            Vector3d downrangeVec, double alt, double vy, float throttle, float zevFade)
         {
             double now = Planetarium.GetUniversalTime();
             double padDh = double.NaN;
@@ -545,7 +551,9 @@ namespace MuMech.LandingAutopilot
                 + " aPlan=" + _aPlan.ToString("F2")
                 + " aClip=" + _aClip.ToString("F2")
                 + " thr=" + throttle.ToString("F2")
-                + " TgtAlt=" + Core.Landing.TgtAlt.ToString("F0"));
+                + " TgtAlt=" + Core.Landing.TgtAlt.ToString("F0")
+                + " aimH=" + LB_AIM_ABOVE_PAD_M.ToString("F0")
+                + " zevFade=" + zevFade.ToString("F2"));
         }
 
         private string DescribeBurnAxis(Vector3d desiredAccel, Vector3d downrange)

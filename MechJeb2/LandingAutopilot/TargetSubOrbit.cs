@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using KSP.Localization;
 using MechJebLib.Functions;
 using MuMech.LandingAutopilot;
@@ -127,11 +127,15 @@ namespace MuMech
             private const double TRIP_ARC_CLIMB_MAX = 3.0;        // max vzCmd up while backing off
             private const double TRIP_ARC_HANDOFF_VZ_MAX = 1.0;   // wide-hoop sink rule relaxed: vz <= +1 (LB narrow guard)
             private const double TRIP_ARC_FORCE_DIGN = 3.0;       // below 3x dIgn hand off on the other checks alone
+            private const double TRIP_XR_VLAT_MAX = 40.0;         // lateral close-rate cap (m/s) for trip-cruise xr
             private double _arcPredUt = double.NegativeInfinity, _arcLastUt = double.NaN, _arcLogUt = double.NegativeInfinity;
             private double _arcVzCmd = double.NaN;
             private bool _arcPredOk;
             private double _arcMinFar = double.NaN, _arcMinNear = double.NaN, _arcVyIgn = double.NaN, _arcTIgn = double.NaN,
                 _arcIgnAsl = double.NaN, _arcIgnFloor = double.NaN, _arcBottomAgl = double.NaN, _arcBottomDist = double.NaN;
+            private bool _tripXrOk;
+            private double _tripXrUt = double.NaN, _tripXrM = double.NaN, _tripXrTIgn = double.NaN;
+            private string _tripXrSrc = "ca";
             private double _lastTripWideEvalUt = double.NegativeInfinity;
             private double _tripTargetAsl = double.NaN;
             private double _tripRidgeAsl = double.NaN;
@@ -1706,6 +1710,9 @@ namespace MuMech
                     _tripVClear = vClear;
                     _tripVTarget = vTarget;
                     _tripHoldAsl = hold;
+                    _tripXrOk = false;
+                    _tripXrUt = double.NaN;
+                    _tripXrTIgn = double.NaN;
                     LogTrip("TSO cruise START (" + why + ") k=" + k.ToString("F2")
                         + " vClear=" + vClear.ToString("F1") + " vTarget=" + vTarget.ToString("F1")
                         + " vRef=" + vRef.ToString("F1")
@@ -1768,6 +1775,9 @@ namespace MuMech
             private void AbortTripCruise(string why)
             {
                 _tripCruise = false;
+                _tripXrOk = false;
+                _tripXrUt = double.NaN;
+                _tripXrTIgn = double.NaN;
                 ProgradeCount = throttleCount;
                 throttleCount = 0;
                 step = Step.STATE_LATERAL_FINE; // today's next state; normal Ap/hoop rules resume
@@ -1892,8 +1902,9 @@ namespace MuMech
             /// Steps 3+4 (k > 1 only): powered level cruise toward the pad at _tripVTarget.
             /// Vertical: a_up = g - vOrbH^2/r + 0.2 (vzCmd - vz) (down-thrust when faster than circular),
             /// vzCmd holds _tripHoldAsl; -3 m/s pre-descent within TRIP_PREDESCENT_M of dIgn so LB sees
-            /// Vy >= 1 at handoff. Horizontal: 0.1 s^-1 tracking of vTarget along the pad bearing (nulls
-            /// crossrange). Accel capped at 8 g (same g/a_max thrCap as every TSO burn).
+            /// Vy >= 1 at handoff. Horizontal: 0.1 s^-1 tracking of vTarget along the pad bearing plus
+            /// vLat = clamp(-xr/tRem, +/-TRIP_XR_VLAT_MAX) along horizontal normalPlus (closes predicted
+            /// cross-range in the aH target). Accel capped at 8 g (same g/a_max thrCap as every TSO burn).
             /// Aborts to today's rules on CA (15 s / 900 m incl. heading scan) or AGL < coast need.
             /// </summary>
             private void TripCruiseCommand(ref Vector3d desiredThrustVector)
@@ -1936,7 +1947,36 @@ namespace MuMech
                     double dIgn = TripIgnitionDistance(vH);
 
                     double aCap = Math.Min(Math.Max(VesselState.limitedMaxThrustAccel, 1e-3), 8.0 * g);
-                    Vector3d aH = 0.1 * (_tripVTarget * dir - vHs);
+
+                    // Cross-range: close predicted miss in the aH velocity target, not a separate
+                    // normal accel (that fought the 0.1/s lateral damper). xr > 0 is +normalPlus;
+                    // vLat = -xr/tRem along nHat moves the predicted point toward the pad.
+                    const double xrDeadbandM = 200.0;
+                    double xrM = double.NaN;
+                    double vLat = 0.0;
+                    double tRem = double.NaN;
+                    string xrSrc = "n/a";
+                    Vector3d nHat = Vector3d.Exclude(up, VesselState.normalPlus);
+                    if (nHat.sqrMagnitude > 1e-12)
+                        nHat = nHat.normalized;
+                    else
+                        nHat = Vector3d.zero;
+                    if (toPad.sqrMagnitude > 1.0
+                        && TryTripCruiseXr(dIgn, out xrM, out xrSrc, out double tIgn)
+                        && !double.IsNaN(xrM) && !double.IsInfinity(xrM))
+                    {
+                        if (xrSrc == "arc" && !double.IsNaN(tIgn) && !double.IsInfinity(tIgn) && tIgn > 0)
+                            tRem = tIgn;
+                        else
+                            tRem = dist / Math.Max(vH, 1.0);
+                        tRem = Math.Max(tRem, 30.0);
+                        if (nHat.sqrMagnitude > 0)
+                            vLat = Vector3d.Dot(vHs, nHat) + (Math.Abs(xrM) > xrDeadbandM ? Math.Max(-TRIP_XR_VLAT_MAX, Math.Min(TRIP_XR_VLAT_MAX, -xrM / tRem)) : 0.0); // xr is predicted miss at current v: correct by a delta-v, not an absolute target
+                    }
+
+                    // Lateral is owned by xr: strip the pad-bearing's sideways part so it can't cancel vLat.
+                    Vector3d dirA = (!double.IsNaN(tRem) && nHat.sqrMagnitude > 0 && Vector3d.Exclude(nHat, dir).sqrMagnitude > 1e-6) ? Vector3d.Exclude(nHat, dir).normalized : dir;
+                    Vector3d aH = 0.2 * (_tripVTarget * dirA + vLat * nHat - vHs);
                     if (aH.magnitude > 0.7 * aCap)
                         aH *= 0.7 * aCap / aH.magnitude;
 
@@ -1964,7 +2004,7 @@ namespace MuMech
                         vzCmd = Math.Min(vzCmd, (dist <= dIgn) ? -5.0 : -3.0);
                     double vOrbH = Vector3d.Exclude(up, VesselState.orbitalVelocity).magnitude;
                     double gEff = VesselState.localg - vOrbH * vOrbH / Math.Max(r, 1.0);
-                    double aV = gEff + 0.2 * (vzCmd - vz);
+                    double aV = gEff + 0.4 * (vzCmd - vz);
 
                     Vector3d a = aH + aV * up;
                     if (a.magnitude > aCap)
@@ -1992,13 +2032,97 @@ namespace MuMech
                         + " gEff=" + gEff.ToString("F3") + " aH=" + aH.magnitude.ToString("F3")
                         + " aV=" + aV.ToString("F3") + " thr=" + thr.ToString("F3")
                         + " dist=" + dist.ToString("F0") + " dIgn=" + dIgn.ToString("F0")
-                        + " AGL=" + VesselState.altitudeTrue.ToString("F0"));
+                        + " AGL=" + VesselState.altitudeTrue.ToString("F0")
+                        + " xr=" + (double.IsNaN(xrM) ? "n/a" : xrM.ToString("F0"))
+                        + " vLat=" + vLat.ToString("F1")
+                        + " tRem=" + (double.IsNaN(tRem) ? "n/a" : tRem.ToString("F0"))
+                        + " xrSrc=" + xrSrc);
                 }
                 catch (Exception e)
                 {
                     AbortTripCruise("exception " + e.Message);
                     desiredThrustVector = VesselState.forward;
                 }
+            }
+
+            /// <summary>
+            /// Signed horizontal cross-track at the predicted LB-ignition point on the engine-off
+            /// coast (TripCoastToIgnition), pad rotated to that UT. Fallback: ClosestPointToSurfaceTarget.
+            /// Cached 1/s. k > 1 trip cruise only. Does not change LATERAL_FINE.
+            /// </summary>
+            private bool TryTripCruiseXr(double dIgn, out double xrM, out string xrSrc, out double tIgn)
+            {
+                double now = Planetarium.GetUniversalTime();
+                if (_tripXrOk && !double.IsNaN(_tripXrUt) && now - _tripXrUt < 1.0)
+                {
+                    xrM = _tripXrM;
+                    xrSrc = _tripXrSrc;
+                    tIgn = _tripXrTIgn;
+                    return !double.IsNaN(xrM) && !double.IsInfinity(xrM);
+                }
+
+                xrM = double.NaN;
+                xrSrc = "ca";
+                tIgn = double.NaN;
+                Vector3d predBody = Vector3d.zero;
+                double dt = double.NaN;
+                bool haveArc = Core.Landing.TripCoastToIgnition(dIgn, TRIP_HOOP_COAST_MAX_S,
+                        out _, out _, out _, out double tCoast, out _, out _, out _)
+                    && !double.IsNaN(tCoast) && !double.IsInfinity(tCoast) && tCoast >= 0;
+                if (haveArc)
+                {
+                    predBody = Vessel.orbit.getPositionAtUT(now + tCoast) - MainBody.position;
+                    if (MechJebModuleLandingAutopilot.IsFiniteVec(predBody))
+                    {
+                        dt = tCoast;
+                        tUT = now + tCoast;
+                        tIgn = tCoast;
+                        xrSrc = "arc";
+                    }
+                    else
+                        haveArc = false;
+                }
+                if (!haveArc)
+                {
+                    Core.Landing.ClosestPointToSurfaceTarget(out Vector3d closestPos, out tUT, out double closestDist, out _);
+                    predBody = closestPos - MainBody.position; // world -> body-centered, same as SetPathToTarget
+                    if (!MechJebModuleLandingAutopilot.IsFiniteVec(predBody)
+                        || double.IsNaN(tUT) || double.IsInfinity(tUT)
+                        || closestDist >= double.MaxValue)
+                    {
+                        _tripXrOk = true;
+                        _tripXrUt = now;
+                        _tripXrM = double.NaN;
+                        _tripXrTIgn = double.NaN;
+                        _tripXrSrc = "ca";
+                        xrSrc = "ca";
+                        tIgn = double.NaN;
+                        return false;
+                    }
+                    dt = tUT - now;
+                    xrSrc = "ca";
+                }
+
+                Vector3d tgtBody = Core.Target.GetPositionTargetPosition();
+                Vector3d padAtUt = Core.Landing.RotateRelativePosition(tgtBody, dt);
+                if (!MechJebModuleLandingAutopilot.IsFiniteVec(padAtUt))
+                {
+                    _tripXrOk = true;
+                    _tripXrUt = now;
+                    _tripXrM = double.NaN;
+                    _tripXrTIgn = double.NaN;
+                    _tripXrSrc = xrSrc;
+                    tIgn = double.NaN;
+                    return false;
+                }
+                Vector3d missH = Vector3d.Exclude(padAtUt, predBody - padAtUt);
+                xrM = Vector3d.Dot(missH, VesselState.normalPlus);
+                _tripXrOk = true;
+                _tripXrUt = now;
+                _tripXrM = xrM;
+                _tripXrTIgn = tIgn;
+                _tripXrSrc = xrSrc;
+                return !double.IsNaN(xrM) && !double.IsInfinity(xrM);
             }
 
             /// <summary>
