@@ -201,10 +201,11 @@ namespace MuMech
             // 1.15x vacuum Ap strip / dump threshold. Relaxed to 1.15*k only while the lever is on
             // AND CA is quiet (a powered climb braking at k*g peaks its Kepler Ap at ~h + k*(cruise-h)).
             // k == 1.0 (or CA active): exactly 1.15, the pre-lever constant.
+            private const double TRIP_AP_STRIP_FACTOR = 1.495; // = 1.15 * 1.3, the proven k=1.3 value
             private double ApStripFactor()
             {
                 if (TripOn && TripCaQuiet)
-                    return 1.15 * TripK;
+                    return TRIP_AP_STRIP_FACTOR; // fixed for any k > 1 (Ricardo t428u): higher k must not raise the ascent cap
                 return 1.15;
             }
 
@@ -1926,7 +1927,7 @@ velocityPID.AntiWindup(rawAccel, accel);
                     if (!reachedTargetAlt && (decelerationStartTime > 0) && (VesselState.speedVertical > 0))
                     {
                         Debug.Log("warp");
-                        if (Core.Node.Autowarp && (decelerationStartTime > 0))
+                        if (Core.Node.Autowarp && !TripOn && (decelerationStartTime > 0)) // MTT coast warp only at k=1 (Ricardo t437u)
                         {
                             Core.Landing.NoteWarp("MTT coast->decel(WarpToUT)");
                             Core.Warp.WarpToUT(decelerationStartTime + VesselState.time);

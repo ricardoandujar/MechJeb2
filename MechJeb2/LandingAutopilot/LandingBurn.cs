@@ -32,12 +32,19 @@ namespace MuMech.LandingAutopilot
         // Downrange distance (meters) below which vertical ZEV gain is reduced for smoother final descent (used if ZevV<0 for conditional vertical braking boost)
         private const float DOWNRANGE_THRESHOLD_CONSTANT = 1500.0f;
 
-        private const double LB_AIM_ABOVE_PAD_M = 100;
-        private const float ZEV_FULL_RANGE_M = 3000.0f;
+        private const double LB_AIM_ABOVE_PAD_M = 50;
+        // Vertical ZEV fade window as fractions of downrange at ignition. Baseline = original 1500 m -> 10 m at ~15.9 km Vesta ignition.
+        private const double ZEM_FADE_START_FRAC = 0.80;  // at or above ignition downrange, ZemV=0; below this fraction of ignition downrange, ZemV ramps to full.
+        private const double ZEM_FADE_END_FRAC   = 0.40;  // at or below this fraction of ignition downrange, ZemV is full; above this fraction, ZemV ramps to 0.
+        private const double ZEV_FADE_START_FRAC = 0.08;  // at or above ignition downrange, ZevV=0; below this fraction of ignition downrange, ZevV ramps to full.
+        private const double ZEV_FADE_END_FRAC   = 0.001; // at or below this fraction of ignition downrange, ZevV is full; above this fraction, ZevV ramps to 0.
+        private double ignDownRange = double.NaN;         // downrange latched at burn start
+        private double dStopRawOrbitalV = double.NaN;     // downrange stop distance at orbital velocity (used for ignition guard)
 
         private double targetOffset;      // Removed once reached.
         //private double zevCounter;        // Used to enable zevV via a smoothing function.
         private float  minDownRange;      // Minimum downrange distance to target for full ZevV application (used if ZevV<0 for conditional vertical braking boost)
+        private float  zemMinDownRange;   // Minimum downrange distance to target for full ZemV application
         private double lateralGain = 0.4; // Lateral gain correction
         private double prev_t_go = 0;     // Previous t_go used to force timep step changes for better guidance convergence (not strictly necessary)
         private double lastDesiredAcceleration = 0;
@@ -68,7 +75,8 @@ namespace MuMech.LandingAutopilot
         {
             targetOffset = Math.Max(1, Core.Landing.TargetOffset); // Must be non-zero at start to prevent premature burn cutoff, but can be reduced to 0 for final touchdown precision
             //zevCounter = 0;
-            minDownRange = 1500.0f;
+            minDownRange = float.MaxValue;
+            zemMinDownRange = float.MaxValue;
         }
 
         /// <summary>
@@ -198,10 +206,12 @@ namespace MuMech.LandingAutopilot
             double h_suicide = (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (vDown * vDown) / (2.0 * ayNet);
 
             double Vx = vel.magnitude * cos_theta;
+            double VxOrbital = Core.Landing.GetCircularOrbitSpeed(VesselState.altitudeASL, MainBody) * cos_theta;
             // Effective accelerations along retrograde direction at aPlan
             double ay = a * sin_theta - g;                  // vertical (downward positive)
             double ax = a * cos_theta;                      // horizontal
             double dStopRaw = (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * Math.Max(ax, 0.1));
+            dStopRawOrbitalV = (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (VxOrbital * VxOrbital) / (2.0 * Math.Max(ax, 0.1)); ;
             double dIgnZone = 1.85 * Math.Max(distFloor, dStopRaw);
             double aglTrig = current_d <= dIgnZone
                 ? MechJebModuleLandingAutopilot.LANDING_BURN_IGN_PROX_AGL_M
@@ -393,23 +403,50 @@ namespace MuMech.LandingAutopilot
 
             // Vertical ZEV: soft TWR-scaled fade (no hard zero outside 1500 m). Hard gate left
             // ZevV=0 for the whole Vesta approach so the vertical channel never shaped descent.
+            //if (downrange <= 1500 || minDownRange < 1500)
+            //{
+            //    minDownRange = Min(minDownRange, downrange);
+            //    ZevV *= Clamp((1500 - minDownRange) / (1500 - 10), 0, 1);
+            //}
+            //else ZevV = 0;
+
+            double ZemV = Core.Landing.ZemV;
+            float zemFade = 1.0f;
             double ZevV = Core.Landing.ZevV;
             float zevFade = 1.0f;
 
-            if (ZevV < 0)
+            if (shouldBurnStarted)
             {
-                double stopRef = (v_horiz * v_horiz) / Math.Max(2.0 * a_used, 0.1);
-                float zevGate = (float)Math.Max(DOWNRANGE_THRESHOLD_CONSTANT,
-                    Math.Min(80000.0, 3.0 * stopRef + 1500.0));
-                minDownRange = Math.Min(minDownRange, downrange);
-                float rangeForFade = Math.Min(minDownRange, downrange);
-                zevFade = Mathf.Clamp01((zevGate - rangeForFade) / Math.Max(zevGate - ZEV_FULL_RANGE_M, 1.0f));
-                ZevV *= zevFade;
+                if (double.IsNaN(ignDownRange))
+                    ignDownRange = dStopRawOrbitalV;
+
+                {
+                    // for all ZemV - Fade relative to distance based on orbital circular speed: latch downrange at burn start (d0); ZemV is 0 until
+                    zemMinDownRange = Math.Min(zemMinDownRange, downrange);
+                    double dStart = ZEM_FADE_START_FRAC * ignDownRange;
+                    double dEnd = ZEM_FADE_END_FRAC * ignDownRange;
+                    double frac = (dStart - zemMinDownRange) / Math.Max(dStart - dEnd, 1.0);
+                    zemFade = (float)Math.Max(0.0, Math.Min(1.0, frac));
+                    ZemV *= zemFade;
+                }
+
+                if (ZevV < 0)
+                {
+                    // for negative ZevV - Fade relative to distance based on orbital circular speed: latch downrange at burn start (d0); ZevV is 0 until
+                    // the closest downrange reached <= ZEV_FADE_START_FRAC*d0, then ramps to full at
+                    // ZEV_FADE_END_FRAC*d0. minDownRange latch keeps it on after a pad overshoot.
+                    minDownRange = Math.Min(minDownRange, downrange);
+                    double dStart = ZEV_FADE_START_FRAC * ignDownRange;
+                    double dEnd = ZEV_FADE_END_FRAC * ignDownRange;
+                    double frac = (dStart - minDownRange) / Math.Max(dStart - dEnd, 1.0);
+                    zevFade = (frac < 0) ? 0.01f : (float)Math.Max(0.0, Math.Min(1.0, frac));
+                    ZevV *= zevFade;
+                }
             }
 
             // Commanded acceleration (ZEM/ZEV formula)
             Vector3d a_cmd = (Core.Landing.ZemH / (t_go * t_go)) * zem_x + (Core.Landing.ZevH / t_go) * zev_x +
-                             (Core.Landing.ZemV / (t_go * t_go)) * zem_y + (ZevV / t_go) * zev_y;
+                             (ZemV              / (t_go * t_go)) * zem_y + (ZevV              / t_go) * zev_y;
 
             // below this altitude, switch to recovery mode if not on target (prevents hard landings from guidance errors or bad tuning)
             // Or, if the downrange to altitude ratio is close to minRatio, switch to recovery mode - The final landing is based on tracking vertical and horizontal velocity as we zero in to target.

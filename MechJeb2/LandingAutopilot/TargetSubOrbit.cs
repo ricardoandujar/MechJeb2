@@ -122,7 +122,7 @@ namespace MuMech
             private const double TRIP_ARC_IGN_MARGIN_M = 300.0;   // stop pushing when predicted ignition ASL <= floor + this
             private const double TRIP_ARC_APPROACH_M = 20000.0;   // start pushing this far before the 6x dIgn limit
             private const double TRIP_ARC_RATE_K = 5000.0;        // vzCmd rate (m/s^2) = error (m) / K, capped by slew
-            private const double TRIP_ARC_SLEW = 0.4; // Ricardo Nov 14 15:06 (was 0.2)             // max |d vzCmd / dt| (m/s^2): no step changes
+            private const double TRIP_ARC_SLEW = 0.8; // Ricardo Nov 17 02:21 (was 0.4)  Ricardo Nov 14 15:06 (was 0.2)             // max |d vzCmd / dt| (m/s^2): no step changes
             private const double TRIP_ARC_VZ_MAX = 25.0; // Ricardo Nov 14 15:06: arc-push down cap (glide cap TRIP_DESCEND_VZ_MAX stays 15)
             private const double TRIP_ARC_CLIMB_MAX = 3.0;        // max vzCmd up while backing off
             private const double TRIP_ARC_HANDOFF_VZ_MAX = 1.0;   // wide-hoop sink rule relaxed: vz <= +1 (LB narrow guard)
