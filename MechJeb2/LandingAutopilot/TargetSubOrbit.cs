@@ -98,15 +98,15 @@ namespace MuMech
             private double _tripHoldAsl = double.NaN;
             private double _lastTripLogUt = double.NegativeInfinity;
             private const double TRIP_PREDESCENT_M = 5000.0;  // start the -3 m/s pre-descent this far before dIgn
-            private const double TRIP_HOLD_MAX_RAISE_M = 3000.0;
-            private const double TRIP_DESCEND_TERRAIN_MARGIN_M = 2000.0; // Ricardo t294u: descent target floor above remaining ridge
+            private const double TRIP_HOLD_MAX_RAISE_M = 5000.0;
+            private const double TRIP_DESCEND_TERRAIN_MARGIN_M = 1500.0; // Ricardo t294u: descent target floor above remaining ridge
             private const double TRIP_HOOP_CLEARANCE_M = TRIP_DESCEND_TERRAIN_MARGIN_M; // remaining-path clearance at targetAsl (holds by construction)
             private const double TRIP_DESCEND_VZ_MAX = 15.0;     // cap on P-arrival vzCmd (Ricardo t304u: 12, Nov 14 t314u: 15 m/s)
             // Ricardo t304u: widened trip hoop near the pad (powered state, trip vH kept).
             // floor = max(padAsl + gate, max terrain within dIgn of pad + TRIP_HOOP_VIC_MARGIN_M),
             // ceiling = floor + TRIP_HOOP_CEIL_ABOVE_M; active within TRIP_HOOP_LIMIT_DIGN * dIgn.
-            private const double TRIP_HOOP_LIMIT_DIGN = 6.0;     // Ricardo Nov 14 12:18 (was 3.0; t314u 2.25)
-            private const double TRIP_HOOP_CEIL_ABOVE_M = 2000.0;    // Ricardo Nov 14 12:20: stays 2000 (2500 briefly in 66295d00)
+            private const double TRIP_HOOP_LIMIT_DIGN = 16.0;     // Ricardo Nov 14 12:18 (was 3.0; t314u 2.25)
+            private const double TRIP_HOOP_CEIL_ABOVE_M = 2500.0;    // Ricardo Nov 14 12:20: stays 2000 (2500 briefly in 66295d00)
             private const double TRIP_HOOP_VIC_MARGIN_M = 1500.0;    // Ricardo Nov 14 16:28 (was 4000): ignition-floor terrain term vic + 1.5 km (wide hoop + arc push); pad term pad+gate unchanged; DESCEND target margin stays 2 km
             private const double TRIP_HOOP_VY_IGN_MIN = -20.0;   // predicted vy (m/s, + down) at LB ignition: climb <= 20 m/s (Nov 14 t314u; LB distance-ignites while climbing)
             private const double TRIP_HOOP_COAST_MAX_S = 600.0;
@@ -115,19 +115,21 @@ namespace MuMech
             // are 2 s (~420 m at 211 m/s) apart and the vz loop settles to ~+/-1 m/s (~100-150 m of arc bottom).
             // Ricardo Nov 14 14:09: steer on the AGL at the arc's lowest-ASL point (bottomAgl), target 1500; whole-arc
             // minimum (far and near) >= 1000 at handoff, push backs off below 1000 + 100.
-            private const double TRIP_ARC_BOTTOM_TARGET_M = 1500.0;
-            private const double TRIP_ARC_HANDOFF_TOL_M = 100.0;  // hand off once predicted bottomAgl <= target + tol
-            private const double TRIP_ARC_MIN_AGL_M = 1000.0;     // whole-arc min AGL at handoff (replaces the 2000 far floor here)
+            private const double TRIP_ARC_BOTTOM_TARGET_M = 1800.0;
+            private const double TRIP_ARC_HANDOFF_TOL_M = 250.0;  // hand off once predicted bottomAgl <= target + tol
+            private const double TRIP_ARC_MIN_AGL_M =  800.0;     // whole-arc min AGL at handoff (replaces the 2000 far floor here)
             private const double TRIP_ARC_MIN_MARGIN_M = 100.0;   // push backs off when whole-arc min < 1000 + this
             private const double TRIP_ARC_IGN_MARGIN_M = 300.0;   // stop pushing when predicted ignition ASL <= floor + this
             private const double TRIP_ARC_APPROACH_M = 20000.0;   // start pushing this far before the 6x dIgn limit
-            private const double TRIP_ARC_RATE_K = 5000.0;        // vzCmd rate (m/s^2) = error (m) / K, capped by slew
-            private const double TRIP_ARC_SLEW = 0.8; // Ricardo Nov 17 02:21 (was 0.4)  Ricardo Nov 14 15:06 (was 0.2)             // max |d vzCmd / dt| (m/s^2): no step changes
+            private const double TRIP_ARC_RATE_K = 2500.0; // Ricardo Nov 19 17:26 (was 5000.0  // vzCmd rate (m/s^2) = error (m) / K, capped by slew
+            private const double TRIP_ARC_SLEW = 2.0; // Ricardo Nov 19 17:26 (was 0.8) // Ricardo Nov 17 02:21 (was 0.4)  Ricardo Nov 14 15:06 (was 0.2)             // max |d vzCmd / dt| (m/s^2): no step changes
             private const double TRIP_ARC_VZ_MAX = 25.0; // Ricardo Nov 14 15:06: arc-push down cap (glide cap TRIP_DESCEND_VZ_MAX stays 15)
-            private const double TRIP_ARC_CLIMB_MAX = 3.0;        // max vzCmd up while backing off
-            private const double TRIP_ARC_HANDOFF_VZ_MAX = 1.0;   // wide-hoop sink rule relaxed: vz <= +1 (LB narrow guard)
-            private const double TRIP_ARC_FORCE_DIGN = 3.0;       // below 3x dIgn hand off on the other checks alone
+            private const double TRIP_ARC_CLIMB_MAX = 6.0; // Ricardo Nov 19 17:26 (was 3.0)        // max vzCmd up while backing off
+            private const double TRIP_ARC_HANDOFF_VZ_MAX = 3.0; // Ricardo Nov 19 17:26 (was 1.0)   // wide-hoop sink rule relaxed: vz <= +1 (LB narrow guard)
+            private const double TRIP_ARC_FORCE_DIGN = 6.0; // Ricardo Nov 19 17:26 (was 3.0)       // below 3x dIgn hand off on the other checks alone
             private const double TRIP_XR_VLAT_MAX = 40.0;         // lateral close-rate cap (m/s) for trip-cruise xr
+            private const double TRIP_CRUISE_MAX_G_MULT = 16.0;   // Ricardo Nov 18 19:42: max g-multiplier for trip-cruise (was 8.0)
+            private const double TRIP_CRUISE_MAX_MARGIN = 0.85;   // Ricardo Nov 18 19:42: margin for max accel for trip-cruise (was 0.7)
             private double _arcPredUt = double.NegativeInfinity, _arcLastUt = double.NaN, _arcLogUt = double.NegativeInfinity;
             private double _arcVzCmd = double.NaN;
             private bool _arcPredOk;
@@ -1640,7 +1642,7 @@ namespace MuMech
             {
                 double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
                 double g = Math.Max(VesselState.localg, 0.05);
-                double aPlan = Math.Min(8.0 * g, 0.7 * aMax);
+                double aPlan = Math.Min(TRIP_CRUISE_MAX_G_MULT * g, TRIP_CRUISE_MAX_MARGIN * aMax);
                 aPlan = Math.Max(aPlan, g + 0.05);
                 aPlan = Math.Min(aPlan, aMax);
                 double bm = Core.Landing.BurnMarginPerc / 100.0;
@@ -1652,7 +1654,7 @@ namespace MuMech
             {
                 double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
                 double g = Math.Max(VesselState.localg, 0.05);
-                double aPlan = Math.Min(8.0 * g, 0.7 * aMax);
+                double aPlan = Math.Min(TRIP_CRUISE_MAX_G_MULT * g, TRIP_CRUISE_MAX_MARGIN * aMax);
                 aPlan = Math.Max(aPlan, g + 0.05);
                 return Math.Min(aPlan, aMax);
             }
@@ -1946,7 +1948,7 @@ namespace MuMech
                     double dist = Core.Landing.getHDistanceToTarget();
                     double dIgn = TripIgnitionDistance(vH);
 
-                    double aCap = Math.Min(Math.Max(VesselState.limitedMaxThrustAccel, 1e-3), 8.0 * g);
+                    double aCap = Math.Min(Math.Max(VesselState.limitedMaxThrustAccel, 1e-3), TRIP_CRUISE_MAX_G_MULT * g);
 
                     // Cross-range: close predicted miss in the aH velocity target, not a separate
                     // normal accel (that fought the 0.1/s lateral damper). xr > 0 is +normalPlus;
@@ -1977,8 +1979,8 @@ namespace MuMech
                     // Lateral is owned by xr: strip the pad-bearing's sideways part so it can't cancel vLat.
                     Vector3d dirA = (!double.IsNaN(tRem) && nHat.sqrMagnitude > 0 && Vector3d.Exclude(nHat, dir).sqrMagnitude > 1e-6) ? Vector3d.Exclude(nHat, dir).normalized : dir;
                     Vector3d aH = 0.2 * (_tripVTarget * dirA + vLat * nHat - vHs);
-                    if (aH.magnitude > 0.7 * aCap)
-                        aH *= 0.7 * aCap / aH.magnitude;
+                    if (aH.magnitude > TRIP_CRUISE_MAX_MARGIN * aCap)
+                        aH *= TRIP_CRUISE_MAX_MARGIN * aCap / aH.magnitude;
 
                     double vzCmd;
                     if (step == Step.STATE_TRIP_DESCEND
@@ -2012,7 +2014,7 @@ namespace MuMech
                     desiredThrustVector = (a.sqrMagnitude > 1e-12) ? a.normalized : up;
 
                     double aMaxCap = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
-                    double thrCap = Math.Max(0.03, Math.Min(1.0, 8.0 * g / aMaxCap));
+                    double thrCap = Math.Max(0.03, Math.Min(1.0, TRIP_CRUISE_MAX_G_MULT * g / aMaxCap));
                     double thr = a.magnitude / Math.Max(VesselState.maxThrustAccel, 1e-6);
                     if (thr > thrCap) thr = thrCap;
                     lastHorizontalThrust = (float)thr;
@@ -2382,7 +2384,7 @@ namespace MuMech
                     // cap (204916: lastH=0.07 but CSV thr=1 wiped H 98->0 in ~3s).
                     double aMaxCap = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
                     double gCap = Math.Max(0.05, Core.Landing.g);
-                    double thrCap = Math.Max(0.03, Math.Min(1.0, 8.0 * gCap / aMaxCap));
+                    double thrCap = Math.Max(0.03, Math.Min(1.0, TRIP_CRUISE_MAX_G_MULT * gCap / aMaxCap));
                     if (thrust > thrCap) thrust = thrCap;
                     lastHorizontalThrust = (float)thrust;
                     double throttleDiv = Core.Landing.debug11 / Core.Landing.g;
@@ -2434,7 +2436,7 @@ namespace MuMech
                     {
                         double aMaxCapR = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
                         double gCapR = Math.Max(0.05, Core.Landing.g);
-                        double thrCapR = Math.Max(0.03, Math.Min(1.0, 8.0 * gCapR / aMaxCapR));
+                        double thrCapR = Math.Max(0.03, Math.Min(1.0, TRIP_CRUISE_MAX_G_MULT * gCapR / aMaxCapR));
                         if (verticalThrust > thrCapR) verticalThrust = thrCapR;
                         lastHorizontalThrust = (float)verticalThrust;
                         double throttleDivR = Core.Landing.debug11 / Core.Landing.g;

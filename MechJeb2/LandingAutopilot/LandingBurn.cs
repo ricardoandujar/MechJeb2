@@ -26,18 +26,14 @@ namespace MuMech.LandingAutopilot
         // Flag: is time warp allowed right now?
         private bool checkWarp = true;
 
-        // Minimum altitude (meters) below which warp is disabled for safety
-        private const double ALT_MIN_WARP_CONSTANT = 5000.0;
-
-        // Downrange distance (meters) below which vertical ZEV gain is reduced for smoother final descent (used if ZevV<0 for conditional vertical braking boost)
-        private const float DOWNRANGE_THRESHOLD_CONSTANT = 1500.0f;
-
         private const double LB_AIM_ABOVE_PAD_M = 50;
         // Vertical ZEV fade window as fractions of downrange at ignition. Baseline = original 1500 m -> 10 m at ~15.9 km Vesta ignition.
-        private const double ZEM_FADE_START_FRAC = 0.80;  // at or above ignition downrange, ZemV=0; below this fraction of ignition downrange, ZemV ramps to full.
-        private const double ZEM_FADE_END_FRAC   = 0.40;  // at or below this fraction of ignition downrange, ZemV is full; above this fraction, ZemV ramps to 0.
+        private const double ZEM_FADE_START_FRAC = 1.00;  // at or above ignition downrange, ZemV=0; below this fraction of ignition downrange, ZemV ramps to full.
+        private const double ZEM_FADE_END_FRAC   = 0.50;  // at or below this fraction of ignition downrange, ZemV is full; above this fraction, ZemV ramps to 0.
         private const double ZEV_FADE_START_FRAC = 0.08;  // at or above ignition downrange, ZevV=0; below this fraction of ignition downrange, ZevV ramps to full.
         private const double ZEV_FADE_END_FRAC   = 0.001; // at or below this fraction of ignition downrange, ZevV is full; above this fraction, ZevV ramps to 0.
+        private const double TRIP_CRUISE_MAX_G_MULT = 16.0;   // Ricardo Nov 18 19:42: max g-multiplier for trip-cruise (was 8.0)
+        private const double TRIP_CRUISE_MAX_MARGIN = 0.85;   // Ricardo Nov 18 19:42: margin for max accel for trip-cruise (was 0.7)
         private double ignDownRange = double.NaN;         // downrange latched at burn start
         private double dStopRawOrbitalV = double.NaN;     // downrange stop distance at orbital velocity (used for ignition guard)
 
@@ -148,7 +144,7 @@ namespace MuMech.LandingAutopilot
             double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
             double gMag = Math.Max(VesselState.localg, 0.05);
             // Prefer 8g when TWR is high; on low-TWR bodies 0.7 aMax leaves headroom.
-            double aPlan = Math.Min(8.0 * gMag, 0.7 * aMax);
+            double aPlan = Math.Min(TRIP_CRUISE_MAX_G_MULT * gMag, TRIP_CRUISE_MAX_MARGIN * aMax);
             aPlan = Math.Max(aPlan, gMag + 0.05);
             aPlan = Math.Min(aPlan, aMax);
             double aClip = Math.Min(aMax, 3.0 * aPlan);
@@ -487,7 +483,7 @@ namespace MuMech.LandingAutopilot
 
             // Gain scale: do not floor at 0.4 for long t_go (that kept thr~0.02 on Vesta).
             // With stopping-time t_go this stays near 1; still soft-caps only if t_go is large.
-            double gain_scale = Math.Min(1.0, Math.Max(0.7, 45.0 / Math.Max(t_go, 1.0)));
+            double gain_scale = Math.Min(1.0, Math.Max(TRIP_CRUISE_MAX_MARGIN, 45.0 / Math.Max(t_go, 1.0)));
             a_cmd *= gain_scale;
 
             // Desired acceleration vector

@@ -1,4 +1,4 @@
-extern alias JetBrainsAnnotations;
+﻿extern alias JetBrainsAnnotations;
 using System;
 //using System.Collections.Specialized;
 //using Contracts.Agents.Mentalities;
@@ -2198,7 +2198,7 @@ namespace MuMech
         // ignition. AscentApaFloorForTerrain (k == 1.0) is untouched.
         public const double TRIP_CRUISE_CLEARANCE_M = 2500.0;
         public const double TRIP_PAD_OVERHEAD_M = SUBORBIT_PATH_MIN_ALTITUDE + 1.1 * LANDING_BURN_AGL_FLOOR_M;
-        public const double TRIP_CRUISE_ABORT_AGL_M = 1200.0;
+        public const double TRIP_CRUISE_ABORT_AGL_M = 700.0; // 20261119 - Ricardo t257u: abort cruise if terrain ahead is too high (LB ignition margin + 700 m).
 
         /// <summary>
         /// k > 1 trip cruise hold ASL = max(ridgeAhead + TRIP_CRUISE_CLEARANCE_M, padAsl + TRIP_PAD_OVERHEAD_M).
