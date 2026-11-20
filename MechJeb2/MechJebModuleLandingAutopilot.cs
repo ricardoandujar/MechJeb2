@@ -1653,7 +1653,7 @@ namespace MuMech
         /// <summary>
         /// True when the coast from now until LB's predicted ignition point (arc to pad > dIgn)
         /// drops below minAltitude + 1.1 * max(LB AGL floor, hSuicide) above terrain.
-        /// dIgn / hSuicide / aPlan use the same formulas as LandingBurn.ComputeBrakeBudget and
+        /// dIgn / hSuicide / aPlan use the shared LandingStepBase helpers that LandingBurn.ComputeBrakeBudget and
         /// ShouldStartBurn (LandingBurn.cs:137-142, 191, 216). Terrain is sampled under each point
         /// at its own time ut (body rotated by omega*tAhead, ReentrySimulation.cs:1001 convention),
         /// verified against real AGL in run 20261109_093847. Other samplers are not compensated yet.
@@ -1673,16 +1673,15 @@ namespace MuMech
             if (body == null || orbit == null || !IsFiniteVec(targetPos))
                 return false;
 
-            // Same budget as LandingBurn.ComputeBrakeBudget.
-            double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
-            double g = Math.Max(VesselState.localg, 0.05);
-            double aPlan = Math.Min(8.0 * g, 0.7 * aMax);
-            aPlan = Math.Max(aPlan, g + 0.05);
-            aPlan = Math.Min(aPlan, aMax);
-            double bm = BurnMarginPerc / 100.0;
+            // Same budget and stop distance LandingBurn ignites on (shared LandingStepBase helpers):
+            // aPlan = PlanBrakeAccel, dIgn = LB d_horiz = BrakeStopDistance(vH, aPlan x horizontal share
+            // of a retrograde burn, BRAKE_STOP_MARGIN_H), floored at LANDING_BURN_AGL_FLOOR_M.
+            double aPlan = LandingStepBase.PlanBrakeAccel(VesselState.limitedMaxThrustAccel, VesselState.localg, out _);
+            double g = Math.Max(VesselState.localg, LandingStepBase.MIN_LOCAL_G);
             double vH = VesselState.speedSurfaceHorizontal;
-            // LandingBurn.cs:216 d_horiz (cos(theta) ~ 1 for the near-horizontal coast).
-            double dIgn = Math.Max(LANDING_BURN_AGL_FLOOR_M, (1.0 + bm) * vH * vH / (2.0 * aPlan));
+            LandingStepBase.RetroBrakeShares(VesselState.surfaceVelocity, VesselState.up, out _, out double cosTheta);
+            double dIgn = Math.Max(LANDING_BURN_AGL_FLOOR_M,
+                LandingStepBase.BrakeStopDistance(vH, aPlan * cosTheta, LandingStepBase.BRAKE_STOP_MARGIN_H, BurnMarginPerc));
 
             double endUT = Math.Min(tUT, now + 900.0);
             double span = endUT - now;
@@ -1719,8 +1718,9 @@ namespace MuMech
                 double terrainASL = body.TerrainAltitude(lat, lonRot);
                 if (double.IsNaN(terrainASL) || double.IsInfinity(terrainASL)) continue;
 
-                // LandingBurn.cs:191 h_suicide at aPlan.
-                double hSuicide = (1.05 + bm) * (vDown * vDown) / (2.0 * Math.Max(aPlan - g, 0.1));
+                // LandingBurn h_suicide at aPlan (shared stop-height formula, vertical margin).
+                double hSuicide = LandingStepBase.BrakeStopDistance(vDown, Math.Max(aPlan - g, LandingStepBase.MIN_ACCEL),
+                    LandingStepBase.BRAKE_STOP_MARGIN_V, BurnMarginPerc);
                 double need = minAltitude + 1.1 * Math.Max(LANDING_BURN_AGL_FLOOR_M, hSuicide);
                 double agl = posASL - terrainASL;
                 if (agl < need)

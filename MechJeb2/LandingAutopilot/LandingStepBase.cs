@@ -38,14 +38,14 @@ namespace MuMech
 
         /// <summary>Floor (m/s^2) for any acceleration used as a thrust budget or as a divisor,
         /// so a zero-thrust or degenerate state never divides by zero.</summary>
-        protected const double MIN_ACCEL = 0.1;
+        internal const double MIN_ACCEL = 0.1;
 
         /// <summary>Floor (m/s^2) for local gravity used in brake planning (very small bodies).</summary>
-        protected const double MIN_LOCAL_G = 0.05;
+        internal const double MIN_LOCAL_G = 0.05;
 
         /// <summary>The planned brake acceleration is always at least local g plus this (m/s^2),
         /// so a low-TWR plan can still arrest the vertical speed.</summary>
-        protected const double PLAN_ACCEL_G_MARGIN = 0.05;
+        internal const double PLAN_ACCEL_G_MARGIN = 0.05;
 
         /// <summary>Squared-magnitude threshold below which a vector is treated as zero
         /// before normalising it.</summary>
@@ -115,15 +115,15 @@ namespace MuMech
         protected const double WARP_PERIOD_DIVISOR = 6;
 
         /// <summary>Converts BurnMarginPerc (percent) to a fraction.</summary>
-        protected const double PERCENT = 100.0;
+        internal const double PERCENT = 100.0;
 
         /// <summary>Base stop-distance multiplier for the horizontal (downrange) brake distance,
         /// LandingBurn d_horiz. BurnMarginPerc is added on top.</summary>
-        protected const double BRAKE_STOP_MARGIN_H = 1.00;
+        internal const double BRAKE_STOP_MARGIN_H = 1.00;
 
         /// <summary>Base stop-distance multiplier for vertical brake heights (LandingBurn h_vert /
         /// h_suicide). BurnMarginPerc is added on top.</summary>
-        protected const double BRAKE_STOP_MARGIN_V = 1.05;
+        internal const double BRAKE_STOP_MARGIN_V = 1.05;
 
         /// <summary>Default interval (s) between repeated diagnostic log lines.</summary>
         protected const double DEFAULT_LOG_INTERVAL_S = 1.0;
@@ -225,10 +225,18 @@ namespace MuMech
         /// TSO's prediction of it must use the same budget or TSO hands off at the wrong point.
         /// </summary>
         /// <param name="aMax">Limited max thrust acceleration used (floored at MIN_ACCEL).</param>
-        protected double PlanBrakeAccel(out double aMax)
+        protected double PlanBrakeAccel(out double aMax) =>
+            PlanBrakeAccel(VesselState.limitedMaxThrustAccel, VesselState.localg, out aMax);
+
+        /// <summary>
+        /// Static form of PlanBrakeAccel for callers that are not landing steps
+        /// (MechJebModuleLandingAutopilot.CoastBelowLbFloorBeforeIgnition), so the coast check uses
+        /// exactly the budget LandingBurn ignites on.
+        /// </summary>
+        internal static double PlanBrakeAccel(double limitedMaxThrustAccel, double localg, out double aMax)
         {
-            aMax = Math.Max(VesselState.limitedMaxThrustAccel, MIN_ACCEL);
-            double g = Math.Max(VesselState.localg, MIN_LOCAL_G);
+            aMax = Math.Max(limitedMaxThrustAccel, MIN_ACCEL);
+            double g = Math.Max(localg, MIN_LOCAL_G);
             double aPlan = Math.Min(TRIP_CRUISE_MAX_G_MULT * g, TRIP_CRUISE_MAX_MARGIN * aMax);
             aPlan = Math.Max(aPlan, g + PLAN_ACCEL_G_MARGIN);
             return Math.Min(aPlan, aMax);
@@ -242,9 +250,14 @@ namespace MuMech
         /// with a floored at MIN_ACCEL. This is the LandingBurn formula; pass BRAKE_STOP_MARGIN_H for
         /// downrange distance and BRAKE_STOP_MARGIN_V for vertical heights.
         /// </summary>
-        protected double BrakeStopDistance(double speed, double accel, double marginBase)
+        protected double BrakeStopDistance(double speed, double accel, double marginBase) =>
+            BrakeStopDistance(speed, accel, marginBase, Core.Landing.BurnMarginPerc);
+
+        /// <summary>Static form of BrakeStopDistance with an explicit BurnMarginPerc (percent), for
+        /// non-step callers (MechJebModuleLandingAutopilot coast check).</summary>
+        internal static double BrakeStopDistance(double speed, double accel, double marginBase, double burnMarginPerc)
         {
-            double margin = marginBase + Core.Landing.BurnMarginPerc / PERCENT;
+            double margin = marginBase + burnMarginPerc / PERCENT;
             return margin * speed * speed / (2.0 * Math.Max(accel, MIN_ACCEL));
         }
 
@@ -253,7 +266,7 @@ namespace MuMech
         /// (cosTheta) shares relative to up. Used by LandingBurn ignition and the TSO ignition
         /// prediction so both scale aPlan the same way. A zero velocity counts as horizontal.
         /// </summary>
-        protected static void RetroBrakeShares(Vector3d vel, Vector3d up, out double sinTheta, out double cosTheta)
+        internal static void RetroBrakeShares(Vector3d vel, Vector3d up, out double sinTheta, out double cosTheta)
         {
             if (vel.sqrMagnitude < DIR_SQR_EPS)
             {
