@@ -10,7 +10,7 @@ namespace MuMech.LandingAutopilot
     /// MechJeb autopilot step for powered descent using vector-based ZEM/ZEV guidance.
     /// Controls thrust direction and throttle during final descent.
     /// </summary>
-    public class LandingBurn : AutopilotStep
+    public class LandingBurn : LandingStepBase
     {
         // Used to print every 50 times
         private long debugCounter = 0;
@@ -27,13 +27,31 @@ namespace MuMech.LandingAutopilot
         private bool checkWarp = true;
 
         private const double LB_AIM_ABOVE_PAD_M = 50;
+        // Hand to the mover only while the last commanded accel is below this fraction of the
+        // LIMITED_MAX_THRUST_G_RATIO * g cap (i.e. LB is not saturated).
+        private const double LB_MOVER_ACCEL_FRAC = 0.95;
+        // ---- Named tuning constants (coding standard: no magic numbers). Values unchanged. ----
+        private const double LB_LATERAL_GAIN_INIT = 0.4; // lateral correction gain during the burn
+        private const double LB_LATERAL_GAIN_FINAL = 0.1; // lateral gain once close/low (alt < LB_FINAL_ALT_M or offset reached)
+        private const double LB_DENSITY_ALT_DIVISOR = 5.0; // density at burn start is sampled at current_h / this
+        private const double LB_STEEP_SIN_MIN = 0.25; // sin(theta) below this = shallow approach (distance ignition only)
+        private const int LB_WARP_ALT_DIVISOR = 5; // LB coast warp: rate <= AGL / (this x fall speed)
+        private const double LB_MIN_SLANT_RANGE_M = 0.1; // slant range (m) treated as zero
+        private const double LB_TGO_FILTER_NEW = 0.75; // t_go low-pass: weight of the new estimate
+        private const double LB_TGO_FILTER_PREV = 0.25; // t_go low-pass: weight of the previous estimate
+        private const float LB_ZEV_FADE_BEFORE_LATCH = 0.01f; // tiny ZEV fade before the ignition downrange is latched
+        private const double LB_MOVER_RATIO_MULT = 1.1; // hand to mover when downrange/alt <= this x minRatio
+        private const double LB_FINAL_ALT_M = 20.0; // final-approach altitude (m) for reduced lateral gain
+        private const double LB_TOUCHDOWN_VZ_GAIN = 6.0; // touchdown vertical-speed correction gain (divided by t_go)
+        private const double LB_RECOVERY_ALT_M = 5000.0; // vertical recovery check below this altitude (m)
+        private const double LB_RECOVERY_SINK_MS = 8.0; // ... when sinking faster than this (m/s)
+        private const double LB_GAIN_SCALE_TGO_S = 45.0; // ZEM/ZEV gains scale down when t_go exceeds this (s)
+        private const double LB_CLIP_TOL = 0.01; // accel clip tolerance (m/s^2)
         // Vertical ZEV fade window as fractions of downrange at ignition. Baseline = original 1500 m -> 10 m at ~15.9 km Vesta ignition.
         private const double ZEM_FADE_START_FRAC = 1.00;  // at or above ignition downrange, ZemV=0; below this fraction of ignition downrange, ZemV ramps to full.
         private const double ZEM_FADE_END_FRAC   = 0.50;  // at or below this fraction of ignition downrange, ZemV is full; above this fraction, ZemV ramps to 0.
         private const double ZEV_FADE_START_FRAC = 0.08;  // at or above ignition downrange, ZevV=0; below this fraction of ignition downrange, ZevV ramps to full.
         private const double ZEV_FADE_END_FRAC   = 0.001; // at or below this fraction of ignition downrange, ZevV is full; above this fraction, ZevV ramps to 0.
-        private const double TRIP_CRUISE_MAX_G_MULT = 16.0;   // Ricardo Nov 18 19:42: max g-multiplier for trip-cruise (was 8.0)
-        private const double TRIP_CRUISE_MAX_MARGIN = 0.85;   // Ricardo Nov 18 19:42: margin for max accel for trip-cruise (was 0.7)
         private double ignDownRange = double.NaN;         // downrange latched at burn start
         private double dStopRawOrbitalV = double.NaN;     // downrange stop distance at orbital velocity (used for ignition guard)
 
@@ -41,12 +59,11 @@ namespace MuMech.LandingAutopilot
         //private double zevCounter;        // Used to enable zevV via a smoothing function.
         private float  minDownRange;      // Minimum downrange distance to target for full ZevV application (used if ZevV<0 for conditional vertical braking boost)
         private float  zemMinDownRange;   // Minimum downrange distance to target for full ZemV application
-        private double lateralGain = 0.4; // Lateral gain correction
+        private double lateralGain = LB_LATERAL_GAIN_INIT; // Lateral gain correction
         private double prev_t_go = 0;     // Previous t_go used to force timep step changes for better guidance convergence (not strictly necessary)
         private double lastDesiredAcceleration = 0;
 
         // Autotest / KSP.log 1 Hz guidance snapshot (no behavior change).
-        private double _lastGuidanceLogUt = double.NegativeInfinity;
         public double AutotestTgo = double.NaN;
         public double AutotestPadDh = double.NaN;
         public bool AutotestBurnStarted = false;
@@ -136,18 +153,15 @@ namespace MuMech.LandingAutopilot
 
         /// <summary>
         /// One braking budget for ignition distance, t_go, and throttle clip.
-        /// aPlan ~ min(8g, 0.7 aMax) but at least g+0.05 (Vesta ~2 m/s2; low-TWR keeps margin).
-        /// aClip = min(aMax, 3 aPlan) soft ceiling; near-pad suicide may still use full aMax.
+        /// aPlan = PlanBrakeAccel (base): min(TRIP_CRUISE_MAX_G_MULT g, TRIP_CRUISE_MAX_MARGIN aMax),
+        /// at least g + PLAN_ACCEL_G_MARGIN. aClip = min(aMax, LB_ACCEL_CLIP_PLAN_MULT aPlan) soft
+        /// ceiling; near-pad suicide may still use full aMax.
         /// </summary>
+        private const double LB_ACCEL_CLIP_PLAN_MULT = 3.0; // aClip soft ceiling = this x aPlan (capped at aMax)
         private void ComputeBrakeBudget()
         {
-            double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
-            double gMag = Math.Max(VesselState.localg, 0.05);
-            // Prefer 8g when TWR is high; on low-TWR bodies 0.7 aMax leaves headroom.
-            double aPlan = Math.Min(TRIP_CRUISE_MAX_G_MULT * gMag, TRIP_CRUISE_MAX_MARGIN * aMax);
-            aPlan = Math.Max(aPlan, gMag + 0.05);
-            aPlan = Math.Min(aPlan, aMax);
-            double aClip = Math.Min(aMax, 3.0 * aPlan);
+            double aPlan = PlanBrakeAccel(out double aMax);
+            double aClip = Math.Min(aMax, LB_ACCEL_CLIP_PLAN_MULT * aPlan);
             _aMaxBudget = aMax;
             _aPlan = aPlan;
             _aClip = aClip;
@@ -179,9 +193,8 @@ namespace MuMech.LandingAutopilot
 
             bool     rc;
             Vector3d up = Vessel.up;
-            Vector3d retro = -vel.normalized;
-            double sin_theta = Math.Abs(Vector3d.Dot(retro, -up));   // sin of angle from horizontal
-            double cos_theta = Math.Sqrt(1.0 - sin_theta * sin_theta);
+            // sin / cos of the retrograde direction's angle from horizontal (shared with TSO's ignition prediction)
+            RetroBrakeShares(vel, up, out double sin_theta, out double cos_theta);
             double Vy = Vector3d.Dot(vel, -up);             // downward component
             double g = VesselState.localg;
             double a = _aPlan;                             // planned brake accel (not full aMax)
@@ -194,21 +207,21 @@ namespace MuMech.LandingAutopilot
             // Terrain / AGL suicide: always evaluated so a flat coast cannot fly into the ground
             // while sin_theta keeps h_vert at 0. Uses aPlan vertical stop + two-tier AGL trigger
             // (Ricardo Nov 14, t310u/t311u/t314u): LANDING_BURN_IGN_PROX_AGL_M (1.5 km) inside the
-            // no-warp zone (current_d <= 1.85 * d_horiz, just before ignition), LANDING_BURN_AGL_FAR_M
+            // no-warp zone (current_d <= MechJebModuleLandingAutopilot.LANDING_BURN_NO_WARP_DIGN * d_horiz, just before ignition), LANDING_BURN_AGL_FAR_M
             // (2 km) beyond it. h_vert / d_horiz keep the LANDING_BURN_AGL_FLOOR_M (3 km) minimum.
             const double distFloor = MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FLOOR_M;
             double vDown = Math.Max(Vy, 0.0);
-            double ayNet = Math.Max(a - g, 0.1);
-            double h_suicide = (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (vDown * vDown) / (2.0 * ayNet);
+            double ayNet = Math.Max(a - g, MIN_ACCEL);
+            double h_suicide = BrakeStopDistance(vDown, ayNet, BRAKE_STOP_MARGIN_V);
 
             double Vx = vel.magnitude * cos_theta;
             double VxOrbital = Core.Landing.GetCircularOrbitSpeed(VesselState.altitudeASL, MainBody) * cos_theta;
             // Effective accelerations along retrograde direction at aPlan
             double ay = a * sin_theta - g;                  // vertical (downward positive)
             double ax = a * cos_theta;                      // horizontal
-            double dStopRaw = (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (Vx * Vx) / (2.0 * Math.Max(ax, 0.1));
-            dStopRawOrbitalV = (1.00 + Core.Landing.BurnMarginPerc / 100.0) * (VxOrbital * VxOrbital) / (2.0 * Math.Max(ax, 0.1)); ;
-            double dIgnZone = 1.85 * Math.Max(distFloor, dStopRaw);
+            double dStopRaw = BrakeStopDistance(Vx, ax, BRAKE_STOP_MARGIN_H);
+            dStopRawOrbitalV = BrakeStopDistance(VxOrbital, ax, BRAKE_STOP_MARGIN_H);
+            double dIgnZone = MechJebModuleLandingAutopilot.LANDING_BURN_NO_WARP_DIGN * Math.Max(distFloor, dStopRaw);
             double aglTrig = current_d <= dIgnZone
                 ? MechJebModuleLandingAutopilot.LANDING_BURN_IGN_PROX_AGL_M
                 : MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FAR_M;
@@ -216,7 +229,7 @@ namespace MuMech.LandingAutopilot
             {
                 shouldBurnStarted = true;
                 CancelWarpOnBurnLatch();
-                densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h / 5.0, MainBody), FlightGlobals.getExternalTemperature(current_h / 5.0, MainBody));
+                densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h / LB_DENSITY_ALT_DIVISOR, MainBody), FlightGlobals.getExternalTemperature(current_h / LB_DENSITY_ALT_DIVISOR, MainBody));
                 Debug.Log($"[ShouldStartBurn2:agl] agl={current_agl:F0}, aglTrig={aglTrig:F0}, h_suicide={h_suicide:F0}, Vy={Vy:F3}, current_d={current_d:F0}, zone={dIgnZone:F0}, aPlan={a:F2}");
                 return true;
             }
@@ -235,10 +248,10 @@ namespace MuMech.LandingAutopilot
             else
             {
                 // Baseline 3 km floor (no TWR-scaled expansion — that lit at ~8 km / 33 km AGL on Vesta).
-                double h_vert  = Math.Max(distFloor, (1.05 + Core.Landing.BurnMarginPerc / 100.0) * (Vy * Vy) / (2.0 * Math.Max(ay, 0.1)));
+                double h_vert  = Math.Max(distFloor, BrakeStopDistance(Vy, ay, BRAKE_STOP_MARGIN_V));
                 double d_horiz = Math.Max(distFloor, dStopRaw);
 
-                if (sin_theta < 0.25 || !vertOn)
+                if (sin_theta < LB_STEEP_SIN_MIN || !vertOn)
                 {
                     h_vert = 0; // Nearly horizontal (or not sinking): horizontal range owns ignition; AGL suicide above covers terrain
                 }
@@ -248,17 +261,17 @@ namespace MuMech.LandingAutopilot
                 {
                     shouldBurnStarted = true;
                     CancelWarpOnBurnLatch();
-                    densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h / 5.0, MainBody), FlightGlobals.getExternalTemperature(current_h / 5.0, MainBody));
+                    densityAtBurnStart = FlightGlobals.getAtmDensity(FlightGlobals.getStaticPressure(current_h / LB_DENSITY_ALT_DIVISOR, MainBody), FlightGlobals.getExternalTemperature(current_h / LB_DENSITY_ALT_DIVISOR, MainBody));
                 }
                 else
                 {
-                    rc = (vertOn && current_h <= (1.85 * h_vert)) || (current_d <= (1.85 * d_horiz));
+                    rc = (vertOn && current_h <= (MechJebModuleLandingAutopilot.LANDING_BURN_NO_WARP_DIGN * h_vert)) || (current_d <= (MechJebModuleLandingAutopilot.LANDING_BURN_NO_WARP_DIGN * d_horiz));
 
                     // Perform warp if allowed and requested
                     if (checkWarp && (rc == false) && Core.Node.Autowarp && !Vessel.LandedOrSplashed)
                     {
-                        h_vert *= 1.85;
-                        d_horiz *= 1.85;
+                        h_vert *= MechJebModuleLandingAutopilot.LANDING_BURN_NO_WARP_DIGN;
+                        d_horiz *= MechJebModuleLandingAutopilot.LANDING_BURN_NO_WARP_DIGN;
                         Debug.Log($"[ShouldStartBurn2:w] current_h={current_h:F0}, h_vert={h_vert:F0}, current_d={current_d:F0}, d_horiz={d_horiz:F0}, aPlan={a:F2}");
                     }
                     else
@@ -284,9 +297,8 @@ namespace MuMech.LandingAutopilot
                 else
                 {
                     // Conservative velocity estimate for 10-second impact buffer
-                    double velocityGuess = Math.Max(Math.Abs(VesselState.speedVertical), VesselState.localg * 5);
                     // Safe warp rate: limit based on altitude and orbital period
-                    float warpRate = (float)Math.Min(VesselState.altitudeTrue / (5 * velocityGuess), (Orbit.period / 6));
+                    float warpRate = (float)CoastWarpRate(VesselState.altitudeTrue, LB_WARP_ALT_DIVISOR);
 
                     if (!warpOn) Core.Landing.NoteWarp("LB coast");
                     Core.Warp.WarpRegularAtRate(warpRate);
@@ -338,7 +350,7 @@ namespace MuMech.LandingAutopilot
             // Slant range (distance to target)
             double slantRange = posError.magnitude;
 
-            if (slantRange <= 0.1)
+            if (slantRange <= LB_MIN_SLANT_RANGE_M)
             {
                 Core.Thrust.RequestActiveThrottle(0);
                 return recover;
@@ -370,10 +382,10 @@ namespace MuMech.LandingAutopilot
             // t_go: stopping time at shared aPlan (same budget as ShouldStartBurn).
             ComputeBrakeBudget();
             double a_max = _aMaxBudget;
-            double gMag = Math.Max(g.magnitude, 0.05);
+            double gMag = Math.Max(g.magnitude, MIN_LOCAL_G);
             double a_used = _aPlan;
             double a_clip = _aClip;
-            double a_brake_f = Math.Max(a_used - gMag, 0.1);
+            double a_brake_f = Math.Max(a_used - gMag, MIN_ACCEL);
             double rangeForTgo = Math.Max(alt, 1.0);
             double disc = v_down * v_down + 2.0 * a_brake_f * rangeForTgo;
             double t_vert = (v_down + Math.Sqrt(Math.Max(disc, 0.0))) / a_brake_f;
@@ -384,7 +396,7 @@ namespace MuMech.LandingAutopilot
             // Mild low-pass only (was Min(prev-dt/5, t_go) which held multi-minute t_go).
             if (prev_t_go > 0)
             {
-                t_go = Math.Max(1.0, 0.75 * t_go + 0.25 * prev_t_go);
+                t_go = Math.Max(1.0, LB_TGO_FILTER_NEW * t_go + LB_TGO_FILTER_PREV * prev_t_go);
             }
             prev_t_go = t_go;
 
@@ -435,7 +447,7 @@ namespace MuMech.LandingAutopilot
                     double dStart = ZEV_FADE_START_FRAC * ignDownRange;
                     double dEnd = ZEV_FADE_END_FRAC * ignDownRange;
                     double frac = (dStart - minDownRange) / Math.Max(dStart - dEnd, 1.0);
-                    zevFade = (frac < 0) ? 0.01f : (float)Math.Max(0.0, Math.Min(1.0, frac));
+                    zevFade = (frac < 0) ? LB_ZEV_FADE_BEFORE_LATCH : (float)Math.Max(0.0, Math.Min(1.0, frac));
                     ZevV *= zevFade;
                 }
             }
@@ -446,9 +458,9 @@ namespace MuMech.LandingAutopilot
 
             // below this altitude, switch to recovery mode if not on target (prevents hard landings from guidance errors or bad tuning)
             // Or, if the downrange to altitude ratio is close to minRatio, switch to recovery mode - The final landing is based on tracking vertical and horizontal velocity as we zero in to target.
-            if (lastDesiredAcceleration < (0.95*MoveToTarget.LIMITED_MAX_THRUST_G_RATIO*VesselState.localg))
+            if (lastDesiredAcceleration < (LB_MOVER_ACCEL_FRAC*LIMITED_MAX_THRUST_G_RATIO*VesselState.localg))
             {
-                if (((downrange / alt) <= (1.1 * Core.Landing.minRatio)) || (alt < Core.Landing.LandWithMoverAlt) || (downrange < Core.Landing.LandWithMoverOffset))
+                if (((downrange / alt) <= (LB_MOVER_RATIO_MULT * Core.Landing.minRatio)) || (alt < Core.Landing.LandWithMoverAlt) || (downrange < Core.Landing.LandWithMoverOffset))
                 {
                     recover = true;
                 }
@@ -456,23 +468,23 @@ namespace MuMech.LandingAutopilot
 
             // Apply terminal velocity bias (encourages stronger vertical braking near ground to hit target speed)
             // Final-phase boost (stronger control near ground)
-            if ( (alt < 20.0) || (targetOffset==0) )
+            if ( (alt < LB_FINAL_ALT_M) || (targetOffset==0) )
             {
                 targetOffset = 0; // Remove target offset once reached to provide more safety margin for final touchdown
-                lateralGain = 0.1;// 0.01; // Reduce lateral gain near ground to prevent overshoot from aggressive vertical braking
+                lateralGain = LB_LATERAL_GAIN_FINAL;// 0.01; // Reduce lateral gain near ground to prevent overshoot from aggressive vertical braking
 
                 a_cmd = a_cmd - Vector3d.Project(a_cmd, Vessel.up); // Remove vertical component to prevent interference with vertical braking
 
                 // Terminal vertical velocity bias: add extra vertical braking if descending faster than target speed near ground
-                a_cmd += (-Math.Abs(Core.Landing.TouchdownSpeed) - vy) * Vessel.up * (6.0 / t_go);
+                a_cmd += (-Math.Abs(Core.Landing.TouchdownSpeed) - vy) * Vessel.up * (LB_TOUCHDOWN_VZ_GAIN / t_go);
             }
 
             // Near pad / low AGL with large downward speed: bias a_cmd to suicide-burn vertical
             // before horizontal downrange/anti-downrange can bounce past the pad (baseline
             // crossed pad then thr~0.05 downrange while vSpd stayed -60).
-            if (alt < 5000.0 && vy < -8.0)
+            if (alt < LB_RECOVERY_ALT_M && vy < -LB_RECOVERY_SINK_MS)
             {
-                double needAlt = (vy * vy) / (2.0 * Math.Max(a_brake_net, 0.1));
+                double needAlt = (vy * vy) / (2.0 * Math.Max(a_brake_net, MIN_ACCEL));
                 if (alt < needAlt * 2.0)
                 {
                     double blend = Mathf.Clamp01((float)((needAlt * 2.0 - alt) / Math.Max(needAlt, 1.0)));
@@ -483,7 +495,7 @@ namespace MuMech.LandingAutopilot
 
             // Gain scale: do not floor at 0.4 for long t_go (that kept thr~0.02 on Vesta).
             // With stopping-time t_go this stays near 1; still soft-caps only if t_go is large.
-            double gain_scale = Math.Min(1.0, Math.Max(TRIP_CRUISE_MAX_MARGIN, 45.0 / Math.Max(t_go, 1.0)));
+            double gain_scale = Math.Min(1.0, Math.Max(TRIP_CRUISE_MAX_MARGIN, LB_GAIN_SCALE_TGO_S / Math.Max(t_go, 1.0)));
             a_cmd *= gain_scale;
 
             // Desired acceleration vector
@@ -500,7 +512,7 @@ namespace MuMech.LandingAutopilot
 
             // Clamp magnitude to aClip (3*aPlan); near-pad vertBrake may have used full aMax above.
             double desired_mag = desired_accel.magnitude;
-            if (desired_mag > a_clip + 0.01)
+            if (desired_mag > a_clip + LB_CLIP_TOL)
             {
                 desired_accel = desired_accel.normalized * a_clip;
                 desired_mag = a_clip;
@@ -509,9 +521,9 @@ namespace MuMech.LandingAutopilot
             if ( shouldBurnStarted == true )
             {
                 // Throttle fraction of full aMax so aPlan maps to ~aPlan/aMax
-                float throttle = (float)(desired_mag / Math.Max(a_max, 0.1));
+                float throttle = (float)(desired_mag / Math.Max(a_max, MIN_ACCEL));
 
-                if (Core.Attitude.attitudeAngleFromTarget() < 30)
+                if (Core.Attitude.attitudeAngleFromTarget() < THROTTLE_ANGLE_DEG)
                 {
                     lastDesiredAcceleration = desired_mag;
                     Core.Thrust.RequestActiveThrottle(throttle);
@@ -562,12 +574,10 @@ namespace MuMech.LandingAutopilot
             AutotestAPlan = _aPlan;
             AutotestAClip = _aClip;
 
-            if (now - _lastGuidanceLogUt < 1.0)
+            if (!GuidanceLogDue(now))
                 return;
-            _lastGuidanceLogUt = now;
 
-            double dist = double.NaN;
-            try { dist = Core.Landing.getHDistanceToTarget(); } catch { /* ignore */ }
+            double dist = HDistanceToTargetOr(double.NaN);
 
             Debug.Log("[LB-1Hz] burnStarted=" + shouldBurnStarted
                 + " t_go=" + t_go.ToString("F1")
@@ -589,24 +599,25 @@ namespace MuMech.LandingAutopilot
                 + " zevFade=" + zevFade.ToString("F2"));
         }
 
+        // Burn-axis log label thresholds (dot products of the unit commanded acceleration).
+        private const double LB_AXIS_RETRO_DOT = 0.7;      // dir . -vSurf above this -> retrograde-brake
+        private const double LB_AXIS_DOWNRANGE_DOT = 0.5;  // |downrange . dirH| above this -> (anti-)downrange
+        private const double LB_AXIS_RADIAL_DOT = 0.7;     // |up . dir| above this -> radial
+
+        /// <summary>Short label of the commanded acceleration axis for the [LB-1Hz] log and autotest CSV.</summary>
         private string DescribeBurnAxis(Vector3d desiredAccel, Vector3d downrange)
         {
-            if (desiredAccel.sqrMagnitude < 1e-12) return "none";
-            Vector3d a = desiredAccel.normalized;
-            double upDot = Vector3d.Dot(a, Vessel.up);
-            Vector3d ah = Vector3d.Exclude(Vessel.up, a);
-            double drDot = 0;
-            if (downrange.sqrMagnitude > 1e-12 && ah.sqrMagnitude > 1e-12)
-                drDot = Vector3d.Dot(ah.normalized, downrange.normalized);
+            if (!ThrustAxisComponents(desiredAccel, Vessel.up, downrange, out Vector3d a, out double upDot, out double drDot))
+                return "none";
             Vector3d vel = VesselState.surfaceVelocity;
             double retroDot = 0;
-            if (vel.sqrMagnitude > 1e-6)
+            if (vel.sqrMagnitude > DIR_SQR_EPS)
                 retroDot = Vector3d.Dot(a, -vel.normalized);
-            if (retroDot > 0.7) return "retrograde-brake";
-            if (drDot < -0.5) return "anti-downrange";
-            if (drDot > 0.5) return "downrange";
-            if (upDot > 0.7) return "radial-out";
-            if (upDot < -0.7) return "radial-in";
+            if (retroDot > LB_AXIS_RETRO_DOT) return "retrograde-brake";
+            if (drDot < -LB_AXIS_DOWNRANGE_DOT) return "anti-downrange";
+            if (drDot > LB_AXIS_DOWNRANGE_DOT) return "downrange";
+            if (upDot > LB_AXIS_RADIAL_DOT) return "radial-out";
+            if (upDot < -LB_AXIS_RADIAL_DOT) return "radial-in";
             return "lateral-mix";
         }
     }

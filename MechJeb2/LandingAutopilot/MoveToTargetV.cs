@@ -15,7 +15,7 @@ namespace MuMech
         /// saturated 3D accel, and the caller turns one acceleration vector into attitude+throttle.
         ///
         /// This replaces the unfinished VectorPID skeleton. The live AutopilotStep is still
-        /// MoveToTarget; the previous axis-independent controller is MoveToTargetAxisIndependent.
+        /// MoveToTarget (replaced the earlier axis-independent controller, now removed).
         /// </summary>
         public class LandingFramePID
         {

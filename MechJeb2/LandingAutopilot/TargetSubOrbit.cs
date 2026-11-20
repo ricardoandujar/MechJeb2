@@ -9,13 +9,65 @@ namespace MuMech
 {
     namespace Landing
     {
-        public class TargetSubOrbit : AutopilotStep
+        public class TargetSubOrbit : LandingStepBase
         {
             enum Step { STATE_INIT, STATE_LATERAL, STATE_PROGRADE, STATE_LATERAL_FINE, STATE_RETROGRADE, STATE_CORRECT, STATE_COAST_AP, STATE_TRIP_HOOP, STATE_TRIP_DESCEND };
             Step step = Step.STATE_INIT;
-            private const float H_CORRECTION_ANGLE_CONSTANT = 0.4f; // Used to determine horizontal correction angle 
-            private const double OVERSHOOT_ANGLE_FRACTION = 0.9; // Small margin to avoid losing vertical control
-            private const double LIMITED_MAX_THRUST_G_RATIO = 3.125; // this is multiplied with Mainbody g
+            // ---- Named tuning constants (coding standard: no magic numbers). Values unchanged. ----
+            private const int TSO_INITIAL_THROTTLE_ANGLE_DEG = 45; // throttle cone before OnStart sets THROTTLE_ANGLE_DEG
+            private const int TSO_AP_NEAR_TIME_S = 120; // Ap closer than this (s): no downward vertical correction allowed
+            private const double TSO_MIN_VERTICAL_ANGLE_AP_FAR = -0.25; // min vertical correction angle while Ap is still far away
+            private const double TGT_ALT_AGL_DIVISOR = 3.0; // low start: TgtAlt is capped to AGL / this to avoid overshooting
+            private const int PREDICTOR_MARKER_RADIUS = 10; // debug landing-marker radius
+            private const float TSO_MIN_VERROR = -0.1f; // lower clamp of the vertical-speed error
+            private const double TSO_MIN_GATE_DT_S = 5.0; // floor on time to the pad gate when computing gate vz
+            private const double TSO_GATE_VZ_MAX = 150.0; // |vz| cap (m/s) for the pad-gate vertical speed command
+            private const double TSO_PAD_PAST_MARGIN_M = 1000.0; // pad counts as behind / Ap as past once ~this far beyond it (m)
+            private const double TERRAIN_RAISE_MIN_SINK_MS = 5.0; // terrain TgtAlt raise only while sinking faster than this (m/s)
+            private const int TSO_RC_H_ONLY = 100; // setHorizontalSpeed return: horizontal-only thrust (no vertical correction)
+            private const int THROTTLE_COUNT_DONE = 4; // consecutive throttle-off ticks that end a shaping state
+            private const int TSO_CROSSRANGE_DONE_M = 500; // crossrange (m) below which LATERAL is done
+            private const int TSO_DIST_PAST_M = 1000; // deltaDistance (m) beyond which the pad is overshot
+            private const int TSO_DIST_NEAR_M = 2000; // deltaDistance band (m) for pro/retro selection
+            private const int TSO_FAR_LOW_ALT_MULT = 6; // deltaHeight below -this x DELTA_TARGET_ALT_THRESHOLD -> far too low
+            private const double TSO_PROGRADE_H_OVERDRIVE = 1.1; // PROGRADE aims at this x circular speed
+            private const double TSO_PE_SCALE_AP_FRAC = 0.5; // PROGRADE error fades as PeA approaches this x ApA
+            private const double TSO_PE_SCALE_BAND_FRAC = 0.01; // ... over a band of this x ApA
+            private const double TSO_PE_SCALE_TIME_S = 60.0; // hyperbolic: error fades over the last this many s to Pe
+            private const int TSO_PROGRADE_H_GAIN = 20; // PROGRADE horizontal error gain
+            private const double TSO_PE_DONE_TARGET_FRAC = 0.5; // PROGRADE done once PeA > this x TargetAltitude
+            private const double TSO_RETRO_H_TARGET_FRAC = 0.9; // RETROGRADE targets this x current horizontal orbital speed
+            private const double TSO_RETRO_MIN_MAG = 2000.0; // minimum RETROGRADE error magnitude
+            private const double TSO_H_NULL_EPS_MIN = 2.0; // horizontal-null tolerance floor (m/s)
+            private const double TSO_H_NULL_EPS_FRAC = 0.02; // ... or this fraction of circular speed
+            private const double TSO_BRAKE_CAP_DIST_FRAC = 0.5; // trip vTarget: brakeable within this fraction of the distance
+            private const double TSO_TRIP_FLOOR_TOL_M = 150.0; // trip cruise floor reached within this (m)
+            private const double TSO_HOOP_CLEAR_TOL_M = 1e-3; // hoop clearance comparison tolerance (m)
+            private const double TSO_HOOP_MIN_TAVAIL_S = 5.0; // hoop: need at least this much time before ignition
+            private const double TSO_DIGN_HANDOFF_FRAC = 0.97; // hand off slightly before the predicted ignition distance
+            private const double TSO_MIN_TGO_S = 5.0; // floor on trip time-to-go (s)
+            private const double TSO_TREM_MIN_S = 30.0; // floor on remaining time for lateral close-rate (s)
+            private const double TSO_TRIP_H_GAIN = 0.2; // trip cruise horizontal velocity gain (1/s)
+            private const double TSO_TRIP_SINK_INSIDE_DIGN = 5.0; // trip descent sink (m/s) once inside dIgn
+            private const double TSO_TRIP_PREDESCENT_SINK = 3.0; // trip pre-descent sink (m/s)
+            private const double TSO_TRIP_VZ_GAIN = 0.4; // trip vertical speed gain (1/s)
+            private const int TSO_ALIGNED_ANGLE_DEG = 5; // herror within this of along-track counts as aligned
+            private const int TSO_ANTI_ALIGNED_ANGLE_DEG = 175; // ... or within this of anti-aligned
+            private const double TSO_ALIGNED_H_GAIN = 0.5; // aligned case: PID error = -this x |herror|
+            private const double TSO_THRUST_MIN_FRAC = 0.05; // lateral thrust floor fraction
+            private const double TSO_THRUST_RAMP_FRAC = 0.95; // lateral thrust ramp share above the floor
+            private const float TSO_THRUST_RAMP_DIST_M = 15000.0f; // lateral thrust ramps to full over this distance (m)
+            private const float TSO_VERT_H_RAMP_M = 10000.0f; // horizontal error (m) for full horizontal thrust in vertical-angle mix
+            private const int TSO_VANGLE_DIV_MIN = 6; // vertical-angle divisor at full horizontal thrust
+            private const int TSO_VANGLE_DIV_H_EXTRA = 6; // extra divisor as horizontal thrust drops to 0
+            private const double TSO_MAX_VCORRECTION_ANGLE = 1.5; // max vertical correction angle
+            private const double TSO_VANGLE_KI_UP = 0.002; // vertical angle integral rate when verror > 0
+            private const double TSO_VANGLE_KI_DOWN = 0.0015; // vertical angle integral rate when verror <= 0
+            private const double TSO_VERT_H_SPLIT = 0.5; // below this horizontal thrust the vertical mix dominates
+            private const double TSO_PID_KP_SCALE = 0.5; // TSO velocity PID uses this x the shared Kp schedule
+            // TSO thrust cap = TSO_LIMITED_MAX_THRUST_G_SCALE * LIMITED_MAX_THRUST_G_RATIO (base 5.0) = 3.125 g,
+            // the value TSO has always used. Revisit later (MTT/LB use the full 5.0).
+            private const double TSO_LIMITED_MAX_THRUST_G_SCALE = 0.625;
             private const double TARGET_FAR_DISTANCE_THRESHOLD = 2.5*50000; // Distance to target at which to switch from prograde/retrograde burn to fine lateral control to target before final landing burn. This is used to avoid overshooting the target when doing a prograde or retrograde burn and allow for more precise targeting of the final landing burn.
             private const double TARGET_DISTANCE_THRESHOLD = 300; // Final Distance to target at which to switch to final landing burn.   
             private const double DELTA_TARGET_ALT_THRESHOLD = 600; // Threshold for switching between prograde and retrograde burn when close to target - if the target altitude is above the current altitude by this amount then we will do a prograde burn, if it's below then we will do a retrograde burn, if it's close then we will do a lateral burn to fine tune the approach to target before the final burn.
@@ -49,7 +101,7 @@ namespace MuMech
             private double vCorrectAngleAccum = 0.0; // Used to accumulate vertical correction angle for smoothing.
             private float lastHorizontalThrust = 0.0f;
             double baseGain; // Calibrated gain for horizontal angle and to correct movement that would diverge from target.
-            private double throttleAngle = 45; // <=30 (degrees) Throttle is only applied if pointing in direction of requested attitude
+            private double throttleAngle = TSO_INITIAL_THROTTLE_ANGLE_DEG; // <=30 (degrees) Throttle is only applied if pointing in direction of requested attitude
             private double ratio = 0; // Set once to check to see if we need to defer to landing burn
 
             private MechJebModuleLandingPredictions _predictor; //Landing prediction data:
@@ -96,7 +148,6 @@ namespace MuMech
             private double _tripVClear = double.NaN;
             private double _tripVTarget = double.NaN;
             private double _tripHoldAsl = double.NaN;
-            private double _lastTripLogUt = double.NegativeInfinity;
             private const double TRIP_PREDESCENT_M = 5000.0;  // start the -3 m/s pre-descent this far before dIgn
             private const double TRIP_HOLD_MAX_RAISE_M = 5000.0;
             private const double TRIP_DESCEND_TERRAIN_MARGIN_M = 1500.0; // Ricardo t294u: descent target floor above remaining ridge
@@ -128,8 +179,6 @@ namespace MuMech
             private const double TRIP_ARC_HANDOFF_VZ_MAX = 3.0; // Ricardo Nov 19 17:26 (was 1.0)   // wide-hoop sink rule relaxed: vz <= +1 (LB narrow guard)
             private const double TRIP_ARC_FORCE_DIGN = 6.0; // Ricardo Nov 19 17:26 (was 3.0)       // below 3x dIgn hand off on the other checks alone
             private const double TRIP_XR_VLAT_MAX = 40.0;         // lateral close-rate cap (m/s) for trip-cruise xr
-            private const double TRIP_CRUISE_MAX_G_MULT = 16.0;   // Ricardo Nov 18 19:42: max g-multiplier for trip-cruise (was 8.0)
-            private const double TRIP_CRUISE_MAX_MARGIN = 0.85;   // Ricardo Nov 18 19:42: margin for max accel for trip-cruise (was 0.7)
             private double _arcPredUt = double.NegativeInfinity, _arcLastUt = double.NaN, _arcLogUt = double.NegativeInfinity;
             private double _arcVzCmd = double.NaN;
             private bool _arcPredOk;
@@ -138,17 +187,17 @@ namespace MuMech
             private bool _tripXrOk;
             private double _tripXrUt = double.NaN, _tripXrM = double.NaN, _tripXrTIgn = double.NaN;
             private string _tripXrSrc = "ca";
+            private const double TRIP_WIDE_EVAL_INTERVAL_S = 1.0; // wide-hoop handoff evaluated at most once per second
             private double _lastTripWideEvalUt = double.NegativeInfinity;
             private double _tripTargetAsl = double.NaN;
             private double _tripRidgeAsl = double.NaN;
             private double _lastTripHoopEvalUt = double.NegativeInfinity;
-            private bool TripCruiseActive => _tripCruise && Core.Landing.TripSpeedOn;
+            private bool TripCruiseActive => _tripCruise && TripOn;
             private double _tripFloorUt = double.NegativeInfinity;
             private double _tripFloorAsl = 0.0;
             private double _tripFloorTryUt = double.NegativeInfinity;
 
             // Autotest / KSP.log 1 Hz guidance snapshot (no behavior change).
-            private double _lastGuidanceLogUt = double.NegativeInfinity;
             private Step _prevLoggedStep = Step.STATE_INIT;
             private Vector3d _lastHerror = Vector3d.zero;
             private Vector3d _lastDownrange = Vector3d.zero;
@@ -171,42 +220,40 @@ namespace MuMech
                 Core.Thrust.ThrustOff();
                 //radial = Core.Landing.RadialPercent / 100.0;
 
-                double tempFactor = 20.0; // 20<=10(baseline)<=100<=1000 Allow large angles - if angles are too small there will not be enough horizontal thrust
-                double baseGainLo = 0.03136 / (Core.Landing.g); // 0.03136<=0.1568 <= 0.196
-                double baseGainHi = 0.4704 / (Core.Landing.g); // 0.1568 <= 0.196
-                baseGain = Math.Max(baseGainLo, Math.Min(baseGainHi, baseGainLo + (baseGainHi - baseGainLo) * (Core.Landing.g - 0.05) / (2 - 0.05)));
+                double tempFactor = TEMP_FACTOR_AGGRESSIVE; // 20<=10(baseline)<=100<=1000 Allow large angles - if angles are too small there will not be enough horizontal thrust
+                baseGain = ComputeBaseGain(Core.Landing.g); // 0.03136<=0.1568 <= 0.196
 
                 // The steepness controls the ratio curvature - When horizontal distance to target is small we
                 // dont want to modify the desired vertical velocity.
                 // When horizontally far from target we want to maintain altitude, but slower allow vertical drop
                 // as approach target.
-                steepness = Mathf.Max(10.0f, Core.Landing.BASE_STEEPNESS * (float)Core.Landing.steepness);
+                steepness = Mathf.Max(MIN_STEEPNESS, Core.Landing.BASE_STEEPNESS * (float)Core.Landing.steepness);
                 // Ratio ranges
                 maxRatio = (float)Core.Landing.maxRatio; // Desired Vertical speed is zero at this or larger ratios 
                 minRatio = (float)Core.Landing.minRatio; // Desired Vertical speed is unmodified at this or smaller ratios
 
-                throttleAngle = 30.0; // Allow throttling if within 30 degrees - in final landing angle will be wider.
-                limitedMaxThrustAccel = Math.Min(VesselState.limitedMaxThrustAccel, tempFactor * LIMITED_MAX_THRUST_G_RATIO * Core.Landing.g);
+                throttleAngle = THROTTLE_ANGLE_DEG; // Allow throttling if within 30 degrees - in final landing angle will be wider.
+                limitedMaxThrustAccel = Math.Min(VesselState.limitedMaxThrustAccel, tempFactor * TSO_LIMITED_MAX_THRUST_G_SCALE * LIMITED_MAX_THRUST_G_RATIO * Core.Landing.g);
                 hFarCorrectionAngle = OVERSHOOT_ANGLE_FRACTION * Math.Sqrt(Math.Pow(limitedMaxThrustAccel, 2) - Math.Pow(Core.Landing.g, 2)) / Core.Landing.g;
                 actualLimitedMaxThrustAccel = VesselState.limitedMaxThrustAccel;
 
                 double timeToAp = VesselState.orbitTimeToAp;
                 if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
-                    && !double.IsNaN(timeToAp) && !double.IsInfinity(timeToAp) && timeToAp < 120)
+                    && !double.IsNaN(timeToAp) && !double.IsInfinity(timeToAp) && timeToAp < TSO_AP_NEAR_TIME_S)
                 {
                     minVerticalAngle = 0;
                 }
                 else
                 {
-                    minVerticalAngle = -0.25;
+                    minVerticalAngle = TSO_MIN_VERTICAL_ANGLE_AP_FAR;
                 }
 
                 // If the current altitude is low, then adjust this to 1/3 of the current altitude to avoid overshooting.
                 // Never crush below the gravity-scaled ComputeOptimal gate (094807: mountain start
                 // AGL~2 km set TgtAlt=665; +/-600 band then accepted ~50-600 m over pad - too tight for LB).
-                if (VesselState.altitudeTrue < 3 * Core.Landing.TgtAlt)
+                if (VesselState.altitudeTrue < TGT_ALT_AGL_DIVISOR * Core.Landing.TgtAlt)
                 {
-                    Core.Landing.TgtAlt = VesselState.altitudeTrue / 3.0;
+                    Core.Landing.TgtAlt = VesselState.altitudeTrue / TGT_ALT_AGL_DIVISOR;
                 }
                 Core.Landing.EnsureTgtAltMeetsLbOverheadFloor();
             }
@@ -284,7 +331,7 @@ namespace MuMech
                     Core.Thrust.ThrustOff();
                     Vector3d tgtPosGate = Core.Target.GetPositionTargetPosition();
                     bool gateNeedsPull = ApNeedsPullBack(tgtPosGate);
-                    if (TryPadOverflightGate(tgtPosGate, out double padDhCorrect, out _)
+                    if (TryPadOverflightGate(out double padDhCorrect, out _)
                         && padDhCorrect > DELTA_TARGET_ALT_THRESHOLD
                         && !gateNeedsPull && _apReachedForShape
                         && !TerrainHoopShaped())
@@ -364,7 +411,7 @@ namespace MuMech
                 Core.Landing.GetRangeVectorsToSurfaceTarget(Vessel, VesselState, targetPos, tUT, out Vector3d downrangeVec, out Vector3d crossrangeVec, out Vector3d horizontalVec);
                 double hTargetError = horizontalVec.magnitude;
 
-                _predictor.debug1MarkerRadius = 10; // GREEN
+                _predictor.debug1MarkerRadius = PREDICTOR_MARKER_RADIUS; // GREEN
                 _predictor.debug1Lat = MainBody.GetLatitude(closestPos);
                 _predictor.debug1Lon = MainBody.GetLongitude(closestPos);
                 closestPos = closestPos - MainBody.position; // Convert to body fixed frame for calculations
@@ -375,7 +422,7 @@ namespace MuMech
                 // A speed down would be an herror vector opposite in the direction of target.
                 float ratio = (float)(hTargetError / VesselState.altitudeTrue);
                 float maxverror = 2.0f;   // hysterisis in the negative direction.
-                float minverror = -0.1f;  // hysterisis in the positive direction.
+                float minverror = TSO_MIN_VERROR;  // hysterisis in the positive direction.
 
                 // Set the desired vertical speed - it can be overriden to achieve suborbital flight
                 setVerticalSpeed(ref desiredVerticalSpeed, ref ratio, ref minverror, ref maxverror);
@@ -401,9 +448,9 @@ namespace MuMech
                 {
                     double gateDh = deltaHeight;
                     double gateDt = (!double.IsNaN(tUT) && !double.IsInfinity(tUT))
-                        ? Math.Max(5.0, tUT - Planetarium.GetUniversalTime())
-                        : 5.0;
-                    if (TryPadOverflightGate(targetPos, out double padDh, out double padDt))
+                        ? Math.Max(TSO_MIN_GATE_DT_S, tUT - Planetarium.GetUniversalTime())
+                        : TSO_MIN_GATE_DT_S;
+                    if (TryPadOverflightGate(out double padDh, out double padDt))
                     {
                         gateDh = padDh;
                         gateDt = padDt;
@@ -411,7 +458,7 @@ namespace MuMech
                     if (!double.IsNaN(gateDh) && !double.IsInfinity(gateDh)
                         && !double.IsNaN(gateDt) && !double.IsInfinity(gateDt) && gateDt > 0)
                     {
-                        desiredVerticalSpeed = Math.Max(-150.0, Math.Min(150.0, gateDh / gateDt));
+                        desiredVerticalSpeed = Math.Max(-TSO_GATE_VZ_MAX, Math.Min(TSO_GATE_VZ_MAX, gateDh / gateDt));
                         // RETROGRADE pulls Ap back: do not command a climb that fights the dump.
                         if (step == Step.STATE_RETROGRADE)
                             desiredVerticalSpeed = Math.Min(0.0, desiredVerticalSpeed);
@@ -438,9 +485,8 @@ namespace MuMech
             public void setVerticalSpeed(ref double desiredVerticalSpeed, ref float ratio, ref float minverror, ref float maxverror)
             {
                 // Smooth Function to calculate desired vertical speed.
-                float fraction = (ratio >= maxRatio) ? 0.0f : Mathf.Max(0.0f, Mathf.Min(1.0f, (maxRatio - ratio) / (maxRatio - minRatio)));
                 if (Double.IsNaN(desiredVerticalSpeed)) return;
-                desiredVerticalSpeed = (fraction < 0.0001) ? 0 : -(float)Math.Abs(desiredVerticalSpeed) * ((Mathf.Pow(steepness, fraction) - 1.0f) / (steepness - 1.0f));
+                desiredVerticalSpeed = RatioCurveVz(desiredVerticalSpeed, ratio, maxRatio, minRatio, steepness);
                 if (Double.IsNaN(desiredVerticalSpeed)) return;
             }
 
@@ -450,7 +496,7 @@ namespace MuMech
             {
                 Vector3d a = Vector3d.Exclude(orbitNormal, from);
                 Vector3d b = Vector3d.Exclude(orbitNormal, to);
-                if (a.sqrMagnitude < 1e-12 || b.sqrMagnitude < 1e-12)
+                if (a.sqrMagnitude < VEC_SQR_EPS || b.sqrMagnitude < VEC_SQR_EPS)
                     return 0;
                 a.Normalize();
                 b.Normalize();
@@ -473,13 +519,13 @@ namespace MuMech
 
                 Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
                 Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
-                if (n.sqrMagnitude < 1e-6)
+                if (n.sqrMagnitude < DIR_SQR_EPS)
                     return false;
                 n.Normalize();
 
                 double angPad = SignedOrbitAngle(pos, targetPosBody, n);
                 // ~1 km along-track margin at body radius
-                double marginRad = 1000.0 / Math.Max(Vessel.mainBody.Radius, 1.0);
+                double marginRad = TSO_PAD_PAST_MARGIN_M / Math.Max(Vessel.mainBody.Radius, MIN_RADIUS_M);
 
                 // Inf Ap / hyperbola: no apoapsis to place before the pad - dump while pad ahead.
                 if (!MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit))
@@ -501,52 +547,24 @@ namespace MuMech
                 return angAp > angPad + marginRad;
             }
 
+            // Pad gates beyond this predicted time to overflight (s) are ignored (far-future pass).
+            private const double PAD_GATE_MAX_DT_S = 3600.0;
+
             /// <summary>
-            /// Coast height above the target radius at estimated pad overflight (TgtAlt gate)
-            /// and dt to that overflight. Used so pro/retro shape path over the pad, not at
-            /// ClosestPoint when ClosestPoint is far past dest.
+            /// Unpowered-coast height delta at pad overflight (gateDeltaHeight = TgtAlt - height over pad)
+            /// and time to it. Same algorithm as Core.Landing.TryPadOverflightDeltaHeight (used by LB and the
+            /// LB entry gate), so TSO calls it and only adds its own PAD_GATE_MAX_DT_S far-pass rejection.
+            /// False when the pad is behind, horizontal speed is too low, or no prediction is available.
             /// </summary>
-            private bool TryPadOverflightGate(Vector3d targetPosBody, out double gateDeltaHeight, out double gateDt)
+            private bool TryPadOverflightGate(out double gateDeltaHeight, out double gateDt)
             {
-                gateDeltaHeight = double.NaN;
-                gateDt = double.NaN;
-
-                if (!MechJebModuleLandingAutopilot.IsFiniteVec(targetPosBody))
+                if (!Core.Landing.TryPadOverflightDeltaHeight(out gateDeltaHeight, out gateDt) || gateDt > PAD_GATE_MAX_DT_S)
+                {
+                    gateDeltaHeight = double.NaN;
+                    gateDt = double.NaN;
                     return false;
-
-                Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
-                Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
-                if (n.sqrMagnitude < 1e-6)
-                    return false;
-                n.Normalize();
-
-                double r = pos.magnitude;
-                if (double.IsNaN(r) || r < 1.0)
-                    return false;
-
-                double hOrbSpeed = Vector3d.Exclude(VesselState.up, VesselState.orbitalVelocity).magnitude;
-                if (hOrbSpeed < 10.0)
-                    return false;
-
-                double angPad = SignedOrbitAngle(pos, targetPosBody, n);
-                double alongTrack = angPad * r; // signed meters along orbit
-                // Pad already behind / at: do not clamp a negative dt up to 5s (that
-                // would sample ahead of the vessel instead of the pad).
-                if (alongTrack <= 0.0)
-                    return false;
-                // One height-over-pad measure for state logic AND the LB hoop handoff:
-                // unpowered-coast height above pad terrain at the ClosestPoint ground-track
-                // point (= hoop predH). The old along-track/hSpeed time estimate disagreed with
-                // the handoff predH by ~4 km (20261109_025729: 7.8 vs 3.7 km), and ignored
-                // crossrange. Pad-behind / no-speed preconditions above are unchanged.
-                if (!Core.Landing.TryPredictedHeightOverPad(out double heightOverPad, out double predDt, out _))
-                    return false;
-                if (predDt > 3600.0)
-                    return false;
-
-                gateDeltaHeight = Core.Landing.TgtAlt - heightOverPad;
-                gateDt = Math.Max(5.0, predDt);
-                return !double.IsNaN(gateDeltaHeight) && !double.IsInfinity(gateDeltaHeight);
+                }
+                return true;
             }
 
             /// <summary>
@@ -560,7 +578,7 @@ namespace MuMech
 
                 Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
                 Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
-                if (n.sqrMagnitude < 1e-6)
+                if (n.sqrMagnitude < DIR_SQR_EPS)
                     return false;
                 n.Normalize();
 
@@ -572,7 +590,7 @@ namespace MuMech
                 double alongTrack = angPad * r;
                 if (double.IsNaN(alongTrack) || double.IsInfinity(alongTrack))
                     return false;
-                return alongTrack < -1000.0;
+                return alongTrack < -TSO_PAD_PAST_MARGIN_M;
             }
 
             /// <summary>
@@ -590,12 +608,12 @@ namespace MuMech
 
                 Vector3d pos = VesselState.CoM - Vessel.mainBody.position;
                 Vector3d n = Vector3d.Cross(pos, VesselState.orbitalVelocity);
-                if (n.sqrMagnitude < 1e-6)
+                if (n.sqrMagnitude < DIR_SQR_EPS)
                     return false;
                 n.Normalize();
 
                 double angPad = SignedOrbitAngle(pos, targetPosBody, n);
-                double marginRad = 1000.0 / Math.Max(Vessel.mainBody.Radius, 1.0);
+                double marginRad = TSO_PAD_PAST_MARGIN_M / Math.Max(Vessel.mainBody.Radius, MIN_RADIUS_M);
                 if (angPad <= marginRad)
                     return false;
 
@@ -654,7 +672,7 @@ namespace MuMech
                 // 101149: padDh already in band (-122) but frac noise 28.27 + apPast flicker
                 // armed DUMP RETRO and zeroed H at ~32 km. Once overflight is shaped,
                 // never pull on frac/ApPast noise — hand LB or coast; LB owns braking.
-                if (TryPadOverflightGate(targetPosBody, out double padDhShaped, out _))
+                if (TryPadOverflightGate(out double padDhShaped, out _))
                 {
                     TryApAlongTrackFraction(targetPosBody, out frac, out _);
                     if (Math.Abs(padDhShaped) <= DELTA_TARGET_ALT_THRESHOLD)
@@ -684,9 +702,8 @@ namespace MuMech
             private void LogApPullLatch(string action, double frac, bool haveFrac)
             {
                 double now = Planetarium.GetUniversalTime();
-                if (now - _lastApPullLatchLogUt < 1.0)
+                if (!RateLimit(ref _lastApPullLatchLogUt, now, DEFAULT_LOG_INTERVAL_S))
                     return;
-                _lastApPullLatchLogUt = now;
                 Debug.Log("TargetSubOrbit ApPullLatch " + action
                     + " frac=" + (haveFrac ? frac.ToString("F2") : "n/a")
                     + " streak=" + _apPullClearStreak);
@@ -736,7 +753,7 @@ namespace MuMech
                     && frac >= AP_HALFWAY_LO
                     && frac <= AP_HALFWAY_TARGET;
                 bool padBandOk = false;
-                if (TryPadOverflightGate(targetPosBody, out double padDhClear, out _))
+                if (TryPadOverflightGate(out double padDhClear, out _))
                     padBandOk = Math.Abs(padDhClear) <= DELTA_TARGET_ALT_THRESHOLD;
                 if (!pastDest && inClearBand) // 230322: padBandOk alone cleared on neg frac
                 {
@@ -775,7 +792,7 @@ namespace MuMech
                 frac = double.NaN;
                 bool haveFrac = TryApAlongTrackFraction(targetPosBody, out frac, out _);
                 // Gate already shaped: drop latch and do not dump (101149).
-                if (TryPadOverflightGate(targetPosBody, out double padDhDone, out _)
+                if (TryPadOverflightGate(out double padDhDone, out _)
                     && Math.Abs(padDhDone) <= DELTA_TARGET_ALT_THRESHOLD
                     && (Core.Landing.TgtAlt - padDhDone) >= Core.Landing.MinSafeLandingBurnOverheadM())
                 {
@@ -805,16 +822,15 @@ namespace MuMech
             private void LogApSeq(string msg)
             {
                 double now = Planetarium.GetUniversalTime();
-                if (now - _lastApSeqLogUt < 1.0)
+                if (!RateLimit(ref _lastApSeqLogUt, now, DEFAULT_LOG_INTERVAL_S))
                     return;
-                _lastApSeqLogUt = now;
                 Debug.Log("TargetSubOrbit ApSeq " + msg);
             }
 
             private void LogApPhase(string phase, string detail)
             {
                 double now = Planetarium.GetUniversalTime();
-                if (phase == _lastApPhaseLogged && now - _lastApPhaseLogUt < 1.0)
+                if (phase == _lastApPhaseLogged && now - _lastApPhaseLogUt < DEFAULT_LOG_INTERVAL_S)
                     return;
                 _lastApPhaseLogUt = now;
                 _lastApPhaseLogged = phase;
@@ -835,9 +851,8 @@ namespace MuMech
                 if (ApNeedsPullBack(tgt))
                     return;
                 double now = Planetarium.GetUniversalTime();
-                if (now - _lastTerrainRaiseUt < TERRAIN_RAISE_INTERVAL_S)
+                if (!RateLimit(ref _lastTerrainRaiseUt, now, TERRAIN_RAISE_INTERVAL_S))
                     return;
-                _lastTerrainRaiseUt = now;
                 double raised = Math.Min(
                     TERRAIN_RAISE_MAX_TGTALT_M,
                     Math.Max(Core.Landing.TerrainHoopFloorM, Core.Landing.TgtAlt) + TERRAIN_RAISE_STEP_M);
@@ -863,10 +878,10 @@ namespace MuMech
                 // vSpd~-78 / AGL~40 while pad still 87 km away. Local suicide always checked.
                 try
                 {
-                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M); // was literal 900
+                    (double deltaV, bool willCrash) = Core.Landing.PredictAvoidCollisionDeltaV(CA_LOOKAHEAD_S, SUBORBIT_PATH_MIN_ALTITUDE_M); // was literal 900
                     if ((willCrash || deltaV > 0)
                         && VesselState.altitudeTrue < CA_LOCAL_AGL_M
-                        && VesselState.speedVertical < -5.0)
+                        && VesselState.speedVertical < -TERRAIN_RAISE_MIN_SINK_MS)
                     {
                         Debug.Log("[TSO->MTT] infeasible: local collision while "
                             + step + " AGL=" + VesselState.altitudeTrue.ToString("F0")
@@ -914,7 +929,7 @@ namespace MuMech
                 // 094807: CA ratcheted TgtAlt 665->20661 while AGL~2 km, leaving padDh=+10 km
                 // permanently out of LB band. Stop bumping once pad already demands a big climb.
                 // Exception: still raise while TgtAlt is below the LB overhead floor.
-                if (TryPadOverflightGate(targetPosBody, out double padDhCap, out _)
+                if (TryPadOverflightGate(out double padDhCap, out _)
                     && padDhCap > CA_PADDH_BUMP_CAP_M
                     && Core.Landing.TgtAlt >= Core.Landing.MinSafeLandingBurnOverheadM())
                 {
@@ -1139,7 +1154,7 @@ namespace MuMech
                 double now = Planetarium.GetUniversalTime();
                 Vector3d targetPos = Core.Target.GetPositionTargetPosition();
                 double padDh = double.NaN, padDt = double.NaN;
-                bool havePad = TryPadOverflightGate(targetPos, out padDh, out padDt);
+                bool havePad = TryPadOverflightGate(out padDh, out padDt);
                 double frac = double.NaN;
                 bool haveFrac = TryApAlongTrackFraction(targetPos, out frac, out _);
                 bool apPast = ApoapsisPastDestination(targetPos);
@@ -1169,12 +1184,10 @@ namespace MuMech
                     AutotestHandoff = "";
                 }
 
-                if (now - _lastGuidanceLogUt < 1.0)
+                if (!GuidanceLogDue(now))
                     return;
-                _lastGuidanceLogUt = now;
 
-                double dist = double.NaN;
-                try { dist = Core.Landing.getHDistanceToTarget(); } catch { dist = distanceToTarget; }
+                double dist = HDistanceToTargetOr(distanceToTarget);
 
                 Debug.Log("[TSO-1Hz] step=" + step
                     + " padDh=" + (havePad ? padDh.ToString("F0") : "n/a")
@@ -1191,6 +1204,12 @@ namespace MuMech
                     + (string.IsNullOrEmpty(handoff) ? "" : (" handoff=" + handoff)));
             }
 
+            // Burn-axis log label thresholds (dot products of the unit thrust direction).
+            private const double TSO_AXIS_RADIAL_DOT = 0.85;     // |up . dir| above this -> radial
+            private const double TSO_AXIS_DOWNRANGE_DOT = 0.5;   // |downrange . dirH| above this -> prograde/retro-ish
+            private const double LATERAL_SIDE_ANGLE_DEG = 90;    // herror more than this from normal+ -> normal-
+
+            /// <summary>Short label of the current burn axis for the [TSO-1Hz] log and autotest CSV.</summary>
             private string DescribeBurnAxis(Vector3d thrustDir, Vector3d herror, Vector3d downrange)
             {
                 if (step == Step.STATE_PROGRADE) return "prograde";
@@ -1202,21 +1221,16 @@ namespace MuMech
                 if (step == Step.STATE_LATERAL_FINE)
                 {
                     double angN = Vector3d.Angle(VesselState.normalPlus, herror == Vector3d.zero ? VesselState.normalPlus : herror);
-                    return angN > 90 ? "lateral-normalMinus" : "lateral-normalPlus";
+                    return angN > LATERAL_SIDE_ANGLE_DEG ? "lateral-normalMinus" : "lateral-normalPlus";
                 }
                 if (step == Step.STATE_LATERAL)
                     return "lateral-crossrange";
 
-                Vector3d t = thrustDir.sqrMagnitude > 1e-12 ? thrustDir.normalized : Vector3d.zero;
-                if (t == Vector3d.zero) return "none";
-                double upDot = Vector3d.Dot(t, VesselState.up);
-                Vector3d th = Vector3d.Exclude(VesselState.up, t);
-                double drDot = 0;
-                if (downrange.sqrMagnitude > 1e-12 && th.sqrMagnitude > 1e-12)
-                    drDot = Vector3d.Dot(th.normalized, downrange.normalized);
-                if (Math.Abs(upDot) > 0.85) return upDot > 0 ? "radial-out" : "radial-in";
-                if (drDot > 0.5) return "prograde-ish";
-                if (drDot < -0.5) return "retrograde-ish";
+                if (!ThrustAxisComponents(thrustDir, VesselState.up, downrange, out _, out double upDot, out double drDot))
+                    return "none";
+                if (Math.Abs(upDot) > TSO_AXIS_RADIAL_DOT) return upDot > 0 ? "radial-out" : "radial-in";
+                if (drDot > TSO_AXIS_DOWNRANGE_DOT) return "prograde-ish";
+                if (drDot < -TSO_AXIS_DOWNRANGE_DOT) return "retrograde-ish";
                 return "lateral-ish";
             }
 
@@ -1253,7 +1267,7 @@ namespace MuMech
                                 + " -> LATERAL re-samples");
                         desiredHorizontalVel = Vector3d.zero;
                         herror =  gainCancelHVelocity * crossrangeVec; // Add Cross range to horizontal error
-                        rc = 100; // we only want horizontal thrust here
+                        rc = TSO_RC_H_ONLY; // we only want horizontal thrust here
                         break;
                     // deltaHeight   = -10190 - means vessel travels 10.2km above target altitude at closest approach
                     // deltaDistance =  -1633 - means vessel's closest approach is in front of the target by 1.6km (negative means in front of target, positive means behind target)
@@ -1262,7 +1276,7 @@ namespace MuMech
                         forceHoriz = true; // Force horizontal thrust
                         desiredHorizontalVel = Vector3d.zero;
                         herror =  gainCancelHVelocity * crossrangeVec; // Add Cross range to horizontal error
-                        if ((throttleCount >= 4)||(crossrangeVec.magnitude < 500))
+                        if ((throttleCount >= THROTTLE_COUNT_DONE)||(crossrangeVec.magnitude < TSO_CROSSRANGE_DONE_M))
                         {
                             LateralCount = throttleCount;
                             throttleCount = 0;
@@ -1276,28 +1290,28 @@ namespace MuMech
                                 step = Step.STATE_RETROGRADE;
                             else if (hyperbolic && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD))
                                 step = Step.STATE_RETROGRADE;
-                            else if (hyperbolic && (VesselState.speedVertical > 1) && (deltaDistance < -1000))
+                            else if (hyperbolic && (VesselState.speedVertical > 1) && (deltaDistance < -TSO_DIST_PAST_M))
                                 step = Step.STATE_RETROGRADE;
                             else if (ApNeedsPullBack(targetPos))
                                 step = Step.STATE_RETROGRADE; // Ap past / frac>~0.5: pull back
                             else if (_terrainBlockedAtInit)
                                 step = Step.STATE_PROGRADE;   // terrain blocks coast: RETRO only shortens/lowers it
-                            else if (TryPadOverflightGate(targetPos, out double padDhLat, out _)
+                            else if (TryPadOverflightGate(out double padDhLat, out _)
                                      && padDhLat < -DELTA_TARGET_ALT_THRESHOLD)
                                 step = Step.STATE_RETROGRADE; // overflight too high
-                            else if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -2000))
+                            else if ((deltaHeight < -DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance > -TSO_DIST_NEAR_M))
                                 step = Step.STATE_RETROGRADE;
-                            else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < 2000))
+                            else if ((deltaHeight > DELTA_TARGET_ALT_THRESHOLD) && (deltaDistance < TSO_DIST_NEAR_M))
                                 step = Step.STATE_PROGRADE;
-                            else if (deltaDistance < -1000 )
+                            else if (deltaDistance < -TSO_DIST_PAST_M )
                                 step = Step.STATE_PROGRADE;
-                            else if (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD*6)
+                            else if (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD*TSO_FAR_LOW_ALT_MULT)
                                 step = Step.STATE_RETROGRADE;
                             else
                                 step = Step.STATE_PROGRADE;
                         }
                         Debug.Log(" lateral deltaHeight:" + deltaHeight.ToString("F1") + "  deltaDistance" + deltaDistance.ToString("F1"));
-                        rc = 100; // we only want horizontal thrust here
+                        rc = TSO_RC_H_ONLY; // we only want horizontal thrust here
                         break;
                     case Step.STATE_PROGRADE: // Burn prograde in the direction of the target until close
                         {
@@ -1307,7 +1321,7 @@ namespace MuMech
                             double hOrbitalVelocity = Vector3d.Exclude(VesselState.up, VesselState.orbitalVelocity).magnitude; // Get current horizontal orbital velocity
                             double desiredHorizontal = Core.Landing.GetCircularOrbitSpeed(Core.vessel.altitude, Core.vessel.mainBody);
                             desiredHorizontalVel = desiredHorizontal * downrangeVec.normalized;
-                            herror = 1.1 * desiredHorizontalVel - hOrbitalVelocity * Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity).normalized;
+                            herror = TSO_PROGRADE_H_OVERDRIVE * desiredHorizontalVel - hOrbitalVelocity * Vector3d.Exclude(VesselState.up, VesselState.surfaceVelocity).normalized;
 
                             // Reduce the error as we approach periapsis to avoid over correction.
                             // (0.5*ApA - PeA)/(0.01*ApA) is Inf/Inf = NaN on hyperbola and NaN'd herror.
@@ -1315,7 +1329,7 @@ namespace MuMech
                             if (MechJebModuleLandingAutopilot.ApoapsisIsFinite(Vessel.orbit)
                                 && Math.Abs(VesselState.orbitApA) > 1)
                             {
-                                peScale = Mathf.Clamp01((float)((0.5 * VesselState.orbitApA - VesselState.orbitPeA) / (0.01 * VesselState.orbitApA)));
+                                peScale = Mathf.Clamp01((float)((TSO_PE_SCALE_AP_FRAC * VesselState.orbitApA - VesselState.orbitPeA) / (TSO_PE_SCALE_BAND_FRAC * VesselState.orbitApA)));
                             }
                             else
                             {
@@ -1323,9 +1337,9 @@ namespace MuMech
                                 if (double.IsNaN(tPe) || double.IsInfinity(tPe) || tPe <= 0)
                                     peScale = 0;
                                 else
-                                    peScale = Mathf.Clamp01((float)(tPe / 60.0));
+                                    peScale = Mathf.Clamp01((float)(tPe / TSO_PE_SCALE_TIME_S));
                             }
-                            herror = 20 * herror * peScale;
+                            herror = TSO_PROGRADE_H_GAIN * herror * peScale;
 
                             Debug.Log(" prograde deltaHeight:" + deltaHeight.ToString("F0") + "  distance:" + distanceToTarget.ToString("F0") + "  deltaDistance" + deltaDistance.ToString("F1"));
 
@@ -1348,7 +1362,7 @@ namespace MuMech
                             {
                                 // Keep PROGRADE until halfway band ├óΓé¼ΓÇ¥ do not LATERAL_FINE mid-place.
                             }
-                            else if (Core.Landing.TripSpeedOn && _apReachedForShape && !_tripCruise
+                            else if (TripOn && _apReachedForShape && !_tripCruise
                                      && TripFloorReached() && TryStartTripCruise("trip floor reached"))
                             {
                                 // k > 1 only (Ricardo t257u): at the trip floor the powered level cruise starts
@@ -1358,7 +1372,7 @@ namespace MuMech
                             else if (_apReachedForShape && TerrainHoopShaped()
                                      && TerrainClearWithExitMargin())
                             {
-                                if (Core.Landing.TripSpeedOn && TryStartTripCruise("terrain-hoop path clear"))
+                                if (TripOn && TryStartTripCruise("terrain-hoop path clear"))
                                 {
                                     // k > 1: TryStartTripCruise enters STATE_TRIP_HOOP; TripCruiseCommand owns the burn.
                                 }
@@ -1372,16 +1386,16 @@ namespace MuMech
                                 step = Step.STATE_LATERAL_FINE;
                                 }
                             }
-                            else if (_apReachedForShape && ((throttleCount >= 4) || (Orbit.PeA > 0.5 * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD))))
+                            else if (_apReachedForShape && ((throttleCount >= THROTTLE_COUNT_DONE) || (Orbit.PeA > TSO_PE_DONE_TARGET_FRAC * Core.Landing.TargetAltitude) || ((distanceToTarget < TARGET_FAR_DISTANCE_THRESHOLD) && (deltaHeight < -DELTA_TARGET_ALT_THRESHOLD))))
                             {
                                 // 091142: ClosestPoint deltaHeight was high while padDh still
                                 // +11 km (TgtAlt CA-bumped). Do not leave PROGRADE for FINE
                                 // until pad overflight is no longer too low.
-                                bool padStillTooLow = TryPadOverflightGate(targetPos, out double padDhPg, out _)
+                                bool padStillTooLow = TryPadOverflightGate(out double padDhPg, out _)
                                     && padDhPg > DELTA_TARGET_ALT_THRESHOLD;
                                 if (!padStillTooLow)
                                 {
-                                    if (Core.Landing.TripSpeedOn && TryStartTripCruise("prograde done"))
+                                    if (TripOn && TryStartTripCruise("prograde done"))
                                     {
                                         // k > 1: TryStartTripCruise enters STATE_TRIP_HOOP; TripCruiseCommand owns the burn.
                                     }
@@ -1405,7 +1419,7 @@ namespace MuMech
                             forceHoriz = true;
 
                             double hOrbitalVelocity = Vector3d.Exclude(VesselState.up, VesselState.orbitalVelocity).magnitude; // Get current horizontal orbital velocity
-                            double desiredHorizontal = 0.9*hOrbitalVelocity;
+                            double desiredHorizontal = TSO_RETRO_H_TARGET_FRAC*hOrbitalVelocity;
                             desiredHorizontalVel = desiredHorizontal * downrangeVec.normalized;
 
                             // Burn retrograde until height at closest position is close to target altitude, but only if it's crosses at a higher altitude.
@@ -1419,7 +1433,7 @@ namespace MuMech
                             // prograde once height crossed, which left Ap past the pad.
                             double retroMag = Math.Abs(deltaHeight);
                             if (needsPull)
-                                retroMag = Math.Max(retroMag, 2000.0);
+                                retroMag = Math.Max(retroMag, TSO_RETRO_MIN_MAG);
                             else if (retroMag < 1.0)
                                 retroMag = 1.0;
 
@@ -1428,7 +1442,7 @@ namespace MuMech
                             double towardPad = Vector3d.Dot(hVelSurf, downrangeVec.normalized);
                             double circH = Core.Landing.GetCircularOrbitSpeed(
                                 Math.Max(0.0, VesselState.altitudeASL), MainBody);
-                            double hNullEps = Math.Max(2.0, 0.02 * Math.Max(1.0, circH));
+                            double hNullEps = Math.Max(TSO_H_NULL_EPS_MIN, TSO_H_NULL_EPS_FRAC * Math.Max(1.0, circH));
                             bool hNearNeeded = towardPad <= hNullEps;
                             if (towardPad <= 0)
                             {
@@ -1439,7 +1453,7 @@ namespace MuMech
                             {
                                 herror = -retroMag * downrangeVec.normalized;
                             }
-                            rc = 100; // we only want horizontal thrust here
+                            rc = TSO_RC_H_ONLY; // we only want horizontal thrust here
 
                             // Exit on pad-overflight height gate when pad still ahead.
                             // Band around TgtAlt (|padDh| <= 600): low side required so
@@ -1448,7 +1462,7 @@ namespace MuMech
                             bool heightOk;
                             bool tooLow = false;
                             double padDhExit = double.NaN;
-                            if (TryPadOverflightGate(targetPos, out padDhExit, out _))
+                            if (TryPadOverflightGate(out padDhExit, out _))
                             {
                                 // Band: TgtAlt-600 <= heightOverPad <= TgtAlt+600 (|padDh| <= 600).
                                 heightOk = Math.Abs(padDhExit) <= DELTA_TARGET_ALT_THRESHOLD;
@@ -1547,7 +1561,7 @@ namespace MuMech
                                 throttleCount = 0;
                                 step = Step.STATE_PROGRADE;
                             }
-                            else if (!_establishingAp && !_apPullLatch && ((throttleCount >= 4) || heightOk))
+                            else if (!_establishingAp && !_apPullLatch && ((throttleCount >= THROTTLE_COUNT_DONE) || heightOk))
                             {
                                 RetrogradeCount = throttleCount;
                                 throttleCount = 0;
@@ -1580,7 +1594,7 @@ namespace MuMech
                             desiredHorizontalVel = Vector3d.zero;
 
                             herror = calculateHerror(ref closestPos, ref targetPos, ref distanceToTarget, ref surfaceVel);
-                            herror = (Vector3d.Angle(VesselState.normalPlus, herror) > 90) ? -VesselState.normalPlus : VesselState.normalPlus;
+                            herror = (Vector3d.Angle(VesselState.normalPlus, herror) > LATERAL_SIDE_ANGLE_DEG) ? -VesselState.normalPlus : VesselState.normalPlus;
                             MechJebModuleDebugArrows.debugVector2 = herror;
                             Debug.Log("Lateral Fine HError Mag:" + distanceToTarget.ToString("F0"));
 
@@ -1610,13 +1624,13 @@ namespace MuMech
                                 }
                                 step = Step.STATE_RETROGRADE;
                             }
-                            else if ((throttleCount >= 4) || (distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero) )
+                            else if ((throttleCount >= THROTTLE_COUNT_DONE) || (distanceToTarget < TARGET_DISTANCE_THRESHOLD) || (herror == Vector3d.zero) )
                             {
                                 LateralFineCount = throttleCount;
                                 throttleCount = 0;
                                 step = Step.STATE_CORRECT;
                             }
-                            rc = 100; // we only want horizontal thrust here
+                            rc = TSO_RC_H_ONLY; // we only want horizontal thrust here
                         }
                         break;
                 }
@@ -1626,37 +1640,19 @@ namespace MuMech
 
             // ================= Trip-speed lever (k > 1 only) =================
 
-            private void LogTrip(string msg, bool force = false)
-            {
-                double now = Planetarium.GetUniversalTime();
-                if (!force && now - _lastTripLogUt < 1.0)
-                    return;
-                if (!force)
-                    _lastTripLogUt = now; // forced gate lines (own 1 s eval timer) don't starve the cruise line
-                Debug.Log("[TripSpeed] " + msg);
-            }
 
-            /// LandingBurn ignition distance on LB's own budget (LandingBurn.ComputeBrakeBudget /
-            /// ShouldStartBurn d_horiz; same formula as LA CoastBelowLbFloorBeforeIgnition).
+            /// <summary>
+            /// Predicted LandingBurn ignition distance (m) for horizontal speed vH, so TSO can hand off
+            /// where LB would light. Uses LB's own d_horiz: PlanBrakeAccel scaled by the horizontal
+            /// share of a retrograde burn along the current surface velocity, BRAKE_STOP_MARGIN_H, and
+            /// the LB distance floor. Revisit later: TSO previously used the full aPlan (no cos share).
+            /// </summary>
             private double TripIgnitionDistance(double vH)
             {
-                double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
-                double g = Math.Max(VesselState.localg, 0.05);
-                double aPlan = Math.Min(TRIP_CRUISE_MAX_G_MULT * g, TRIP_CRUISE_MAX_MARGIN * aMax);
-                aPlan = Math.Max(aPlan, g + 0.05);
-                aPlan = Math.Min(aPlan, aMax);
-                double bm = Core.Landing.BurnMarginPerc / 100.0;
+                RetroBrakeShares(VesselState.surfaceVelocity, VesselState.up, out _, out double cosTheta);
+                double ax = PlanBrakeAccel() * cosTheta;
                 return Math.Max(MechJebModuleLandingAutopilot.LANDING_BURN_AGL_FLOOR_M,
-                    (1.0 + bm) * vH * vH / (2.0 * aPlan));
-            }
-
-            private double TripPlanAccel()
-            {
-                double aMax = Math.Max(VesselState.limitedMaxThrustAccel, 0.1);
-                double g = Math.Max(VesselState.localg, 0.05);
-                double aPlan = Math.Min(TRIP_CRUISE_MAX_G_MULT * g, TRIP_CRUISE_MAX_MARGIN * aMax);
-                aPlan = Math.Max(aPlan, g + 0.05);
-                return Math.Min(aPlan, aMax);
+                    BrakeStopDistance(vH, ax, BRAKE_STOP_MARGIN_H));
             }
 
             /// <summary>
@@ -1667,11 +1663,11 @@ namespace MuMech
             /// </summary>
             private bool TryStartTripCruise(string why)
             {
-                if (!Core.Landing.TripSpeedOn || _tripCruise)
+                if (!TripOn || _tripCruise)
                     return false;
                 try
                 {
-                    double k = Core.Landing.TripSpeedK;
+                    double k = TripK;
                     double vClear = VesselState.speedSurfaceHorizontal;
                     double asl = VesselState.altitudeASL;
                     // Ricardo t257u: hold = trip cruise floor max(ridge ahead + 2.5 km, pad + 4.2 km),
@@ -1690,9 +1686,9 @@ namespace MuMech
                         return false;
                     }
                     double dist = Core.Landing.getHDistanceToTarget();
-                    double bm = Core.Landing.BurnMarginPerc / 100.0;
+                    double bm = Core.Landing.BurnMarginPerc / PERCENT;
                     // LB braking cap: ignition distance at vTarget within half of the remaining distance.
-                    double vBrakeCap = Math.Sqrt(2.0 * TripPlanAccel() * 0.5 * Math.Max(dist, 0.0) / (1.0 + bm));
+                    double vBrakeCap = Math.Sqrt(2.0 * PlanBrakeAccel() * TSO_BRAKE_CAP_DIST_FRAC * Math.Max(dist, 0.0) / (1.0 + bm));
                     // Speed reference: surface circular speed at the hold height (was vClear).
                     double vRef = TripSurfaceCircularSpeed(hold);
                     double vTarget = Math.Min(k * vRef, vBrakeCap);
@@ -1701,7 +1697,7 @@ namespace MuMech
                         LogTrip("TSO cruise skip (" + why + "): vTarget " + vTarget.ToString("F1") + " vClear " + vClear.ToString("F1"), true);
                         return false;
                     }
-                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
+                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(CA_LOOKAHEAD_S, SUBORBIT_PATH_MIN_ALTITUDE_M);
                     if (caCrash || caDv > 0)
                     {
                         LogTrip("TSO cruise skip (" + why + "): CA not quiet dV=" + caDv.ToString("F0"), true);
@@ -1737,15 +1733,10 @@ namespace MuMech
             /// </summary>
             private double TripSurfaceCircularSpeed(double holdAsl)
             {
-                Vector3d up = VesselState.up;
-                Vector3d posBody = VesselState.CoM - MainBody.position;
-                double r = Math.Max(posBody.magnitude, 1.0);
-                double rHold = Math.Max(MainBody.Radius + holdAsl, 1.0);
+                double r = Math.Max(VesselPosBody.magnitude, MIN_RADIUS_M);
+                double rHold = Math.Max(MainBody.Radius + holdAsl, MIN_RADIUS_M);
                 double vCirc = Math.Sqrt(MainBody.gravParameter / rHold);
-                Vector3d tgtBody = Core.Target.GetPositionTargetPosition(); // body-relative
-                Vector3d toPad = Vector3d.Exclude(up, tgtBody - posBody);
-                Vector3d vRot = Vector3d.Exclude(up, VesselState.orbitalVelocity - VesselState.surfaceVelocity);
-                double along = (toPad.sqrMagnitude > 1.0) ? Vector3d.Dot(vRot, toPad.normalized) : 0.0;
+                double along = SurfaceRotationAlong(HorizontalToPad());
                 return vCirc - along * rHold / r;
             }
 
@@ -1755,7 +1746,7 @@ namespace MuMech
             /// </summary>
             private bool TripFloorReached()
             {
-                if (!Core.Landing.TripSpeedOn)
+                if (!TripOn)
                     return false;
                 double now = Planetarium.GetUniversalTime();
                 if (now - _tripFloorTryUt < 1.0)
@@ -1768,7 +1759,7 @@ namespace MuMech
                 }
                 if (!(_tripFloorAsl > 0))
                     return false;
-                if (VesselState.altitudeASL < _tripFloorAsl - 150.0)
+                if (VesselState.altitudeASL < _tripFloorAsl - TSO_TRIP_FLOOR_TOL_M)
                     return false;
                 _tripFloorTryUt = now;
                 return true;
@@ -1829,8 +1820,8 @@ namespace MuMech
                     + " step=" + (step == Step.STATE_TRIP_DESCEND ? "descend" : "hoop"), true);
                 if (step != Step.STATE_TRIP_HOOP)
                     return;
-                if (remClear >= TRIP_HOOP_CLEARANCE_M - 1e-3
-                    && tAvail > 5.0
+                if (remClear >= TRIP_HOOP_CLEARANCE_M - TSO_HOOP_CLEAR_TOL_M
+                    && tAvail > TSO_HOOP_MIN_TAVAIL_S
                     && vNeed <= TRIP_DESCEND_VZ_MAX)
                 {
                     step = Step.STATE_TRIP_DESCEND;
@@ -1888,7 +1879,7 @@ namespace MuMech
                     double vH = Math.Max(VesselState.speedSurfaceHorizontal, 1.0);
                     double dIgn = TripIgnitionDistance(vH);
                     double dist = Core.Landing.getHDistanceToTarget();
-                    tAvail = (dist - 0.97 * dIgn) / vH;
+                    tAvail = (dist - TSO_DIGN_HANDOFF_FRAC * dIgn) / vH;
                     double drop = asl - targetAsl;
                     vNeed = (tAvail > 0.0 && drop > 0.0) ? drop / tAvail : 0.0;
                     why = "ok";
@@ -1918,9 +1909,9 @@ namespace MuMech
                     double r = posBody.magnitude;
                     double asl = VesselState.altitudeASL;
                     double vz = VesselState.speedVertical;
-                    double g = Math.Max(VesselState.localg, 0.05);
+                    double g = Math.Max(VesselState.localg, MIN_LOCAL_G);
 
-                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
+                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(CA_LOOKAHEAD_S, SUBORBIT_PATH_MIN_ALTITUDE_M);
                     // Ricardo t257u: powered cruise abort = obstacle clearance 1200 m AGL (was 900 + 1.1 * LB floor = 4200,
                     // the pad-relative LB margin applied as AGL). Only runs at k > 1.
                     double coastNeed = MechJebModuleLandingAutopilot.TRIP_CRUISE_ABORT_AGL_M;
@@ -1939,16 +1930,14 @@ namespace MuMech
 
                     UpdateTripHoopState();
 
-                    Vector3d tgtBody = Core.Target.GetPositionTargetPosition(); // body-relative
-                    Vector3d toPad = Vector3d.Exclude(up, tgtBody - posBody);
-                    Vector3d dir = (toPad.sqrMagnitude > 1.0) ? toPad.normalized
-                        : Vector3d.Exclude(up, VesselState.surfaceVelocity).normalized;
-                    Vector3d vHs = Vector3d.Exclude(up, VesselState.surfaceVelocity);
+                    Vector3d toPad = HorizontalToPad();
+                    Vector3d vHs = HorizontalSurfaceVelocity;
+                    Vector3d dir = (toPad.sqrMagnitude > MIN_PAD_DIR_SQR_M2) ? toPad.normalized : vHs.normalized;
                     double vH = vHs.magnitude;
                     double dist = Core.Landing.getHDistanceToTarget();
                     double dIgn = TripIgnitionDistance(vH);
 
-                    double aCap = Math.Min(Math.Max(VesselState.limitedMaxThrustAccel, 1e-3), TRIP_CRUISE_MAX_G_MULT * g);
+                    double aCap = Math.Min(Math.Max(VesselState.limitedMaxThrustAccel, THRUST_ACCEL_TINY), TRIP_CRUISE_MAX_G_MULT * g);
 
                     // Cross-range: close predicted miss in the aH velocity target, not a separate
                     // normal accel (that fought the 0.1/s lateral damper). xr > 0 is +normalPlus;
@@ -1959,7 +1948,7 @@ namespace MuMech
                     double tRem = double.NaN;
                     string xrSrc = "n/a";
                     Vector3d nHat = Vector3d.Exclude(up, VesselState.normalPlus);
-                    if (nHat.sqrMagnitude > 1e-12)
+                    if (nHat.sqrMagnitude > VEC_SQR_EPS)
                         nHat = nHat.normalized;
                     else
                         nHat = Vector3d.zero;
@@ -1971,14 +1960,14 @@ namespace MuMech
                             tRem = tIgn;
                         else
                             tRem = dist / Math.Max(vH, 1.0);
-                        tRem = Math.Max(tRem, 30.0);
+                        tRem = Math.Max(tRem, TSO_TREM_MIN_S);
                         if (nHat.sqrMagnitude > 0)
                             vLat = Vector3d.Dot(vHs, nHat) + (Math.Abs(xrM) > xrDeadbandM ? Math.Max(-TRIP_XR_VLAT_MAX, Math.Min(TRIP_XR_VLAT_MAX, -xrM / tRem)) : 0.0); // xr is predicted miss at current v: correct by a delta-v, not an absolute target
                     }
 
                     // Lateral is owned by xr: strip the pad-bearing's sideways part so it can't cancel vLat.
-                    Vector3d dirA = (!double.IsNaN(tRem) && nHat.sqrMagnitude > 0 && Vector3d.Exclude(nHat, dir).sqrMagnitude > 1e-6) ? Vector3d.Exclude(nHat, dir).normalized : dir;
-                    Vector3d aH = 0.2 * (_tripVTarget * dirA + vLat * nHat - vHs);
+                    Vector3d dirA = (!double.IsNaN(tRem) && nHat.sqrMagnitude > 0 && Vector3d.Exclude(nHat, dir).sqrMagnitude > DIR_SQR_EPS) ? Vector3d.Exclude(nHat, dir).normalized : dir;
+                    Vector3d aH = TSO_TRIP_H_GAIN * (_tripVTarget * dirA + vLat * nHat - vHs);
                     if (aH.magnitude > TRIP_CRUISE_MAX_MARGIN * aCap)
                         aH *= TRIP_CRUISE_MAX_MARGIN * aCap / aH.magnitude;
 
@@ -1992,7 +1981,7 @@ namespace MuMech
                     else if (step == Step.STATE_TRIP_DESCEND && !double.IsNaN(_tripTargetAsl) && _tripTargetAsl > 0)
                     {
                         _arcVzCmd = double.NaN;
-                        double tGo = Math.Max((dist - 0.97 * dIgn) / Math.Max(vH, 1.0), 5.0);
+                        double tGo = Math.Max((dist - TSO_DIGN_HANDOFF_FRAC * dIgn) / Math.Max(vH, 1.0), TSO_MIN_TGO_S);
                         vzCmd = (_tripTargetAsl - asl) / tGo;
                         if (vzCmd < -TRIP_DESCEND_VZ_MAX) vzCmd = -TRIP_DESCEND_VZ_MAX;
                         if (vzCmd > TRIP_DESCEND_VZ_MAX) vzCmd = TRIP_DESCEND_VZ_MAX;
@@ -2000,22 +1989,21 @@ namespace MuMech
                     else
                     {
                         // STATE_TRIP_HOOP and default hold: keep _tripHoldAsl
-                        vzCmd = Math.Max(-5.0, Math.Min(5.0, (_tripHoldAsl - asl) / 30.0));
+                        vzCmd = AltitudeHoldVz(_tripHoldAsl - asl);
                     }
                     if (dist <= dIgn + TRIP_PREDESCENT_M)
-                        vzCmd = Math.Min(vzCmd, (dist <= dIgn) ? -5.0 : -3.0);
+                        vzCmd = Math.Min(vzCmd, (dist <= dIgn) ? -TSO_TRIP_SINK_INSIDE_DIGN : -TSO_TRIP_PREDESCENT_SINK);
                     double vOrbH = Vector3d.Exclude(up, VesselState.orbitalVelocity).magnitude;
                     double gEff = VesselState.localg - vOrbH * vOrbH / Math.Max(r, 1.0);
-                    double aV = gEff + 0.4 * (vzCmd - vz);
+                    double aV = gEff + TSO_TRIP_VZ_GAIN * (vzCmd - vz);
 
                     Vector3d a = aH + aV * up;
                     if (a.magnitude > aCap)
                         a *= aCap / a.magnitude;
-                    desiredThrustVector = (a.sqrMagnitude > 1e-12) ? a.normalized : up;
+                    desiredThrustVector = (a.sqrMagnitude > VEC_SQR_EPS) ? a.normalized : up;
 
-                    double aMaxCap = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
-                    double thrCap = Math.Max(0.03, Math.Min(1.0, TRIP_CRUISE_MAX_G_MULT * g / aMaxCap));
-                    double thr = a.magnitude / Math.Max(VesselState.maxThrustAccel, 1e-6);
+                    double thrCap = GMultThrottleCap(TRIP_CRUISE_MAX_G_MULT, g);
+                    double thr = a.magnitude / Math.Max(VesselState.maxThrustAccel, TINY_DIVISOR);
                     if (thr > thrCap) thr = thrCap;
                     lastHorizontalThrust = (float)thr;
                     forceHoriz = false;
@@ -2025,7 +2013,7 @@ namespace MuMech
 
                     string tripMode = (step == Step.STATE_TRIP_DESCEND) ? "descend"
                         : (step == Step.STATE_TRIP_HOOP) ? "hoop" : "cruise";
-                    Status = "Trip " + tripMode + " k=" + Core.Landing.TripSpeedK.ToString("F2")
+                    Status = "Trip " + tripMode + " k=" + TripK.ToString("F2")
                         + " vH " + vH.ToString("F0") + "/" + _tripVTarget.ToString("F0")
                         + " hold " + _tripHoldAsl.ToString("F0");
                     LogTrip("TSO " + tripMode + " vH=" + vH.ToString("F1") + " vT=" + _tripVTarget.ToString("F1")
@@ -2153,9 +2141,8 @@ namespace MuMech
                 if (dist > lim)
                     return false;
                 double now = Planetarium.GetUniversalTime();
-                if (now - _lastTripWideEvalUt < 1.0)
+                if (!RateLimit(ref _lastTripWideEvalUt, now, TRIP_WIDE_EVAL_INTERVAL_S))
                     return false;
-                _lastTripWideEvalUt = now;
 
                 double asl = VesselState.altitudeASL;
                 double vz = VesselState.speedVertical;
@@ -2177,7 +2164,7 @@ namespace MuMech
                 // Nov 14 12:31: sink rule relaxed to vz <= +1 (arc push may level off at the bottom target; LB's narrow
                 // climb guard distance-ignites a fast climbing coast).
                 bool sinking = vz <= TRIP_ARC_HANDOFF_VZ_MAX;
-                (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
+                (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(CA_LOOKAHEAD_S, SUBORBIT_PATH_MIN_ALTITUDE_M);
                 bool caQuiet = !caCrash && caDv <= 0;
                 double minAglFar = double.NaN, minAglNear = double.NaN, vyIgn = double.NaN, tIgn = double.NaN, ignAsl = double.NaN;
                 double bottomAgl = double.NaN, bottomDist = double.NaN;
@@ -2305,11 +2292,11 @@ namespace MuMech
                     double dist = Core.Landing.getHDistanceToTarget();
                     double vH = VesselState.speedSurfaceHorizontal;
                     double dIgn = TripIgnitionDistance(vH);
-                    if (dist > 0.97 * dIgn)
+                    if (dist > TSO_DIGN_HANDOFF_FRAC * dIgn)
                     {
                         if (TryTripWideHoop(dist, vH, dIgn, out string hoopWhy))
                         {
-                            reason = "trip-hoop k=" + Core.Landing.TripSpeedK.ToString("F2") + " " + hoopWhy;
+                            reason = "trip-hoop k=" + TripK.ToString("F2") + " " + hoopWhy;
                             LogTrip("TSO->LB " + reason, true);
                             return true;
                         }
@@ -2322,13 +2309,13 @@ namespace MuMech
                         LogTrip("TSO->LB wait " + reason + " dist=" + dist.ToString("F0") + " dIgn=" + dIgn.ToString("F0"));
                         return false;
                     }
-                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(15, SUBORBIT_PATH_MIN_ALTITUDE_M);
+                    (double caDv, bool caCrash) = Core.Landing.PredictAvoidCollisionDeltaV(CA_LOOKAHEAD_S, SUBORBIT_PATH_MIN_ALTITUDE_M);
                     if (caCrash || caDv > 0)
                     {
                         reason = "trip-local-terrain dV=" + caDv.ToString("F0");
                         return false;
                     }
-                    reason = "trip-cruise k=" + Core.Landing.TripSpeedK.ToString("F2")
+                    reason = "trip-cruise k=" + TripK.ToString("F2")
                         + " vH=" + vH.ToString("F1") + " dist=" + dist.ToString("F0")
                         + " dIgn=" + dIgn.ToString("F0") + " vz=" + VesselState.speedVertical.ToString("F2")
                         + " AGL=" + VesselState.altitudeTrue.ToString("F0");
@@ -2364,14 +2351,14 @@ namespace MuMech
                 {
                     double thrust; // set by pidVelocity.
                     double angle = Vector3d.Angle(VesselState.forward, herror);
-                    thrust = pidVelocity(0.0, ((angle <= 5) || (angle >= 175)) ? -0.5 * herror.magnitude : 0); // Correct horizontal velocity.
+                    thrust = pidVelocity(0.0, ((angle <= TSO_ALIGNED_ANGLE_DEG) || (angle >= TSO_ANTI_ALIGNED_ANGLE_DEG)) ? -TSO_ALIGNED_H_GAIN * herror.magnitude : 0); // Correct horizontal velocity.
                     if (step == Step.STATE_LATERAL_FINE)
                     {
-                        thrust *= 0.05 + 0.95 * Mathf.Clamp01((float)distanceToTarget / 15000.0f);
+                        thrust *= TSO_THRUST_MIN_FRAC + TSO_THRUST_RAMP_FRAC * Mathf.Clamp01((float)distanceToTarget / TSO_THRUST_RAMP_DIST_M);
                     }
                     else if (step == Step.STATE_LATERAL)
                     {
-                        thrust *= 0.05 + 0.95 * Mathf.Clamp01((float)herror.magnitude / ((float)baseGain*15000.0f));
+                        thrust *= TSO_THRUST_MIN_FRAC + TSO_THRUST_RAMP_FRAC * Mathf.Clamp01((float)herror.magnitude / ((float)baseGain*TSO_THRUST_RAMP_DIST_M));
                     }
                     else
                     {
@@ -2382,16 +2369,7 @@ namespace MuMech
                     // Cap the vessel Request, not only lastHorizontalThrust: debug11/g
                     // (craft debug11=0.01 on Vesta => throttleDiv~0.04) undoes a pre-div
                     // cap (204916: lastH=0.07 but CSV thr=1 wiped H 98->0 in ~3s).
-                    double aMaxCap = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
-                    double gCap = Math.Max(0.05, Core.Landing.g);
-                    double thrCap = Math.Max(0.03, Math.Min(1.0, TRIP_CRUISE_MAX_G_MULT * gCap / aMaxCap));
-                    if (thrust > thrCap) thrust = thrCap;
-                    lastHorizontalThrust = (float)thrust;
-                    double throttleDiv = Core.Landing.debug11 / Core.Landing.g;
-                    if (double.IsNaN(throttleDiv) || throttleDiv < 1e-6) throttleDiv = 1e-6;
-                    float reqThr = lastHorizontalThrust / (float)throttleDiv;
-                    if (reqThr > thrCap) reqThr = (float)thrCap;
-                    Core.Thrust.RequestActiveThrottle(reqThr);
+                    thrust = RequestCappedTripThrottle(thrust);
                 }
 
                 // Vertical Control - we want to blend it based on the horizontal error and vertical error. When herror is large we use max thrust and primarily control
@@ -2400,18 +2378,18 @@ namespace MuMech
                 // but as we get closer and the herror reduces then we can use more thrust to correct vertical velocity and reduce the time to target.
                 else
                 {
-                    double horizontalThrust = Mathf.Clamp01((float)herror.magnitude/10000.0f); 
+                    double horizontalThrust = Mathf.Clamp01((float)herror.magnitude/TSO_VERT_H_RAMP_M); 
                     double verticalThrust;   // set by pidVelocity.
-                    double vanglediv = (6 + 6*(1.0-horizontalThrust)); // 3500/1.5 <= 3500/0.5 <= 4000/0.5 (slow on earth)
+                    double vanglediv = (TSO_VANGLE_DIV_MIN + TSO_VANGLE_DIV_H_EXTRA*(1.0-horizontalThrust)); // 3500/1.5 <= 3500/0.5 <= 4000/0.5 (slow on earth)
 
                     // Calculate vertical correction angle - this is used to reduce the track the desired vertical speed when horizontal error is large to avoid overshooting the target horizontally.
                     // When horizontal error is small then the vertical correction angle can be more responsive to correct vertical velocity and reduce time to target.
-                    vCorrectAngleAccum = Math.Max(minVerticalAngle, Math.Min(1.5, vCorrectAngleAccum + ((verror>0)?0.002:0.0015) * verror / vanglediv));
-                    vCorrectionAngle = Math.Max(minVerticalAngle, Math.Min(1.5, 1 * verror / vanglediv + vCorrectAngleAccum));
+                    vCorrectAngleAccum = Math.Max(minVerticalAngle, Math.Min(TSO_MAX_VCORRECTION_ANGLE, vCorrectAngleAccum + ((verror>0)?TSO_VANGLE_KI_UP:TSO_VANGLE_KI_DOWN) * verror / vanglediv));
+                    vCorrectionAngle = Math.Max(minVerticalAngle, Math.Min(TSO_MAX_VCORRECTION_ANGLE, 1 * verror / vanglediv + vCorrectAngleAccum));
                     Debug.Log("vCorrectionAngle:" + vCorrectionAngle.ToString("F4") + "," + vCorrectAngleAccum.ToString("F4"));
 
                     // Use the thrust calculated from the vertical speed when the horizontal thrust is less than 50%
-                    if (horizontalThrust < 0.5)
+                    if (horizontalThrust < TSO_VERT_H_SPLIT)
                     {
                         // Use local PI control - more damped and works over wide range of parameters
                         if (vCorrectionAngle >= 0)
@@ -2434,28 +2412,39 @@ namespace MuMech
                     // H 26->103 and circularized (alt~Ap~43km); LB then had t_go~300s /
                     // a_cmd~0.2 and timed out at 1.4km still 32km AGL. Cap matches LATERAL.
                     {
-                        double aMaxCapR = Math.Max(1e-3, VesselState.limitedMaxThrustAccel);
-                        double gCapR = Math.Max(0.05, Core.Landing.g);
-                        double thrCapR = Math.Max(0.03, Math.Min(1.0, TRIP_CRUISE_MAX_G_MULT * gCapR / aMaxCapR));
-                        if (verticalThrust > thrCapR) verticalThrust = thrCapR;
-                        lastHorizontalThrust = (float)verticalThrust;
-                        double throttleDivR = Core.Landing.debug11 / Core.Landing.g;
-                        if (double.IsNaN(throttleDivR) || throttleDivR < 1e-6) throttleDivR = 1e-6;
-                        float reqThrR = lastHorizontalThrust / (float)throttleDivR;
-                        if (reqThrR > thrCapR) reqThrR = (float)thrCapR;
-                        Core.Thrust.RequestActiveThrottle(reqThrR);
+                        verticalThrust = RequestCappedTripThrottle(verticalThrust);
                     }
                 }
 
                 return vCorrectionAngle;
             }
 
+            /// <summary>
+            /// Caps a TSO burn throttle at the TRIP_CRUISE_MAX_G_MULT g-cap, stores it in lastHorizontalThrust
+            /// and requests it divided by the craft throttle divisor debug11/g, re-capped after the division so
+            /// the divisor cannot undo the cap. Shared by the LATERAL and PROGRADE/RETRO belt burns.
+            /// Returns the capped throttle.
+            /// </summary>
+            private double RequestCappedTripThrottle(double thr)
+            {
+                double gCap = Math.Max(MIN_LOCAL_G, Core.Landing.g);
+                double thrCap = GMultThrottleCap(TRIP_CRUISE_MAX_G_MULT, gCap);
+                if (thr > thrCap) thr = thrCap;
+                lastHorizontalThrust = (float)thr;
+                double throttleDiv = Core.Landing.debug11 / Core.Landing.g;
+                if (double.IsNaN(throttleDiv) || throttleDiv < TINY_DIVISOR) throttleDiv = TINY_DIVISOR;
+                float reqThr = lastHorizontalThrust / (float)throttleDiv;
+                if (reqThr > thrCap) reqThr = (float)thrCap;
+                Core.Thrust.RequestActiveThrottle(reqThr);
+                return thr;
+            }
+
             public double pidVelocity(double desiredSpeed, double currentSpeed, bool down = false)
             {
                 const double PID_ACCUM_MAX = 60;// 50; // 50<=30 <= 20
                 // Increase PI Gains in higher gravity worlds - to track desired vertical speed
-                double PID_KP = 0.5 * Math.Max(20, Math.Min(50, 20 + (50 - 20) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 50(highg);// 40; // 40<=30 <= 20
-                double PID_KI = Math.Max(0.05, Math.Min(0.17, 0.05 + (0.17 - 0.05) * (Core.Landing.g - 0.05) / (2 - 0.05)));// 0.05(lowg) 0.175(highg);// 0.35;// 0.25;// 0.15;// 0.2;// 0.1;
+                double PID_KP = TSO_PID_KP_SCALE * ScheduledKp(Core.Landing.g);// 50(highg);// 40; // 40<=30 <= 20
+                double PID_KI = ScheduledKi(Core.Landing.g);// 0.05(lowg) 0.175(highg);// 0.35;// 0.25;// 0.15;// 0.2;// 0.1;
                 double verror = (desiredSpeed - currentSpeed);
                 double _limitedMaxThrustAccel = actualLimitedMaxThrustAccel;
 
