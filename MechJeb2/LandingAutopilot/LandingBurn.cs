@@ -32,9 +32,9 @@ namespace MuMech.LandingAutopilot
         private const double LB_MOVER_ACCEL_FRAC = 0.95;
         // Floor of the ZEM/ZEV gain_scale (gain_scale = clamp(LB_GAIN_SCALE_TGO_S / t_go, this, 1)).
         // Why: long t_go early in the burn would otherwise shrink the guidance gains toward zero and
-        // let the miss grow; this keeps at least 70% gain. Distinct from TRIP_CRUISE_MAX_MARGIN (a thrust
-        // budget fraction) so tuning one does not change the other. Original value 0.7.
-        private const double LB_GAIN_SCALE_FLOOR = 0.7;
+        // let the miss grow; this keeps at least 85% gain. Distinct from TRIP_CRUISE_MAX_MARGIN (a thrust
+        // budget fraction) so tuning one does not change the other. 0.85 is the flown/proven value (was 0.7).
+        private const double LB_GAIN_SCALE_FLOOR = 0.85;
         // ---- Named tuning constants (coding standard: no magic numbers). Values unchanged. ----
         private const double LB_LATERAL_GAIN_INIT = 0.4; // lateral correction gain during the burn
         private const double LB_LATERAL_GAIN_FINAL = 0.1; // lateral gain once close/low (alt < LB_FINAL_ALT_M or offset reached)
