@@ -344,6 +344,21 @@ namespace MuMech
             return true;
         }
 
+        /// <summary>
+        /// Moves current toward target by at most maxStep (maxStep &lt;= 0 holds current) and returns the
+        /// result; returns target exactly once it is within maxStep, so callers can test for arrival with ==.
+        /// Shared slew / rate limiter for commanded set-points that must not step (e.g. MoveToTarget's
+        /// LandingBurn handoff vertical-speed ramp).
+        /// </summary>
+        protected static double SlewToward(double current, double target, double maxStep)
+        {
+            double step = Math.Max(0.0, maxStep);
+            double delta = target - current;
+            if (Math.Abs(delta) <= step)
+                return target;
+            return current + Math.Sign(delta) * step;
+        }
+
         private double _lastTripLogUt = double.NegativeInfinity;
 
         /// <summary>Interval (s) between non-forced [TripSpeed] lines; a step may override it.</summary>

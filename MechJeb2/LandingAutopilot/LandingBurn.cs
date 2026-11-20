@@ -109,7 +109,9 @@ namespace MuMech.LandingAutopilot
             {
                 if (true == UpdateGuidanceAndControl(s))
                 {
-                    return new MoveToTarget(Core);
+                    // Tell MTT it follows a powered LandingBurn so it ramps the vertical-speed target from the
+                    // measured vz instead of stepping to its ratio-curve value (MoveToTarget.ApplyHandoffVzRamp).
+                    return new MoveToTarget(Core) { EnteredFromLandingBurn = true };
                 }
                 return this;
             }

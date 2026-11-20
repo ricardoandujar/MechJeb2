@@ -1308,6 +1308,8 @@ velocityPID.AntiWindup(rawAccel, accel);
 
                 // Set the desired vertical speed - it can be overriden to achieve suborbital flight
                 setVerticalSpeed(ref desiredVerticalSpeed, ref hTargetError, ref ratio, ref minverror, ref maxverror);
+                // LandingBurn handoff: ramp (not step) to the shaper's vz. Before vError and before the collision-path add below.
+                ApplyHandoffVzRamp(ref desiredVerticalSpeed);
                 double vError = desiredVerticalSpeed - VesselState.speedVertical;
 
                 // Set the desired Horizontal Velocity to reach target. Error to subtract the vessels current horizontal velocity.
@@ -1823,6 +1825,63 @@ velocityPID.AntiWindup(rawAccel, accel);
 
                 // Calculate horizontal correction angle using horizontal herror.
                 return Math.Max(0, Math.Min(_hCorrectionUpAngle, baseGain * H_CORRECTION_ANGLE_CONSTANT * herror.magnitude));
+            }
+
+            // ---- LandingBurn -> MoveToTarget handoff vertical-speed ramp ----
+            // Why: LandingBurn hands off while still braking gently (042142: vz -7.6 m/s, throttle 0.03), but the
+            // first MTT tick set the RatioCurveVz target (-3.3 m/s) as a step. The vertical PID answered with a
+            // saturated 0.85-throttle burst (~0.2 s), overshot to vz -2.05, then commanded ~-20 m/s^2 (low-g
+            // pitch-over allowed), flipping the attitude target ~150 deg toward the ground and back. The burst's
+            // tilted component also kicked |a|=6.8 m/s^2 horizontally, so the MinSnap latch was delayed ~1 s.
+            // How: on the first move() tick after a LandingBurn handoff, seed the ramp from the measured vz and slew
+            // desiredVerticalSpeed toward the shaper value at no more than PlanBrakeAccel() (m/s per s). That is the
+            // brake budget LandingBurn itself was flying with, so the vertical deceleration continues at the rate LB
+            // planned instead of jumping to full thrust. Once the ramp reaches the shaper value it is off for the
+            // rest of the step. Other entries (TSO, recovery, restart) leave EnteredFromLandingBurn false: unchanged.
+
+            /// <summary>
+            /// Set by LandingBurn when it hands off to this step (default false). Enables the one-shot vertical-speed
+            /// ramp in ApplyHandoffVzRamp; any other creator of MoveToTarget leaves it false and behaviour is unchanged.
+            /// </summary>
+            public bool EnteredFromLandingBurn { get; set; }
+
+            private enum HandoffVzRampState { Unseeded, Ramping, Done }
+            private HandoffVzRampState _handoffVzRamp = HandoffVzRampState.Unseeded;
+            private double _handoffVzCmd;      // m/s, current ramped vertical-speed command
+            private double _handoffVzLastUt;   // UT of the last ramp update (UT delta = dt, valid at any call rate)
+            private double _handoffVzSeedUt;   // UT the ramp was seeded (for the 'done' log)
+
+            /// <summary>
+            /// One-shot LandingBurn handoff ramp on desiredVerticalSpeed (see the section comment above). No-op unless
+            /// EnteredFromLandingBurn and not yet Done. First call seeds from VesselState.speedVertical and returns it
+            /// (zero vertical error on the handoff tick); later calls slew by PlanBrakeAccel() * dt toward the shaper
+            /// value passed in, and mark Done (logging once) when it is reached.
+            /// </summary>
+            private void ApplyHandoffVzRamp(ref double desiredVerticalSpeed)
+            {
+                if (!EnteredFromLandingBurn || _handoffVzRamp == HandoffVzRampState.Done || double.IsNaN(desiredVerticalSpeed))
+                    return;
+                double now = VesselState.time;
+                double rate = PlanBrakeAccel(); // m/s^2: LandingBurn's own brake budget (see section comment)
+                if (_handoffVzRamp == HandoffVzRampState.Unseeded)
+                {
+                    _handoffVzCmd = VesselState.speedVertical;
+                    _handoffVzLastUt = now;
+                    _handoffVzSeedUt = now;
+                    _handoffVzRamp = HandoffVzRampState.Ramping;
+                    Debug.Log("[HandoffVz] seed vz=" + _handoffVzCmd.ToString("F2") + " shaper=" + desiredVerticalSpeed.ToString("F2")
+                        + " rate=" + rate.ToString("F2"));
+                }
+                double dt = Math.Max(0.0, now - _handoffVzLastUt);
+                _handoffVzLastUt = now;
+                _handoffVzCmd = SlewToward(_handoffVzCmd, desiredVerticalSpeed, rate * dt);
+                if (_handoffVzCmd == desiredVerticalSpeed)
+                {
+                    _handoffVzRamp = HandoffVzRampState.Done;
+                    Debug.Log("[HandoffVz] done t=" + (now - _handoffVzSeedUt).ToString("F2") + " vz=" + desiredVerticalSpeed.ToString("F2"));
+                    return;
+                }
+                desiredVerticalSpeed = _handoffVzCmd;
             }
 
             // ---- Minimum-snap final horizontal approach (MinSnapProfile; settings on Core.Landing) ----
