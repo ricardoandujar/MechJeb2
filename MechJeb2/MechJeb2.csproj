@@ -73,6 +73,7 @@
     <Compile Include="LandingAutopilot\LowDeorbitBurn.cs" />
     <Compile Include="LandingAutopilot\MoveToTarget.cs" />
     <Compile Include="LandingAutopilot\LandingStepBase.cs" />
+    <Compile Include="LandingAutopilot\MinSnapProfile.cs" />
     <Compile Include="LandingAutopilot\MoveToTargetV.cs" />
     <Compile Include="LandingAutopilot\PlaneChange.cs" />
     <Compile Include="LandingAutopilot\TargetSubOrbit.cs" />

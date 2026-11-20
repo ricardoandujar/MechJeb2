@@ -169,6 +169,41 @@ namespace MuMech
         // so 1.0 runs the pre-lever code path. Clamped to [TRIP_SPEED_MIN, TRIP_SPEED_MAX].
         [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
         public EditableDouble TripSpeedFactor = 1.0;
+
+        // Minimum-snap final horizontal approach (Ricardo, Nov 20 2026). Within FinalApproachActivationDistance of
+        // the pad, MoveToTarget replaces its near-pad horizontal speed law with a time-indexed 7th-order
+        // minimum-snap plan (MinSnapProfile) that reaches the pad with speed, accel and jerk zero and never
+        // reverses, re-planned at MinSnapReplanHz (one 2D vector plan, sole horizontal authority). MinSnapEnabled = false restores the legacy law. Programmable per
+        // craft type / globally like the other landing settings (cfg only). Vertical control is unchanged.
+        public const double FINAL_APPROACH_DEFAULT_ACTIVATION_M = 100.0; // horizontal distance to pad that latches the plan
+        public const double FINAL_APPROACH_DEFAULT_JERK_LIMIT = 0.1;     // m/s^3, from the Nov 19 workbook (BG26)
+        public const double MINSNAP_DEFAULT_SNAP_LIMIT = 0.1;            // m/s^4, bounded by the vessel's turn rate
+        public const double MINSNAP_DEFAULT_REPLAN_HZ = 1.0;             // Hz, re-plans from the measured state
+        public const double MINSNAP_DEFAULT_MAX_ACCEL = 1.0;             // m/s^2 horizontal cap (also capped by tilt thrust)
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public bool MinSnapEnabled = true;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble FinalApproachActivationDistance = FINAL_APPROACH_DEFAULT_ACTIVATION_M;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble FinalApproachJerkLimit = FINAL_APPROACH_DEFAULT_JERK_LIMIT;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble MinSnapSnapLimit = MINSNAP_DEFAULT_SNAP_LIMIT;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble MinSnapReplanHz = MINSNAP_DEFAULT_REPLAN_HZ;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble MinSnapMaxAccel = MINSNAP_DEFAULT_MAX_ACCEL;
+
+        // MinSnap command law (Nov 20 2026, sole horizontal authority inside the window):
+        //   v_cmd = v_plan + a_plan * MinSnapLeadTime + MinSnapPositionGain * (r_plan - r_meas)
+        // and the horizontal accel is (v_cmd - v_meas) / MinSnapLeadTime, so the lead time is also the velocity-loop
+        // time constant: on-plan the command equals a_plan (lead cancels the ~1 s attitude lag seen in 20261120_031755).
+        // The position gain pulls the craft back onto the plan and, after T, holds it over the pad.
+        public const double MINSNAP_DEFAULT_LEAD_S = 1.0;          // s, velocity lead / loop time constant
+        public const double MINSNAP_DEFAULT_POSITION_GAIN = 0.3;   // 1/s, plan position error -> velocity
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble MinSnapLeadTime = MINSNAP_DEFAULT_LEAD_S;
+        [Persistent(pass = (int)(Pass.LOCAL | Pass.TYPE | Pass.GLOBAL))]
+        public EditableDouble MinSnapPositionGain = MINSNAP_DEFAULT_POSITION_GAIN;
         public const double TRIP_SPEED_MIN = 1.0;
         public const double TRIP_SPEED_MAX = 1.6;
 

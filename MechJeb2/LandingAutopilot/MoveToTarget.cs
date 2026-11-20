@@ -830,7 +830,8 @@ namespace MuMech
                 Vector3d towardTarget = Vector3d.Exclude(up, Core.Landing.targetingResult.horizontalVec);
                 bool usedTowardTarget = (desiredHorizontalVel.sqrMagnitude < DESIRED_H_VEL_SQR_MIN) && (towardTarget.sqrMagnitude > VEC_SQR_EPS);
                 double eHProbe = Vector3d.Dot(desiredHorizontalVel - hSurface, hDir);
-                if (Math.Abs(eHProbe) < Core.Landing.debug3h)
+                // MinSnap owns horizontal: no frame freeze while it is active (sole-authority rule).
+                if (!_minSnapActive && Math.Abs(eHProbe) < Core.Landing.debug3h)
                 {
                     if (usedTowardTarget)
                     {
@@ -906,6 +907,13 @@ namespace MuMech
                 if (Core.Landing.g > Core.Landing.LOW_GRAVITY && desiredVerticalSpeed > 0 && eV < 0)
                     eV *= HIGH_G_CLIMB_EV_SCALE;
 
+                // MinSnap owns horizontal: hold the H/L PID errors at 0 so their integrals do not wind while bypassed.
+                if (_minSnapActive)
+                {
+                    eH = 0;
+                    eL = 0;
+                }
+
                 Vector3d error = new Vector3d(eH, eV, eL);
                 double dt = Time.fixedDeltaTime;
                 if (dt < TINY_DIVISOR) dt = DEFAULT_FIXED_DT_S;
@@ -960,6 +968,14 @@ namespace MuMech
                 aH = Math.Max(-aLimit, Math.Min(aLimit, aH));
                 aL = Math.Max(-aLimit, Math.Min(aLimit, aL));
 
+                // MinSnap: its horizontal accel replaces the |eH|-scheduled H PID and the lateral axis. hDir, latDir and up
+                // are orthonormal, so aH*hDir + aL*latDir rebuilds _minSnapAccelCmd exactly (it is horizontal).
+                if (_minSnapActive)
+                {
+                    aH = Vector3d.Dot(_minSnapAccelCmd, hDir);
+                    aL = Vector3d.Dot(_minSnapAccelCmd, latDir);
+                }
+
                 // A 200-1500 m terrain hop puts desiredVerticalSpeed > 0 (ASCENDING), so
                 // the debug93 upright cone is off and the 100 m initial-ascent H-zero
                 // does not apply. hopBlend 1 zeros H/L; as remaining V drops through
@@ -988,7 +1004,9 @@ namespace MuMech
                 // vertical. Blends with the setHorizontalSpeed settle (0.2..0.80 m). Tiny
                 // residual authority allows pad micro-adjustments without lean overcompensation.
                 double settleAuthority = 1.0;
-                if (hTargetError <= FINAL_SETTLE_M)
+                if (_minSnapActive)
+                    settleAuthority = 1.0; // MinSnap carries to touchdown: no settle fade
+                else if (hTargetError <= FINAL_SETTLE_M)
                     settleAuthority = SETTLE_AUTHORITY_MIN;
                 else if (hTargetError < NEAR_PAD_AGGRESSIVE_M)
                     settleAuthority = SETTLE_AUTHORITY_MIN + SETTLE_AUTHORITY_RAMP * (hTargetError - FINAL_SETTLE_M) / (NEAR_PAD_AGGRESSIVE_M - FINAL_SETTLE_M);
@@ -1004,7 +1022,7 @@ namespace MuMech
                 // debug96 == 0 must not freeze aHAvg/aLAvg at 0 after a frame reset (that looked
                 // like dead H/L knobs). Treat a near-zero blend as "no smoothing".
                 double blend = Core.Landing.debug96;
-                if (blend < SPAN_EPS)
+                if (blend < SPAN_EPS || _minSnapActive) // MinSnap: its command is already smooth; no extra lag
                 {
                     aHAvg = aH;
                     aLAvg = aL;
@@ -1114,7 +1132,8 @@ namespace MuMech
                     double maxHoriz = Core.Landing.debug93 * Math.Abs(vCmd);
                     // Tighten cone toward vertical in the same settle band as setHorizontalSpeed.
                     // At <=200 mm maxHoriz -> 0 (no lean); blend out by 0.80 m.
-                    if (hTargetError < NEAR_PAD_AGGRESSIVE_M)
+                    // MinSnap keeps the full debug93 cone (tilt safety limit) but not the 0.80 m fade to vertical.
+                    if (!_minSnapActive && hTargetError < NEAR_PAD_AGGRESSIVE_M)
                     {
                         double coneScale = (hTargetError <= FINAL_SETTLE_M) ? 0.0
                             : (hTargetError - FINAL_SETTLE_M) / (NEAR_PAD_AGGRESSIVE_M - FINAL_SETTLE_M);
@@ -1135,7 +1154,8 @@ namespace MuMech
                 // ZEM/ZEV residual ~0.7 m/s meander. Tilt limit is the debug93 cone above.
 
                 // Initial ascent: vertical only until 100 m.
-                if ((desiredVerticalSpeed > 0) && (VesselState.altitudeTrue <= NEAR_GROUND_AGL_M))
+                // Not while MinSnap owns horizontal (sole-authority rule; this strip is a liftoff aid, not a safety limit).
+                if ((desiredVerticalSpeed > 0) && (VesselState.altitudeTrue <= NEAR_GROUND_AGL_M) && !_minSnapActive)
                 {
                     accel = up * Math.Max(0, Vector3d.Dot(accel, up));
                     horizontalAvg = Vector3d.zero;
@@ -1235,6 +1255,8 @@ velocityPID.AntiWindup(rawAccel, accel);
                         throttle = (float)thrCapAp;
                 }
                 Core.Thrust.RequestActiveThrottle(throttle);
+                double avLog = Vector3d.Dot(accel, up);
+                LogMinSnapTrack(avLog, (accel - up * avLog).magnitude, throttle);
 
                 Vector3d vPart = Vector3d.Dot(desiredThrustVector, up) * up;
                 Vector3d hPart = desiredThrustVector - vPart;
@@ -1631,6 +1653,8 @@ velocityPID.AntiWindup(rawAccel, accel);
                 double divisor = (hTargetError > hMidLimit) ? divFar : (hTargetError > hCloseLimit) ? divMid : divClose;  // 100-200-400(pol)<=(baseline2-gilly)2-20-30<=(baseline1)2-50-90
                 double _hCorrectionUpAngle;
                 double maxHThrust = Math.Min(LOW_GRAVITY_THRUST_MAX * Core.Landing.g, limitedMaxThrustAccel);
+                SampleHorizontalMotion();
+                _minSnapActive = false; // set again by TryMinSnapCommand on ticks where MinSnap owns horizontal
 
                 // Scale divisor based on local gravity and cap the values.
                 // 2 <= 1.0 (slight flipping) <= 0.5 (lots of flipping) <= 2.0  ? Divisor is bigger for larger gravity - not sure this is right
@@ -1731,12 +1755,21 @@ velocityPID.AntiWindup(rawAccel, accel);
                         }
                     }
 
+                    // Minimum-snap final approach: inside FinalApproachActivationDistance MinSnap has sole horizontal
+                    // authority all the way to touchdown (no hand-over to the near-pad chase / settle below). Its
+                    // velocity command is used for the frame and logs; setThrustVector takes _minSnapAccelCmd.
+                    if (TryMinSnapCommand(hTargetError, maxHThrust, courseCorrection, out Vector3d minSnapVel))
+                    {
+                        desiredHorizontalVel = minSnapVel;
+                        herror = desiredHorizontalVel - hSurfaceVelocity;
+                    }
+
                     // Near-pad (<0.80 m): aggressive chase still useful down to ~200 mm, then
                     // blend into final settle. Under ~200 mm the sqrt pad-chase desired H vel
                     // overcompensates through the unified 3D PID + debug93 cone (lean angles
                     // when H should already be ~0). Settle: no pad-chase velocity; only damp
                     // residual horizontal surface speed. Blend so it does not cliff at 0.2 m.
-                    if (hTargetError < NEAR_PAD_AGGRESSIVE_M)
+                    else if (hTargetError < NEAR_PAD_AGGRESSIVE_M)
                     {
                         double hForSqrt = Math.Max(hTargetError, TINY_DIVISOR);
                         Vector3d aggressiveDesired = (Math.Sqrt((1 + Core.Landing.g) * hForSqrt * maxHThrust / divisor) * 2.0 / PAD_CHASE_SPEED_DIV) * courseCorrection.normalized;
@@ -1790,6 +1823,191 @@ velocityPID.AntiWindup(rawAccel, accel);
 
                 // Calculate horizontal correction angle using horizontal herror.
                 return Math.Max(0, Math.Min(_hCorrectionUpAngle, baseGain * H_CORRECTION_ANGLE_CONSTANT * herror.magnitude));
+            }
+
+            // ---- Minimum-snap final horizontal approach (MinSnapProfile; settings on Core.Landing) ----
+            // Inside the window MinSnap has SOLE horizontal authority (Ricardo's rule): setThrustVector takes its
+            // horizontal accel (_minSnapAccelCmd) instead of the scheduled H PID / lateral axis, and the frame
+            // freeze, settle fade, 0.80 m cone fade and initial-ascent H strip are skipped while _minSnapActive.
+            // Retained craft-safety limits: debug93 upright tilt cone, total-thrust saturation, collision-hop
+            // blend (suppressed within NEAR_LANDING_SITE_M anyway) and Drive()'s throttle cut on attitude error.
+            // A plan is latched when the craft enters FinalApproachActivationDistance and dropped when it leaves
+            // it by more than FINAL_APPROACH_UNLATCH_MARGIN_M (no re-latch chatter at the boundary).
+            private const double FINAL_APPROACH_UNLATCH_MARGIN_M = 10.0; // m beyond activation before the latch is dropped
+            private const double MOTION_FILTER_TAU_S = 0.3;        // s, low-pass on per-tick accel / jerk estimates
+            private const double MOTION_STALE_S = 1.0;             // s without a sample before the estimator restarts
+            private const int MOTION_MIN_SAMPLES = 3;              // samples before accel / jerk are trusted; latch waits for them
+            private const double MINSNAP_MIN_REPLAN_HORIZON_S = 2.0; // s; inside this the last plan is held to its end
+            private const double MINSNAP_MIN_REPLAN_HZ = 0.1;      // Hz floor so a bad cfg value cannot stop re-planning
+            private const double MINSNAP_MIN_LEAD_S = 0.1;         // s floor on MinSnapLeadTime (it divides the velocity error)
+            private const double MINSNAP_TRACK_LOG_INTERVAL_S = 0.2; // s between '[MinSnap] trk' lines
+            private MinSnapProfile _minSnapPlan;
+            private double _minSnapPlanUt;                          // UT of the plan's t = 0
+            private double _minSnapNextPlanUt = double.NegativeInfinity;
+            private double _lastMinSnapLogUt = double.NegativeInfinity;
+            private double _lastMinSnapInfeasibleLogUt = double.NegativeInfinity;
+            private double _lastMinSnapTrackLogUt = double.NegativeInfinity;
+            private bool _minSnapActive;          // true on ticks where MinSnap owns horizontal control
+            private Vector3d _minSnapAccelCmd;    // world horizontal accel command (m/s^2) for setThrustVector
+            private Vector3d _minSnapVelCmd;      // last commanded horizontal velocity (for the trk log)
+            private Vector3d _minSnapRPlan;       // last planned position relative to the pad (trk log)
+            private Vector3d _minSnapRMeas;       // last measured position relative to the pad (trk log)
+            private double _minSnapPlanT;         // time into the current plan (trk log)
+            private double _motionPrevUt = double.NaN;
+            private Vector3d _motionPrevVel;
+            private Vector3d _motionAccel;        // filtered horizontal accel (m/s^2, per physics tick)
+            private Vector3d _motionPrevAccel;
+            private Vector3d _motionJerk;         // filtered derivative of _motionAccel (m/s^3)
+            private int _motionSamples;
+
+            /// <summary>
+            /// Estimates the horizontal acceleration and jerk vectors every physics tick (first-order low-pass of the
+            /// finite differences of the horizontal surface velocity). The latch seeds from these so the braking still
+            /// in progress at the LandingBurn handoff (about -0.5 m/s^2) is captured. The estimator restarts on a new
+            /// step instance or after MOTION_STALE_S without samples; the latch waits MOTION_MIN_SAMPLES ticks
+            /// (~0.06 s) for it instead of seeding zeros.
+            /// </summary>
+            private void SampleHorizontalMotion()
+            {
+                Vector3d vel = HorizontalSurfaceVelocity;
+                double now = VesselState.time;
+                double dt = now - _motionPrevUt;
+                if (double.IsNaN(_motionPrevUt) || dt > MOTION_STALE_S)
+                {
+                    _motionPrevUt = now; _motionPrevVel = vel;
+                    _motionAccel = Vector3d.zero; _motionPrevAccel = Vector3d.zero; _motionJerk = Vector3d.zero;
+                    _motionSamples = 0;
+                    return;
+                }
+                if (dt <= 0)
+                    return;
+                double alpha = dt / (MOTION_FILTER_TAU_S + dt);
+                Vector3d rawAccel = (vel - _motionPrevVel) * (1.0 / dt);
+                _motionAccel = _motionSamples == 0 ? rawAccel : _motionAccel + (rawAccel - _motionAccel) * alpha;
+                if (_motionSamples > 0)
+                    _motionJerk += ((_motionAccel - _motionPrevAccel) * (1.0 / dt) - _motionJerk) * alpha;
+                _motionPrevAccel = _motionAccel;
+                _motionPrevUt = now; _motionPrevVel = vel;
+                _motionSamples++;
+            }
+
+            /// <summary>Drops the MinSnap plan; the H/L PID restarts clean (integrals, D history) if it was latched.</summary>
+            private void DropMinSnap()
+            {
+                if (_minSnapPlan != null)
+                    velocityPID.InvalidateHorizontal();
+                _minSnapPlan = null;
+                _minSnapNextPlanUt = double.NegativeInfinity;
+            }
+
+            /// <summary>
+            /// MinSnap horizontal command for this tick. Returns false (legacy law runs) when disabled, outside the
+            /// activation distance, or before a feasible plan exists. Otherwise sets velCmd (world horizontal) and
+            /// _minSnapAccelCmd and marks the tick as MinSnap-owned:
+            ///   velCmd = v_plan(t) + a_plan(t)*MinSnapLeadTime + MinSnapPositionGain*(r_plan(t) - r_meas)
+            ///   accel  = (velCmd - v_meas) / MinSnapLeadTime, capped at min(MinSnapMaxAccel, maxHThrust)
+            /// The velocity-loop time constant equals the lead time, so on-plan the accel command is exactly
+            /// a_plan (the lead cancels the loop lag). After T the plan terms are zero: hold over the pad with the
+            /// position term. Re-plans every 1/MinSnapReplanHz s from measured r, v and the plan's own a, j; an
+            /// infeasible re-plan keeps the current plan and logs '[MinSnap] infeasible' (1/s).
+            /// towardPad is the horizontal direction to the pad (targetingResult), hTargetError its distance.
+            /// </summary>
+            private bool TryMinSnapCommand(double hTargetError, double maxHThrust, Vector3d towardPad, out Vector3d velCmd)
+            {
+                velCmd = Vector3d.zero;
+                var landing = Core.Landing;
+                if (!landing.MinSnapEnabled || hTargetError > landing.FinalApproachActivationDistance + FINAL_APPROACH_UNLATCH_MARGIN_M)
+                {
+                    DropMinSnap();
+                    return false;
+                }
+                double now = VesselState.time;
+                Vector3d up = VesselState.up;
+                Vector3d dirToPad = Vector3d.Exclude(up, towardPad);
+                Vector3d rMeas = dirToPad.sqrMagnitude > VEC_SQR_EPS ? dirToPad.normalized * -hTargetError : Vector3d.zero;
+                Vector3d vMeas = HorizontalSurfaceVelocity;
+                double accelCap = Math.Min((double)landing.MinSnapMaxAccel, maxHThrust);
+                var lim = new MinSnapProfile.Limits
+                {
+                    MaxAccel = accelCap,
+                    Jerk = landing.FinalApproachJerkLimit,
+                    Snap = landing.MinSnapSnapLimit
+                };
+                if (_minSnapPlan == null)
+                {
+                    if (hTargetError > landing.FinalApproachActivationDistance || _motionSamples < MOTION_MIN_SAMPLES
+                        || now < _minSnapNextPlanUt)
+                        return false;
+                    _minSnapNextPlanUt = now + ReplanPeriod(landing);
+                    MinSnapProfile plan = MinSnapProfile.TryCreate(rMeas, vMeas, _motionAccel, _motionJerk, lim);
+                    if (plan == null)
+                    {
+                        if (RateLimit(ref _lastMinSnapLogUt, now, DEFAULT_LOG_INTERVAL_S))
+                            Debug.Log("[MinSnap] no profile |r|=" + rMeas.magnitude.ToString("F2") + " |v|=" + vMeas.magnitude.ToString("F3")
+                                + " |a|=" + _motionAccel.magnitude.ToString("F3") + " |j|=" + _motionJerk.magnitude.ToString("F3"));
+                        return false;
+                    }
+                    velocityPID.InvalidateHorizontal(); // MinSnap takes over: no stale H/L PID state on exit
+                    AcceptMinSnapPlan(plan, now, "latch");
+                }
+                else if (now >= _minSnapNextPlanUt)
+                {
+                    _minSnapNextPlanUt = now + ReplanPeriod(landing);
+                    double tp = now - _minSnapPlanUt;
+                    double remaining = _minSnapPlan.T - tp;
+                    if (remaining > MINSNAP_MIN_REPLAN_HORIZON_S)
+                    {
+                        Vector3d aSeed = _minSnapPlan.Eval(tp, MinSnapProfile.ACCELERATION);
+                        Vector3d jSeed = _minSnapPlan.Eval(tp, MinSnapProfile.JERK);
+                        string kind = "replan";
+                        MinSnapProfile plan = MinSnapProfile.TryFit(rMeas, vMeas, aSeed, jSeed, remaining, lim);
+                        if (plan == null)
+                        {
+                            kind = "research";
+                            plan = MinSnapProfile.TryCreate(rMeas, vMeas, aSeed, jSeed, lim);
+                        }
+                        if (plan != null)
+                            AcceptMinSnapPlan(plan, now, kind);
+                        else if (RateLimit(ref _lastMinSnapInfeasibleLogUt, now, DEFAULT_LOG_INTERVAL_S))
+                            Debug.Log("[MinSnap] infeasible t=" + tp.ToString("F2") + " |r|=" + rMeas.magnitude.ToString("F2")
+                                + " |v|=" + vMeas.magnitude.ToString("F3") + " remaining=" + remaining.ToString("F2") + " (keeping plan)");
+                    }
+                }
+                double t = now - _minSnapPlanUt;
+                Vector3d rPlan = Vector3d.Exclude(up, _minSnapPlan.Eval(t, MinSnapProfile.POSITION));
+                Vector3d vPlan = Vector3d.Exclude(up, _minSnapPlan.Eval(t, MinSnapProfile.VELOCITY));
+                Vector3d aPlan = Vector3d.Exclude(up, _minSnapPlan.Eval(t, MinSnapProfile.ACCELERATION));
+                double lead = Math.Max(MINSNAP_MIN_LEAD_S, (double)landing.MinSnapLeadTime);
+                velCmd = vPlan + aPlan * lead + (rPlan - rMeas) * (double)landing.MinSnapPositionGain;
+                _minSnapAccelCmd = MinSnapProfile.ClampLength((velCmd - vMeas) * (1.0 / lead), accelCap);
+                _minSnapVelCmd = velCmd; _minSnapRPlan = rPlan; _minSnapRMeas = rMeas; _minSnapPlanT = t;
+                _minSnapActive = true;
+                return true;
+            }
+
+            private static double ReplanPeriod(MechJebModuleLandingAutopilot landing) =>
+                1.0 / Math.Max(MINSNAP_MIN_REPLAN_HZ, (double)landing.MinSnapReplanHz);
+
+            private void AcceptMinSnapPlan(MinSnapProfile plan, double now, string kind)
+            {
+                _minSnapPlan = plan;
+                _minSnapPlanUt = now;
+                Debug.Log("[MinSnap] plan " + kind + " |r0|=" + plan.R0.magnitude.ToString("F2") + " |v0|=" + plan.V0.magnitude.ToString("F3")
+                    + " |a0|=" + plan.A0.magnitude.ToString("F3") + " |j0|=" + plan.J0.magnitude.ToString("F3") + " T=" + plan.T.ToString("F2")
+                    + " peakA=" + plan.PeakAccel.ToString("F3") + " peakJ=" + plan.PeakJerk.ToString("F3")
+                    + " peakS=" + plan.PeakSnap.ToString("F3"));
+            }
+
+            /// <summary>'[MinSnap] trk' line every MINSNAP_TRACK_LOG_INTERVAL_S while MinSnap owns the tick.</summary>
+            private void LogMinSnapTrack(double aV, double aH, float throttle)
+            {
+                if (!_minSnapActive || !RateLimit(ref _lastMinSnapTrackLogUt, VesselState.time, MINSNAP_TRACK_LOG_INTERVAL_S))
+                    return;
+                Debug.Log("[MinSnap] trk t=" + _minSnapPlanT.ToString("F2") + " vcmd=" + _minSnapVelCmd.magnitude.ToString("F3")
+                    + " vmeas=" + HorizontalSurfaceVelocity.magnitude.ToString("F3") + " rplan=" + _minSnapRPlan.magnitude.ToString("F2")
+                    + " rmeas=" + _minSnapRMeas.magnitude.ToString("F2") + " err=" + (_minSnapRPlan - _minSnapRMeas).magnitude.ToString("F3")
+                    + " aH=" + aH.ToString("F3") + " aV=" + aV.ToString("F3") + " atterr=" + attitudeAngleFromThrust.ToString("F1")
+                    + " thr=" + throttle.ToString("F3"));
             }
 
             public void setSubOrbitalHorizontal(ref Vector3d desiredHorizontalVel, ref Vector3d herror)
