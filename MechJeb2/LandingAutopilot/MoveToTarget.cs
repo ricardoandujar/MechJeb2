@@ -1907,6 +1907,16 @@ velocityPID.AntiWindup(rawAccel, accel);
             private double _lastMinSnapInfeasibleLogUt = double.NegativeInfinity;
             private double _lastMinSnapTrackLogUt = double.NegativeInfinity;
             private bool _minSnapActive;          // true on ticks where MinSnap owns horizontal control
+            // Pre-latch hold (Fix C). Why: inside the activation window MinSnap has sole horizontal authority, but until a
+            // plan latches the legacy pad-chase H PID still ran. 115602: after the LandingBurn handoff the craft was still
+            // braking at 1.3-3.4 m/s^2 (seed clamped to MinSnapMaxAccel -> no feasible plan), no profile was found for 4 s,
+            // and that PID dumped vH 5.2 -> 2.5 m/s (peaks |a| 1.0, |j| 0.5). How: while enabled, inside the window and
+            // unlatched, TryMinSnapCommand holds horizontal (zero accel command, MinSnap-owned path in setThrustVector)
+            // and retries TryCreate every tick (no replan timer) until it latches. The counters feed the start/end logs.
+            private bool _minSnapHoldLogged;      // '[MinSnap] pre-latch hold start' logged for this hold
+            private int _minSnapHoldTicks;        // ticks spent holding since the hold started
+            private int _minSnapHoldAttempts;     // TryCreate attempts since the hold started
+            private double _minSnapHoldStartUt;   // UT the hold started
             private Vector3d _minSnapAccelCmd;    // world horizontal accel command (m/s^2) for setThrustVector
             private Vector3d _minSnapVelCmd;      // last commanded horizontal velocity (for the trk log)
             private Vector3d _minSnapRPlan;       // last planned position relative to the pad (trk log)
@@ -1957,6 +1967,37 @@ velocityPID.AntiWindup(rawAccel, accel);
                     velocityPID.InvalidateHorizontal();
                 _minSnapPlan = null;
                 _minSnapNextPlanUt = double.NegativeInfinity;
+                EndPreLatchHold("dropped (left window / disabled)");
+            }
+
+            /// <summary>
+            /// Ends a pre-latch hold: logs the outcome once with the tick and attempt counts, then clears the counters.
+            /// No-op when no hold is in progress. reason is 'latched' on success, else why the hold ended without a plan.
+            /// </summary>
+            private void EndPreLatchHold(string reason)
+            {
+                if (!_minSnapHoldLogged)
+                    return;
+                Debug.Log("[MinSnap] pre-latch hold end: " + reason + " ticks=" + _minSnapHoldTicks + " attempts=" + _minSnapHoldAttempts
+                    + " elapsed=" + (VesselState.time - _minSnapHoldStartUt).ToString("F2") + "s");
+                _minSnapHoldLogged = false;
+                _minSnapHoldTicks = 0;
+                _minSnapHoldAttempts = 0;
+            }
+
+            /// <summary>
+            /// Pre-latch hold command: no horizontal acceleration (zero accel command, which setThrustVector applies on its
+            /// MinSnap-owned path while _minSnapActive: H/L errors zeroed, no frame freeze / settle fade) and a desired
+            /// horizontal velocity equal to the measured one, so the legacy pad-chase branches in setHorizontalSpeed are
+            /// skipped and the landing frame follows the direction of travel. Always returns true (MinSnap owns the tick).
+            /// </summary>
+            private bool HoldHorizontalPreLatch(out Vector3d velCmd)
+            {
+                velCmd = HorizontalSurfaceVelocity;
+                _minSnapAccelCmd = Vector3d.zero;
+                _minSnapActive = true;
+                _minSnapHoldTicks++;
+                return true;
             }
 
             /// <summary>
@@ -1994,20 +2035,38 @@ velocityPID.AntiWindup(rawAccel, accel);
                 };
                 if (_minSnapPlan == null)
                 {
-                    if (hTargetError > landing.FinalApproachActivationDistance || _motionSamples < MOTION_MIN_SAMPLES
-                        || now < _minSnapNextPlanUt)
+                    // Outside the activation window the legacy law runs, unchanged (and no hold is in progress).
+                    if (hTargetError > landing.FinalApproachActivationDistance)
+                    {
+                        EndPreLatchHold("left window without a plan");
                         return false;
-                    _minSnapNextPlanUt = now + ReplanPeriod(landing);
+                    }
+                    if (!_minSnapHoldLogged)
+                    {
+                        _minSnapHoldLogged = true;
+                        _minSnapHoldStartUt = now;
+                        Debug.Log("[MinSnap] pre-latch hold start |r|=" + rMeas.magnitude.ToString("F2") + " |v|=" + vMeas.magnitude.ToString("F3")
+                            + " |a|=" + _motionAccel.magnitude.ToString("F3") + " |j|=" + _motionJerk.magnitude.ToString("F3")
+                            + " (horizontal held, TryCreate retried every tick)");
+                    }
+                    // The estimator needs MOTION_MIN_SAMPLES ticks before its a / j seed is trusted: hold meanwhile.
+                    if (_motionSamples < MOTION_MIN_SAMPLES)
+                        return HoldHorizontalPreLatch(out velCmd);
+                    // No replan timer before the first latch: a failed TryCreate is retried on the very next tick.
+                    _minSnapHoldAttempts++;
                     MinSnapProfile plan = MinSnapProfile.TryCreate(rMeas, vMeas, _motionAccel, _motionJerk, lim);
                     if (plan == null)
                     {
                         if (RateLimit(ref _lastMinSnapLogUt, now, DEFAULT_LOG_INTERVAL_S))
                             Debug.Log("[MinSnap] no profile |r|=" + rMeas.magnitude.ToString("F2") + " |v|=" + vMeas.magnitude.ToString("F3")
-                                + " |a|=" + _motionAccel.magnitude.ToString("F3") + " |j|=" + _motionJerk.magnitude.ToString("F3"));
-                        return false;
+                                + " |a|=" + _motionAccel.magnitude.ToString("F3") + " |j|=" + _motionJerk.magnitude.ToString("F3")
+                                + " attempts=" + _minSnapHoldAttempts + " (holding, retry next tick)");
+                        return HoldHorizontalPreLatch(out velCmd);
                     }
                     velocityPID.InvalidateHorizontal(); // MinSnap takes over: no stale H/L PID state on exit
+                    _minSnapNextPlanUt = now + ReplanPeriod(landing); // normal replan period applies from the latch on
                     AcceptMinSnapPlan(plan, now, "latch");
+                    EndPreLatchHold("latched");
                 }
                 else if (now >= _minSnapNextPlanUt)
                 {
@@ -2060,7 +2119,7 @@ velocityPID.AntiWindup(rawAccel, accel);
             /// <summary>'[MinSnap] trk' line every MINSNAP_TRACK_LOG_INTERVAL_S while MinSnap owns the tick.</summary>
             private void LogMinSnapTrack(double aV, double aH, float throttle)
             {
-                if (!_minSnapActive || !RateLimit(ref _lastMinSnapTrackLogUt, VesselState.time, MINSNAP_TRACK_LOG_INTERVAL_S))
+                if (!_minSnapActive || _minSnapPlan == null || !RateLimit(ref _lastMinSnapTrackLogUt, VesselState.time, MINSNAP_TRACK_LOG_INTERVAL_S))
                     return;
                 Debug.Log("[MinSnap] trk t=" + _minSnapPlanT.ToString("F2") + " vcmd=" + _minSnapVelCmd.magnitude.ToString("F3")
                     + " vmeas=" + HorizontalSurfaceVelocity.magnitude.ToString("F3") + " rplan=" + _minSnapRPlan.magnitude.ToString("F2")
